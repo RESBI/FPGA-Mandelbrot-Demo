@@ -413,14 +413,14 @@ At 500000 baud, the UART ceiling is approximately:
 
 Measured current 4-core examples:
 
-| Case | FPGA Time | Throughput |
-|---|---:|---:|
-| `160x120 @ 256`, standard | `0.902s` | `21292.23 pps` |
-| `1920x1080 @ 64`, standard | `83.501s` | `24833.32 pps` |
-| `1920x1080 @ 512`, Seahorse zoom | `83.956s` | `24698.58 pps` |
-| `1920x1080 @ 8192`, deep tendrils | `93.960s` | `22068.99 pps` |
-| `1920x1080 @ 8192`, Mini-brot | `234.261s` | `8851.67 pps` |
-| `1920x1080 @ 1024`, deep Seahorse | `103.032s` | `20125.73 pps` |
+| Case | Center | Step | Max Iter | FPGA Time | Throughput |
+|---|---|---:|---:|---:|---:|
+| `160x120`, standard | `(-0.5, 0.0)` | `0.005` | `256` | `0.902s` | `21292.23 pps` |
+| `1920x1080`, standard | `(-0.5, 0.0)` | `0.002` | `64` | `83.501s` | `24833.32 pps` |
+| `1920x1080`, Seahorse zoom | `(-0.743643887037151, 0.13182590420533)` | `5e-6` | `512` | `83.956s` | `24698.58 pps` |
+| `1920x1080`, deep tendrils | `(-0.77568377, 0.13646737)` | `1e-9` | `8192` | `93.960s` | `22068.99 pps` |
+| `1920x1080`, Mini-brot | `(-1.25066, 0.02012)` | `1e-9` | `8192` | `234.261s` | `8851.67 pps` |
+| `1920x1080`, deep Seahorse | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` | `103.032s` | `20125.73 pps` |
 
 Fast scenes are UART-limited. Deep zoom/high-iteration scenes benefit from 4 cores until aggregate compute throughput approaches the UART ceiling.
 
