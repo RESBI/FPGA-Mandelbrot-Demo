@@ -188,6 +188,30 @@ Algorithm summary:
 7. Normalize based on the product MSB.
 8. Register final output.
 
+Detailed multiplier pipeline:
+
+```mermaid
+flowchart LR
+    IN[Input a,b] --> R0[Stage M0\ninput registers\na_r,b_r]
+    R0 --> D0[Stage M1 comb\ndecode sign/exp/man\nzero detect]
+    D0 --> R1[Stage M1 reg\nfull_man_a_r/full_man_b_r\nresult_sign_man_r\nexp_sum_man_r\nzero flags]
+    R1 --> DSP[Stage M2 comb\nFP64 53x53 mantissa multiply\nDSP48E1 cascade]
+    DSP --> R2[Stage M2 reg\nman_product_dsp_r\nmetadata delay]
+    R2 --> R3[Stage M3 reg\nproduct + sign/exp/zero aligned]
+    R3 --> NORM[Stage M4 comb\nnormalize product\nadjust exponent\nzero/overflow handling]
+    NORM --> OUT[Stage M4 reg\nproduct output]
+```
+
+Pipeline intent:
+
+| Stage | Main registers | Purpose |
+|---|---|---|
+| M0 | `a_r`, `b_r` | Isolate caller routing from FP decode. |
+| M1 | decoded mantissas and metadata | Remove zero mux and sign/exponent decode from DSP input path. |
+| M2 | `man_product_dsp_r` | Register DSP cascade output. |
+| M3 | product/metadata alignment registers | Align delayed sign/exponent/zero flags with product. |
+| M4 | `product` | Normalize and publish final FP value. |
+
 The multiplier includes input, decoded-mantissa, DSP-product, and metadata registers to improve timing. The decoded-mantissa stage removes zero mux and exponent/sign decode logic from the DSP input path. The multiplication is annotated with:
 
 ```verilog
@@ -225,6 +249,31 @@ Algorithm summary:
 7. Normalize the mantissa.
 8. Adjust exponent.
 9. Register output.
+
+Detailed adder/subtractor pipeline:
+
+```mermaid
+flowchart LR
+    IN[Input a,b] --> R0[Stage A0\ninput registers\na_r,b_r]
+    R0 --> D0[Stage A1 comb\ndecode sign/exp/man\nzero detect\ncompare magnitude]
+    D0 --> R1[Stage A1 reg\nlarge/small mantissas\nexp_large,diff\nsigns,zero flags]
+    R1 --> ALIGN[Stage A2 comb\nright shift small mantissa\nadd/sub aligned mantissas]
+    ALIGN --> R2[Stage A2 reg\nman_result_r\nexp/sign/zero/input bypass]
+    R2 --> LZ[Stage A3 comb\nleading-zero scan\nnormalize mantissa\nadjust exponent]
+    LZ --> R3[Stage A3 reg\nman_final_r\nexp_final_r\nsign_final_r\nzero/bypass flags]
+    R3 --> OF[Stage A4 comb\noverflow test\nfinal mux]
+    OF --> OUT[Stage A4 reg\nsum output]
+```
+
+Pipeline intent:
+
+| Stage | Main registers | Purpose |
+|---|---|---|
+| A0 | `a_r`, `b_r` | Isolate caller routing and provide stable decode inputs. |
+| A1 | `man_large_s1`, `man_small_s1`, `exp_large_s1`, `diff_s1` | Cut decode/compare/select away from alignment and add/sub. |
+| A2 | `man_result_r`, `exp_large_r`, `sign_large_r` | Register add/sub result before normalization. |
+| A3 | `man_final_r`, `exp_final_r`, `sign_final_r` | Register normalized result before overflow/final mux. |
+| A4 | `sum` | Publish zero bypass, overflow-zero, or normal FP result. |
 
 Important fixes already made in this design:
 
@@ -272,6 +321,27 @@ after row: c_im -= step
 
 The software reference intentionally mirrors this integer-center behavior. This avoids false mismatches versus a conventional floating-centered renderer.
 
+Worker coordinate initialization pipeline:
+
+```mermaid
+flowchart TB
+    START[compute_start + image parameters] --> HW[Compute half_w\n(cols - 1) >> 1]
+    HW --> MW[Issue half_w * step\nfp_mul]
+    MW --> RE0[Issue center_re - half_w_step\nfp_add]
+    RE0 --> CRE[c_re_start ready]
+    CRE --> HH[Compute half_h\n(rows - 1) >> 1]
+    HH --> MH[Issue half_h * step\nfp_mul]
+    MH --> IMTOP[Issue center_im + half_h_step\nfp_add]
+    IMTOP --> CIMTOP[c_im_top ready]
+    CIMTOP --> RS[Issue row_stride * step\nfp_mul]
+    RS --> ROWSTEP[row_step ready]
+    ROWSTEP --> RSOFF[Issue row_start * step\nfp_mul]
+    RSOFF --> RSUB[Issue c_im_top - row_start_step\nfp_add]
+    RSUB --> FIRSTROW[first worker row c_im ready]
+```
+
+For the current 4-core static scheduler, `row_stride=4` for every worker and `row_start` is the worker ID. This lets each worker advance from row `y` to row `y+4` with one precomputed FP decrement.
+
 ### 8.2 4-Core Row Scheduling
 
 The current multi-core scheduler uses static interleaved rows:
@@ -287,6 +357,23 @@ This is implemented by `work_dispatch_static_rows.v`. The worker receives `row_s
 
 The scheduler is intentionally modular. Future dynamic tile scheduling or out-of-order row dispatch should replace `work_dispatch_static_rows.v` and the matching merger without changing the UART command parser or the worker arithmetic datapath.
 
+Static dispatch structure:
+
+```mermaid
+flowchart LR
+    PARAM[Image parameters\ncenter, step, rows, cols, max_iter] --> DISP[work_dispatch_static_rows]
+    DISP -->|start,row_start=0,row_stride=4| C0[worker 0]
+    DISP -->|start,row_start=1,row_stride=4| C1[worker 1]
+    DISP -->|start,row_start=2,row_stride=4| C2[worker 2]
+    DISP -->|start,row_start=3,row_stride=4| C3[worker 3]
+
+    subgraph ReplaceableBoundary[Replaceable scheduling boundary]
+        DISP
+    end
+```
+
+Dispatch is combinational for the current policy: every worker receives the same render parameters and a different row-start value. This keeps scheduler timing shallow and makes the future replacement point explicit.
+
 ### 8.3 Raster Merge
 
 The unchanged host protocol expects pixels in row-major order with no row or tile IDs. `raster_merge_static_rows.v` preserves that contract in hardware.
@@ -298,6 +385,35 @@ source_core = y % 4
 ```
 
 The merger waits until the selected core FIFO has data, reads one pixel, waits one synchronous FIFO read cycle, and writes the pixel into the shared output FIFO. This keeps the host protocol unchanged while allowing workers to run independently behind per-core FIFOs.
+
+Raster merge pipeline:
+
+```mermaid
+flowchart TB
+    POS[Current output position\nrow,col,pixels_written] --> SEL[Select source_core = row % 4]
+    SEL --> WAIT{Selected core FIFO has data\nand output FIFO not full?}
+    WAIT -->|no| SEL
+    WAIT -->|yes| RD[Assert selected core_fifo_rd]
+    RD --> RWAIT[Wait one cycle\nsynchronous FIFO data valid]
+    RWAIT --> WR[Write fifo_data to shared output FIFO]
+    WR --> ADV[Advance col; wrap to next row]
+    ADV --> DONE{all pixels emitted?}
+    DONE -->|no| POS
+    DONE -->|yes| FRAME_DONE[merge done]
+```
+
+Merger state machine:
+
+```mermaid
+stateDiagram-v2
+    [*] --> S_IDLE
+    S_IDLE --> S_WAIT: start
+    S_WAIT --> S_READ_WAIT: selected FIFO ready\nand output FIFO not full
+    S_READ_WAIT --> S_WRITE: read data valid
+    S_WRITE --> S_WAIT: more pixels
+    S_WRITE --> S_DONE: last pixel
+    S_DONE --> S_IDLE
+```
 
 ### 8.4 Per-Pixel FSM Pipeline
 
@@ -346,6 +462,46 @@ S_ITER_INC
   else issue next z_re * z_re
 ```
 
+Per-iteration issue/capture pipeline view:
+
+```mermaid
+flowchart LR
+    I0[S_ITER_START\nissue z_re*z_re] --> W0[wait PIPE_WAIT]
+    W0 --> I1[S_MUL_ZRSQ_CAPT\ncapture z_re_sq\nissue z_im*z_im]
+    I1 --> W1[wait PIPE_WAIT]
+    W1 --> I2[S_MUL_ZISQ_CAPT\ncapture z_im_sq\nissue z_re*z_im\nissue z_re_sq+z_im_sq]
+    I2 --> W2[wait PIPE_WAIT]
+    W2 --> I3[S_MUL_ZRZI_CAPT\ncapture z_re_z_im\ncheck escape]
+    I3 -->|escaped| OUT[output iter]
+    I3 -->|not escaped| I4[issue z_re_sq-z_im_sq]
+    I4 --> W3[wait PIPE_WAIT]
+    W3 --> I5[S_SUB_RE_CAPT\nissue diff+c_re]
+    I5 --> W4[wait PIPE_WAIT]
+    W4 --> I6[S_ADD_NEXTRE_CAPT\ncapture z_re_next\nissue z_re_z_im+z_re_z_im]
+    I6 --> W5[wait PIPE_WAIT]
+    W5 --> I7[S_ADD_2X_CAPT\nissue 2*z_re*z_im+c_im]
+    I7 --> W6[wait PIPE_WAIT]
+    W6 --> I8[S_ADD_NEXTIM_CAPT\ncapture z_im_next\niter++]
+    I8 --> I9[S_ITER_INC]
+    I9 -->|iter < max_iter| I0
+    I9 -->|iter >= max_iter| OUT
+```
+
+Operation schedule per non-escaping iteration:
+
+| FSM point | Multiplier action | Adder action | Captured value |
+|---|---|---|---|
+| `S_ITER_START` | `z_re * z_re` | none | none |
+| `S_MUL_ZRSQ_CAPT` | `z_im * z_im` | none | `z_re_sq` |
+| `S_MUL_ZISQ_CAPT` | `z_re * z_im` | `z_re_sq + z_im_sq` | `z_im_sq` |
+| `S_MUL_ZRZI_CAPT` | none | conditional escape decision | `z_re_z_im` |
+| `S_SUB_RE_CAPT` | none | `(z_re_sq - z_im_sq) + c_re` is prepared over two add waits | difference path |
+| `S_ADD_NEXTRE_CAPT` | none | `z_re_z_im + z_re_z_im` | `z_re_next` |
+| `S_ADD_2X_CAPT` | none | `2*z_re*z_im + c_im` | doubled product path |
+| `S_ADD_NEXTIM_CAPT` | none | none | `z_im_next` |
+
+The FSM is latency-tolerant rather than throughput-pipelined across pixels: a worker completes one pixel iteration sequence before advancing that worker's pixel. Parallelism comes from four independent workers, not from overlapping multiple pixels inside one worker.
+
 ### 8.5 Escape Check
 
 Escape is detected with:
@@ -368,6 +524,26 @@ When a pixel is complete, a worker waits until its per-core FIFO is not full, wr
 
 The top-level output FIFO has 1024 entries of 16-bit data. Each worker also has a per-core FIFO. The system is still fundamentally streaming and will backpressure workers when UART is the bottleneck or when strict raster ordering waits for an earlier row.
 
+Output buffering and backpressure path:
+
+```mermaid
+flowchart LR
+    W[worker pixel complete] --> CFULL{per-core FIFO full?}
+    CFULL -->|yes| WSTALL[stall worker output state]
+    CFULL -->|no| CWR[write per-core FIFO]
+    CWR --> MERGE[raster merger]
+    MERGE --> OFULL{shared output FIFO full?}
+    OFULL -->|yes| MSTALL[stall merger]
+    OFULL -->|no| OWR[write shared output FIFO]
+    OWR --> TXC[tx_ctrl reads FIFO]
+    TXC --> UART[UART TX]
+
+    MSTALL -. backpressure .-> MERGE
+    WSTALL -. backpressure .-> W
+```
+
+Because `queue.v` has synchronous read data, both the raster merger and `tx_ctrl` use a read-wait style: assert read enable, wait one clock for `data_out` to become valid, then consume the value.
+
 ## 9. UART Design
 
 UART is 8N1, no parity, no flow control.
@@ -383,6 +559,31 @@ error = 0.0000%
 `uart_rx.v` synchronizes the asynchronous RX input with two flip-flops, detects the falling start edge, waits half a bit, then samples each data bit every `CLOCKS_PER_BIT` clocks. The current implementation uses `CLOCKS_PER_BIT - 1` comparisons to avoid off-by-one bit timing drift.
 
 `uart_tx.v` serializes one start bit, eight data bits, and one stop bit. `transmit_avail` acts as a ready signal for `tx_ctrl`.
+
+UART receive pipeline:
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> START_CENTER: falling edge on synchronized rx
+    START_CENTER --> DATA_BITS: half-bit wait confirms start bit center
+    DATA_BITS --> DATA_BITS: sample bit0..bit7 every CLOCKS_PER_BIT
+    DATA_BITS --> STOP_BIT: 8 data bits captured
+    STOP_BIT --> BYTE_READY: stop bit interval complete
+    BYTE_READY --> IDLE: rx_avail pulse
+```
+
+UART transmit pipeline:
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> START_BIT: transmit asserted\nand byte accepted
+    START_BIT --> DATA_BITS: send 0 start bit
+    DATA_BITS --> DATA_BITS: send bit0..bit7 LSB first
+    DATA_BITS --> STOP_BIT: all data bits sent
+    STOP_BIT --> IDLE: send 1 stop bit\ntransmit_avail high
+```
 
 ### 9.1 Baudrate Experiment Summary
 
@@ -414,6 +615,24 @@ wire [31:0] total_bytes  = total_pixels * 2;
 The explicit 32-bit cast is important. Without it, Verilog computes `rows * cols` using the operand widths, producing a 16-bit product before extension. That caused images larger than 65535 pixels to fail. The fix was validated with `320x240` and `1920x1080` frames.
 
 `queue.v` has synchronous read behavior. `tx_ctrl` therefore includes `S_READ_WAIT` between asserting `fifo_rd` and using `fifo_data`. This prevents pixel misalignment.
+
+TX controller response pipeline:
+
+```mermaid
+flowchart LR
+    START[tx_start rows/cols] --> H0[Send header byte 0\n0x52]
+    H0 --> H1[Send header byte 1\n0x4B]
+    H1 --> HR[Send rows LE]
+    HR --> HC[Send cols LE]
+    HC --> PIXWAIT{pixels_sent < rows*cols?}
+    PIXWAIT -->|yes| RD[Assert fifo_rd]
+    RD --> RWAIT[S_READ_WAIT\nsynchronous FIFO data valid]
+    RWAIT --> LO[Send pixel low byte\nchecksum xor]
+    LO --> HI[Send pixel high byte\nchecksum xor]
+    HI --> PIXWAIT
+    PIXWAIT -->|no| CS[Send checksum]
+    CS --> DONE[Return idle]
+```
 
 ## 11. Host Software Architecture
 
