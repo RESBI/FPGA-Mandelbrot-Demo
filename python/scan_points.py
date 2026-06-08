@@ -26,7 +26,7 @@ def main():
     re_start = center_re - half_w * step
     ci = center_im + half_h * step - args.y * step
 
-    with serial.Serial(args.port, 460800, timeout=5) as ser:
+    with serial.Serial(args.port, 500000, timeout=5) as ser:
         total = 0
         mismatches = 0
         for x in range(args.x0, args.x1 + 1):

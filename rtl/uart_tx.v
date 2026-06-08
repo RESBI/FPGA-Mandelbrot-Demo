@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module uart_tx #(
-    parameter CLOCKS_PER_BIT = 217
+    parameter CLOCKS_PER_BIT = 200
 ) (
     output reg          tx,
     input  wire         clk,

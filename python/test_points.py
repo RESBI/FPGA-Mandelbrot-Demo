@@ -61,7 +61,7 @@ def main():
             ci = center_im + half_h * step - y * step
             points.append((f'image[{y},{x}]', cr, ci))
 
-    with serial.Serial(args.port, 460800, timeout=5) as ser:
+    with serial.Serial(args.port, 500000, timeout=5) as ser:
         for name, cr, ci in points:
             hw = send_point(ser, cr, ci, args.max_iter, step)
             sw = mandelbrot_software(cr, ci, step, args.max_iter, 1, 1)[0]
