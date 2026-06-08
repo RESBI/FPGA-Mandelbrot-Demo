@@ -363,6 +363,18 @@ The current 4-core design should be interpreted relative to the single-core 5000
 | Deep mini-brot @8192 | `850.720s` | `234.261s` | `3.63x` | compute |
 | Deep seahorse @1024 | `363.253s` | `103.032s` | `3.53x` | mixed, near UART |
 
+Test parameters for the comparison table:
+
+| Scene | Center | Step | Max Iter |
+|---|---|---:|---:|
+| Fast escape @128 | `(1.0, 1.0)` | `0.002` | `128` |
+| Standard @64 | `(-0.5, 0.0)` | `0.002` | `64` |
+| Seahorse zoom @512 | `(-0.743643887037151, 0.13182590420533)` | `5e-6` | `512` |
+| Deep triple spiral @8192 | `(-0.088, 0.654)` | `1e-6` | `8192` |
+| Deep tendrils @8192 | `(-0.77568377, 0.13646737)` | `1e-9` | `8192` |
+| Deep mini-brot @8192 | `(-1.25066, 0.02012)` | `1e-9` | `8192` |
+| Deep seahorse @1024 | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` |
+
 ## Architectural Lessons
 
 ### Streaming Was The Right Initial Choice
