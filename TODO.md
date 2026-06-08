@@ -1,108 +1,234 @@
-# TODO — Mandelbrot FPGA Accelerator Debug Issues
+# TODO - Mandelbrot FPGA Accelerator
 
-## 当前状态
+This file tracks the current project status and remaining work. Historical timing, arithmetic, UART, FIFO, and large-frame bugs have been fixed; see `ARCHITECTURE.md` for implementation details.
 
-FP64 设计在任何配置下（2-stage/3-stage, ce_div=1/2/4, PIPE_WAIT=1/2/3）都产生**完全相同的 45.02% (8643/19200) 匹配率**。结果具有确定性——相同输入永远产生相同输出——但计算错误。
+## Current Stable Configuration
 
-RTL 仿真 (`sim/tb_fp.v`) 证明 fp_mul 和 fp_add 的**逻辑完全正确**。2.5×2.5=6.25 产生正确的 exp=1025, man=0x9000000000000。
+| Item | Value |
+|---|---:|
+| Mode | FP64 |
+| System clock | 100 MHz |
+| Core/FP effective rate | 50 MHz (`FP_CE_DIV=2`) |
+| UART baudrate | 460800 |
+| Pixel format | `uint16` iteration count, little-endian |
+| Max iteration | 65535 |
+| Largest validated frame | 1920x1080 |
+| Default host port | `COM4` |
 
----
+Latest representative timing after large-frame fix:
 
-## Issue #1: DSP 时序违规 [根因已确认]
+| Metric | Value |
+|---|---:|
+| WNS | 2.619 ns |
+| TNS | 0.000 ns |
+| WHS | 0.023 ns |
+| THS | 0.000 ns |
 
-### 现象
+## Completed
 
-- Vivado 报告 WNS ≈ -3.8ns @ 100MHz
-- `z_re_sq[51]`（6.25 尾数 MSB）在硬件上为 0，仿真中为 1
-- `quick_esc()` 对于 exp=1025 且 man≠0 的值（如 6.25）返回 false
-- 对于 exp>1025 的值（如 9.0, 16.81），逃逸检测正常工作
+- Fixed FP64 hardware correctness issues in `fp_mul.v`, `fp_add.v`, and `mandelbrot_core.v`.
+- Added input/output/pipeline registers to improve timing closure.
+- Added CE-gated core design with `FP_CE_DIV=2` and matching multicycle constraints.
+- Validated effective 50 MHz core operation on board.
+- Converted UART TX to single `sys_clk` domain.
+- Updated UART baudrate to stable `460800`.
+- Tested `921600`; it builds but is not board-stable with the current UART RX.
+- Fixed FIFO read latency in `tx_ctrl.v` with `S_READ_WAIT`.
+- Fixed large-frame pixel count by explicitly widening `rows * cols` to 32-bit.
+- Validated frames larger than 65535 pixels, including 1920x1080.
+- Added software reference matching RTL integer-centered coordinate convention.
+- Added host timing output and `pixels/s` reporting.
+- Added `--timeout` host option for long 1080p/high-iteration runs.
+- Added random host/reference tests and expanded FP/core simulation coverage.
+- Added `README.md` with setup, build, usage, and diagrams.
+- Added `ARCHITECTURE.md` with detailed hardware/software architecture.
+- Created and pushed initial GitHub repository.
 
-### 定位
+## P0 - Correctness And Reproducibility
 
-DSP48E1 的 53×53 级联乘法器输出到 man_product_r 寄存器的组合路径约 12-15ns，在 100MHz (10ns) 下无法收敛。CE 分频 (`ce_div=2/4`) 在硬件上给足了时间，但 Vivado 的综合器不做 CE 感知的时序分析，始终按单周期 (10ns) 评估。导致 stage1 寄存器捕获未稳定的 DSP 输出——对于某些 bit pattern（如 6.25 的 0x9000000000000），关键尾数位恰好落在违规路径上，被捕获为 0。
+### Add Automated TX Controller Large-Frame Simulation
 
-### 为什么 CE 分频无效
+The 32-bit pixel-count fix is hardware-validated, but there is no focused simulation that proves `tx_ctrl` sends exactly `rows * cols` pixels for frames above 65535 pixels.
 
-`ce_div=2` 时 CE 每 2 拍 1 次，硬件有 20ns。但 Vivado 分析路径 `core_reg → DSP → fp_mul_stage1_reg` 时，源寄存器和目标寄存器都在 `posedge sys_clk` 上更新——工具只看到 10ns 周期，不感知 CE 门控逻辑。
+Tasks:
 
-### 修复方案
+- Add a `tb_tx_ctrl.v` or extend `tb_core_count.v`.
+- Test at least `320x240`, `640x360`, and a small sanity case.
+- Check header, byte count, checksum, and final done pulse.
 
-**方案 A（推荐）**：用 `(* mult_style = "pipe_block" *)` 或在 DSP 乘积后显式插入一级寄存器，强制 Vivado 使用 DSP48E1 的内部 MREG/PREG 流水寄存器。将 DSP 级联的 12ns 路径切为两条 < 5ns 的 reg-to-reg 路径。
+### Add Repository CI-Friendly Tests
 
-改动：
-- `fp_mul.v`: 在 `man_product` 和 `man_product_r` 之间插入 `man_product_dsp <= man_product` 寄存器
-- 同时给 fp_add 加一级输入寄存器 (`a_r <= a; b_r <= b;`)
-- `mandelbrot_core.v`: `PIPE_WAIT = 2`（或 `3`，取决于最终流水级数）
-- 验证：`pipe_wait` 递减逻辑需要正确处理复位后的首个 ce 周期（确保不会在复位期间开始处理）
+Vivado may not be available in generic CI, but lightweight Python checks can still run.
 
-**方案 B**：用 MMCM/PLL 从 100MHz 生成真 50MHz 时钟域，将整个 FP 单元和 core 状态机放入 50MHz 域。UART 留在 100MHz 域，FIFO 做 CDC。
+Tasks:
 
-**方案 C**：添加正确的 `set_multicycle_path` 约束（之前尝试失败，regex 未匹配到网表中的 cell 名称）。
+- Add a small Python smoke test for command packet construction/checksum.
+- Add a host/reference coordinate convention test.
+- Consider a `requirements.txt` with `pyserial` and `pillow`.
 
----
+### Document Board Pin Assumptions More Clearly
 
-## Issue #2: 3-stage 流水线结果更差 [待查]
+Current `constraint.xdc` is board-specific.
 
-### 现象
+Tasks:
 
-将 fp_add 拆为 3 级（对齐 | 加减+LZC | 规范化）、fp_mul 拆为 3 级后，PIPE_WAIT=2。结果从 2-stage 的 81%（4×4 测试）降到 63%。
+- Identify the exact tested board name/model.
+- Add a short pin-mapping section in `README.md` or a `boards/` directory.
+- Optionally split constraints by board if multiple boards are used.
 
-### 推测
+## P1 - Performance
 
-3-stage 版本的 fp_add 可能存在内部流水寄存器对齐 bug。具体来说，`man_small_aligned_s1`（Stage1 捕获的对齐后较小尾数）在 Stage2 进行加减时可能与 `same_sign_s1` 不匹配（两者捕获自不同流水级）。
+### Improve UART Beyond 460800 Baud
 
-### 修复方向
+`921600` baud was attempted with integer bit periods 108 and 109. Both met timing but timed out on board. Current hypothesis is UART RX sampling robustness rather than core logic.
 
-- 写完整的 core 级仿真测试台，逐一验证每个迭代的中间值
-- 或用 2-stage fp_add + 3-stage fp_mul 的混合方案：fp_add 保持 2 级（时序余量较大），仅加速 fp_mul
+Tasks:
 
----
+- Implement oversampling UART RX, e.g. 8x or 16x sampling.
+- Consider a fractional baud generator for lower accumulated bit error.
+- Re-test `921600`, then try `1M` or higher if hardware allows.
+- Keep `460800` as fallback until higher baud is board-stable.
 
-## Issue #3: 大图输出混乱 [关联 Issue #1]
+### Add Multi-Core Mandelbrot Compute
 
-### 现象
+The FPGA has resource headroom. Current design is a single serial pixel engine.
 
-160×120 图像渲染后为竖条纹状乱码，无 Mandelbrot 分形结构。
+Tasks:
 
-### 分析
+- Prototype 2-core raster partitioning.
+- Decide row-striping versus pixel interleaving.
+- Add arbitration into the output FIFO or a per-core FIFO merge stage.
+- Re-evaluate UART bottleneck; multi-core only helps compute-bound scenes unless output bandwidth also improves.
 
-- 条纹来自大部分像素输出 max_iter (=256=0x0100 → bytes 0x00 0x01 重复)
-- 少数像素触发逃逸（iter=1），产生不同值
-- 这导致同一列中大部分像素同色、偶有异色 → 竖条纹视觉效果
-- 根因是 Issue #1：DSP 乘积累积输出 0 或错误小值，逃逸检测几乎全失效
+### Add Interior Rejection Fast Paths
 
-### 修复
+Many high-iteration images spend most time on points inside the main cardioid or period-2 bulb.
 
-Issue #1 修复后应自然解决。若修复后仍有条纹，则需排查：
-- pixel 中心计算（int2fp 函数）
-- c_re 增量累加精度
-- FIFO 溢出/数据错位
+Tasks:
 
----
+- Add optional cardioid check.
+- Add optional period-2 bulb check.
+- Compare cost in FP hardware versus saved iterations.
+- Ensure results remain compatible with the selected reference semantics.
 
-## Issue #4: 像素中心与软件不匹配 [已知偏差]
+### Explore `PIPE_WAIT` Optimization
 
-### 现象
+Current `PIPE_WAIT=6` is conservative and stable.
 
-HW 用 `half_w = (cols-1)>>1`（整数截断），SW 用 `(width-1)/2.0`（浮点）。两者差 0.5 像素，对于 160×120@step=0.005 差 0.0025 复平面单位。
+Tasks:
 
-### 影响
+- Sweep smaller `PIPE_WAIT` values in simulation.
+- Add targeted tests around previously failing pixels.
+- Only reduce if all simulation and board verification still pass.
 
-单独测试：两种中心法在 160×120 图上有 93.66% 像素相同。仅 6.3% 差异。不是当前 55% 错误的主因。
+## P2 - Precision And Deep Zoom
 
-### 修复
+### Validate FP128 Mode End-To-End
 
-Issue #1 修复后，可在 Python 验证代码中改用 HW 中心法（整数 half_w），或修改 HW 使用浮点半宽。
+FP128 mode exists structurally but has not received the same level of board validation as FP64.
 
----
+Tasks:
 
-## 待做列表
+- Build FP128 and record resource/timing reports.
+- Run `tb_fp.v` and `tb_core.v` under FP128 configuration.
+- Run small hardware smoke tests if timing closes.
+- Add FP128 host rendering examples.
 
-| 优先级 | 任务 | 阻塞 |
-|--------|------|------|
-| P0 | fp_mul 加 DSP 输出寄存器 + fp_add 加输入寄存器 + PIPE_WAIT 对齐 | — |
-| P0 | 验证 c=2.5 逃逸检测通过 | P0 |
-| P1 | 160×120 全图验证 (SW 用 HW 中心法) | P0 |
-| P1 | 时序收敛 (WNS ≥ 0) | P0 |
-| P2 | FP128 综合测试 (资源占用 + 时序) | — |
-| P3 | 上位机 GUI / 实时缩放 | — |
+### Evaluate Fixed-Point Deep-Zoom Core
+
+FP64 becomes precision-sensitive at very deep zooms. For Mandelbrot-only workloads, fixed-point may be faster and easier to scale to deep zooms.
+
+Tasks:
+
+- Pick target fractional width, e.g. Q4.60, Q4.80, or wider.
+- Estimate DSP cost and iteration latency.
+- Compare image correctness against Python high-precision reference.
+
+### Add High-Precision Software Reference
+
+Python `float` is not enough for very deep zoom verification.
+
+Tasks:
+
+- Add optional `decimal` or `mpmath` reference for selected points.
+- Keep default reference fast for normal tests.
+- Use high precision only for deep-zoom validation cases.
+
+## P3 - Usability
+
+### Improve Host UX
+
+Tasks:
+
+- Add preset names for known zoom points.
+- Add progress reporting based on elapsed time and received bytes.
+- Add output metadata sidecar JSON with parameters and timing.
+- Add graceful serial retry/resync after timeout.
+
+### Add Image Palette Options
+
+Current palette is simple periodic coloring.
+
+Tasks:
+
+- Add smooth coloring option if fractional escape estimates are implemented.
+- Add multiple named palettes.
+- Save parameters into PNG metadata if practical.
+
+### Add GUI Or Notebook Demo
+
+Tasks:
+
+- Simple GUI for center/step/max_iter selection.
+- Notebook showing benchmark commands and resulting images.
+- Optional click-to-zoom workflow.
+
+## Known Limits
+
+| Limitation | Impact |
+|---|---|
+| Single compute core | High-iteration 1080p renders can take minutes to hours. |
+| UART transport | Fast scenes are capped near 23000 pixels/s at 460800 baud. |
+| FP64 precision | Very deep zooms below roughly `1e-12` to `1e-14` step become precision-sensitive. |
+| Max iteration is 16-bit | Maximum `max_iter` is 65535. |
+| Full IEEE-754 not implemented | NaN/Inf/denormal/full rounding behavior is not supported. |
+| FP128 not fully validated | FP64 is the current stable target. |
+
+## Useful Benchmarks To Re-Run After Major Changes
+
+Small correctness:
+
+```bash
+python python\test_esc.py
+python python\mandelbrot_host.py --verify --width 160 --height 120 --max-iter 256 --output python\verify_160x120.png
+```
+
+Large-frame path:
+
+```bash
+python python\mandelbrot_host.py --verify --width 320 --height 240 --max-iter 128 --center 1.0 1.0 --step 0.005 --timeout 300 --output python\verify_320x240_fast.png
+```
+
+UART-limited 1080p:
+
+```bash
+python python\mandelbrot_host.py --width 1920 --height 1080 --max-iter 64 --center -0.5 0.0 --step 0.002 --timeout 1200 --output python\hw_1080p_standard.png
+```
+
+Compute-heavy deep zoom:
+
+```bash
+python python\mandelbrot_host.py --width 160 --height 90 --max-iter 16384 --center -0.743643887037151 0.13182590420533 --step 0.00000001 --timeout 2400 --output python\deep_seahorse_160x90.png
+```
+
+## Release Checklist
+
+- Run `sim_fp.tcl`.
+- Run `sim_core.tcl`.
+- Build FP64 bitstream.
+- Confirm routed timing has no setup/hold violations.
+- Program board.
+- Run `python/test_esc.py`.
+- Run one verified small image.
+- Run one large-frame smoke test.
+- Update README/ARCHITECTURE if interfaces, baudrate, pins, or timing assumptions changed.

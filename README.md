@@ -436,3 +436,19 @@ For detailed hardware architecture, pipeline scheduling, timing constraints, and
 ```text
 ARCHITECTURE.md
 ```
+
+## License
+
+This project is released under the MIT License unless otherwise stated. You may use, modify, and distribute the RTL, scripts, and documentation under the terms of the MIT License.
+
+If you redistribute this project, keep the license notice and clearly mark any substantial modifications.
+
+## Software And LLM Assistance Disclosure
+
+This project was developed with software and AI-assisted engineering tools, including:
+
+- OpenCode for code editing, repository operations, and project automation.
+- DeepSeek v4 Pro for AI-assisted reasoning and implementation support.
+- GPT 5.5 for AI-assisted reasoning, documentation, debugging, and implementation support.
+
+All generated code, documentation, hardware behavior, timing closure, and board-level validation remain the responsibility of the project maintainer. The included RTL and scripts should be reviewed and tested for any target board or deployment environment.
