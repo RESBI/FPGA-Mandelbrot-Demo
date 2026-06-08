@@ -19,7 +19,7 @@ Current validated default configuration:
 | Vivado version used | 2020.2 |
 | System clock | 100 MHz |
 | Floating-point mode | FP64 |
-| Core effective rate | 50 MHz (`FP_CE_DIV=2`) |
+| Core effective rate | 100 MHz (`FP_CE_DIV=1`) |
 | UART baudrate | 460800 |
 | Host serial port default | `COM4` |
 | Pixel format | `uint16` iteration count, little-endian |
@@ -42,7 +42,7 @@ Mandelbrot/
 │   ├── tx_ctrl.v                Response stream controller
 │   └── queue.v                  Small synchronous FIFO
 ├── constraints/
-│   └── constraint.xdc           Clock, pin, and multicycle constraints
+│   └── constraint.xdc           Clock and pin constraints
 ├── sim/                         Testbenches
 │   ├── tb_fp.v
 │   ├── tb_core.v
@@ -83,7 +83,7 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph TOP[top.v]
-        CLK[sys_clk 100 MHz] --> CE[fp_ce generator<br/>FP_CE_DIV=2]
+        CLK[sys_clk 100 MHz] --> CE[fp_ce generator<br/>FP_CE_DIV=1]
         RST[reset counter]
 
         URX[uart_rx<br/>460800 baud]
@@ -128,7 +128,7 @@ stateDiagram-v2
     S_OUTPUT_WAIT --> [*]
 ```
 
-The FP/core datapath only advances on `fp_ce`. Current `FP_CE_DIV=2`, so useful core operations occur every two 100 MHz cycles. Timing is constrained with multicycle paths inside `u_core`.
+The FP/core datapath advances on `fp_ce`. Current FP64 builds use `FP_CE_DIV=1`, so `fp_ce` is constantly asserted and useful core operations occur every 100 MHz cycle. The FP adder and multiplier are pipelined deeply enough that no core multicycle timing exceptions are required.
 
 ## Requirements
 
@@ -391,6 +391,7 @@ Measured examples:
 
 | Case | FPGA Time | Throughput |
 |---|---:|---:|
+| `160x120 @ 256`, standard, 100 MHz core | `3.184s` | `6029.65 pps` |
 | `160x120 @ 128`, fast escape | `0.849s` | `22623.99 pps` |
 | `320x240 @ 128`, fast escape | `3.358s` | `22873.22 pps` |
 | `1920x1080 @ 64`, standard | `94.546s` | `21932.26 pps` |
@@ -398,6 +399,8 @@ Measured examples:
 | `1920x1080 @ 8192`, Mini-brot | `1198.049s` | `1730.81 pps` |
 
 Fast scenes are UART-limited. Deep zoom/high-iteration scenes are compute-limited.
+
+Current 100 MHz FP64 routed timing is signed off with `WNS=0.258ns`, `TNS=0.000ns`, `WHS=0.015ns`, and no multicycle exceptions.
 
 ## Troubleshooting
 

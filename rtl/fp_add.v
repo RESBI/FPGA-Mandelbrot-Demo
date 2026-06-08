@@ -44,39 +44,59 @@ module fp_add (
     wire                  same_sign  = ~(sign_a ^ sign_b);
     wire [`FP_EXP_W-1:0]  diff       = exp_large - exp_small;
 
+    // Stage 1: decode, compare, and select operands. Splitting this from
+    // alignment/add-sub keeps the 100 MHz critical path out of one long cone.
+    reg [INT_W-1:0]        man_large_s1, man_small_s1;
+    reg [`FP_EXP_W-1:0]    exp_large_s1;
+    reg [`FP_EXP_W-1:0]    diff_s1;
+    reg                    sign_large_s1;
+    reg                    same_sign_s1;
+    reg                    a_zero_s1, b_zero_s1;
+    reg [`FP_WIDTH-1:0]    a_store_s1, b_store_s1;
+
+    always @(posedge clk) begin
+        if (ce) begin
+            man_large_s1 <= man_large;
+            man_small_s1 <= man_small;
+            exp_large_s1 <= exp_large;
+            diff_s1      <= diff;
+            sign_large_s1 <= sign_large;
+            same_sign_s1 <= same_sign;
+            a_zero_s1    <= a_is_zero;
+            b_zero_s1    <= b_is_zero;
+            a_store_s1   <= a_r;
+            b_store_s1   <= b_r;
+        end
+    end
+
     wire [INT_W-1:0] man_small_align;
-    assign man_small_align = (diff >= INT_W) ? 0 : (man_small >> diff);
+    assign man_small_align = (diff_s1 >= INT_W) ? 0 : (man_small_s1 >> diff_s1);
 
     wire [INT_W:0] man_result_raw;
-    assign man_result_raw = same_sign ?
-        ({1'b0, man_large} + {1'b0, man_small_align}) :
-        ({1'b0, man_large} - {1'b0, man_small_align});
+    assign man_result_raw = same_sign_s1 ?
+        ({1'b0, man_large_s1} + {1'b0, man_small_align}) :
+        ({1'b0, man_large_s1} - {1'b0, man_small_align});
 
-    // Stage 2 pipeline
+    // Stage 2: align + add/sub pipeline
     reg [INT_W:0]          man_result_r;
     reg [`FP_EXP_W-1:0]    exp_large_r;
     reg                    sign_large_r;
     reg                    a_zero_r, b_zero_r;
+    reg [`FP_WIDTH-1:0]    a_store, b_store;
 
     always @(posedge clk) begin
         if (ce) begin
             man_result_r  <= man_result_raw;
-            exp_large_r   <= exp_large;
-            sign_large_r  <= sign_large;
-            a_zero_r      <= a_is_zero;
-            b_zero_r      <= b_is_zero;
+            exp_large_r   <= exp_large_s1;
+            sign_large_r  <= sign_large_s1;
+            a_zero_r      <= a_zero_s1;
+            b_zero_r      <= b_zero_s1;
+            a_store       <= a_store_s1;
+            b_store       <= b_store_s1;
         end
     end
 
-    // Stage 2: normalize + bypass with stored inputs
-    reg [`FP_WIDTH-1:0] a_store, b_store;
-    always @(posedge clk) begin
-        if (ce) begin
-            a_store <= a_r;
-            b_store <= b_r;
-        end
-    end
-
+    // Stage 3: normalize + bypass with stored inputs
     wire result_is_zero_s2 = (man_result_r == 0);
     wire msb_s2 = man_result_r[INT_W];
     wire [INT_W-1:0] man_after_add_s2 = man_result_r[INT_W-1:0];

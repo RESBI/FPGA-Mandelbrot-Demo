@@ -27,11 +27,29 @@ def main():
     ci = center_im + half_h * step - args.y * step
 
     with serial.Serial(args.port, 460800, timeout=5) as ser:
+        total = 0
+        mismatches = 0
         for x in range(args.x0, args.x1 + 1):
             cr = re_start + x * step
-            hw = send_point(ser, cr, ci, args.max_iter, step)
+            for attempt in range(3):
+                try:
+                    hw = send_point(ser, cr, ci, args.max_iter, step)
+                    break
+                except TimeoutError:
+                    if attempt == 2:
+                        raise
+                    ser.reset_input_buffer()
             sw = mandelbrot_software(cr, ci, step, args.max_iter, 1, 1)[0]
+            total += 1
+            if hw != sw:
+                mismatches += 1
             print(f"x={x:3d} c=({cr:.17g},{ci:.17g}) HW={hw:3d} SW={sw:3d}")
+
+        matched = total - mismatches
+        print(f"PASS: {matched}/{total} row points match" if mismatches == 0 else
+              f"FAIL: {mismatches}/{total} row points mismatch")
+        if mismatches:
+            raise SystemExit(1)
 
 
 if __name__ == '__main__':

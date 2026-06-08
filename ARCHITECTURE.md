@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This project implements a UART-controlled Mandelbrot accelerator on FPGA. The host sends one binary command describing a complete image, and the FPGA streams back one 16-bit iteration count per pixel. The current stable configuration is FP64, `FP_CE_DIV=2`, 100 MHz system clock, and 460800 baud UART.
+This project implements a UART-controlled Mandelbrot accelerator on FPGA. The host sends one binary command describing a complete image, and the FPGA streams back one 16-bit iteration count per pixel. The current stable configuration is FP64, `FP_CE_DIV=1`, true 100 MHz core operation, and 460800 baud UART.
 
 The design is intentionally streaming-oriented. It does not store a full frame on FPGA. The compute core produces pixels in raster order, a small FIFO absorbs rate mismatch, and the transmit controller streams pixels to the host as soon as they are available.
 
@@ -11,7 +11,7 @@ Current validated capabilities:
 | Item | Value |
 |---|---:|
 | System clock | 100 MHz |
-| FP/core effective clock enable rate | 50 MHz (`FP_CE_DIV=2`) |
+| FP/core effective clock enable rate | 100 MHz (`FP_CE_DIV=1`) |
 | UART baudrate | 460800 baud |
 | Pixel format | `uint16`, little-endian iteration count |
 | Maximum iteration count | 65535 |
@@ -95,7 +95,7 @@ The host currently computes the response checksum over pixel data only, matching
 
 ## 4. Clocking And Clock-Enable Design
 
-The board provides a 100 MHz `sys_clk`. The design uses one actual clock domain for all logic. UART, parser, FIFO, and TX controller run every 100 MHz clock. The floating-point datapath and Mandelbrot core advance only when `fp_ce` is asserted.
+The board provides a 100 MHz `sys_clk`. The design uses one actual clock domain for all logic. UART, parser, FIFO, TX controller, floating-point datapath, and Mandelbrot core all run in that clock domain. The `fp_ce` signal is retained as a compile-time throttle, but the current FP64 configuration sets `FP_CE_DIV=1`, so it is asserted every clock.
 
 `fp_ce` is generated in `top.v`:
 
@@ -108,10 +108,10 @@ assign fp_ce = (`FP_CE_DIV == 1) ? 1'b1 : (ce_counter == `FP_CE_DIV - 1);
 Current `rtl/fp_defines.vh` sets:
 
 ```verilog
-`define FP_CE_DIV 2
+`define FP_CE_DIV 1
 ```
 
-Therefore the core and FP units see a meaningful enable every 2 system cycles, giving a 50 MHz effective datapath rate while preserving one physical 100 MHz clock domain.
+Therefore the core and FP units advance every system cycle, giving true 100 MHz datapath operation while preserving one physical clock domain.
 
 ### 4.1 Why Clock Enable Instead Of A Derived Clock
 
@@ -124,27 +124,19 @@ Benefits:
 | No generated clock tree | All registers are clocked by `sys_clk`. |
 | No CDC between core and UART | FIFO and handshake signals stay in one clock domain. |
 | Easier reset and debug | One synchronous timing model. |
-| STA remains explicit | Multicycle constraints describe CE-gated core paths. |
+| STA remains direct | Current FP64 timing uses normal single-cycle 100 MHz constraints. |
 
-### 4.2 Multicycle Constraints
+### 4.2 Timing Constraints
 
-Vivado timing analysis does not automatically infer that core registers only launch/capture useful data every `FP_CE_DIV` cycles. The constraints explicitly apply multicycle timing to sequential cells under `u_core`:
+Current FP64 builds use normal single-cycle timing at 100 MHz. No `u_core` multicycle exceptions are required. Older effective-50 MHz experiments used `FP_CE_DIV=2` plus setup/hold multicycle constraints, but the current pipelined FP datapath closes timing at `FP_CE_DIV=1`.
 
-```tcl
-set fp_ce_regs [get_cells -hier -filter {NAME =~ *u_core/* && IS_SEQUENTIAL}]
-set_multicycle_path 2 -setup -from $fp_ce_regs -to $fp_ce_regs
-set_multicycle_path 1 -hold  -from $fp_ce_regs -to $fp_ce_regs
-```
-
-The UART and top-level control logic are not relaxed and still meet normal 100 MHz timing.
-
-Current routed timing after large-frame fix:
+Current routed timing after FP adder and multiplier pipeline cuts:
 
 | Metric | Value |
 |---|---:|
-| WNS | 2.619 ns |
+| WNS | 0.258 ns |
 | TNS | 0.000 ns |
-| WHS | 0.023 ns |
+| WHS | 0.015 ns |
 | THS | 0.000 ns |
 
 ## 5. Floating-Point Format
@@ -188,7 +180,7 @@ Algorithm summary:
 7. Normalize based on the product MSB.
 8. Register final output.
 
-The multiplier includes input and DSP-product registers to improve timing. The multiplication is annotated with:
+The multiplier includes input, decoded-mantissa, DSP-product, and metadata registers to improve timing. The decoded-mantissa stage removes zero mux and exponent/sign decode logic from the DSP input path. The multiplication is annotated with:
 
 ```verilog
 (* mult_style = "pipe_block" *)
@@ -201,10 +193,10 @@ This encourages DSP-based implementation. The Zynq-7010 implementation uses mult
 The core does not assume a single-cycle FP unit. Instead, it issues an operation and waits `PIPE_WAIT` CE cycles before capturing the result. Current `mandelbrot_core.v` uses:
 
 ```verilog
-localparam PIPE_WAIT = 6;
+localparam PIPE_WAIT = 9;
 ```
 
-This wait value is conservative relative to the internal FP pipeline and has been validated in simulation and hardware.
+This wait value is conservative relative to the internal FP pipeline and has been validated in simulation and hardware at true 100 MHz.
 
 ## 7. Floating-Point Adder Pipeline
 
@@ -218,12 +210,13 @@ Algorithm summary:
 
 1. Register inputs on `ce`.
 2. Decode signs, exponents, and mantissas.
-3. Compare magnitudes and align the smaller mantissa by exponent difference.
-4. Add or subtract aligned mantissas depending on signs.
-5. Register intermediate mantissa/sign/exponent information.
-6. Normalize the mantissa.
-7. Adjust exponent.
-8. Register output.
+3. Compare magnitudes and register the selected large/small operands.
+4. Align the smaller mantissa by exponent difference.
+5. Add or subtract aligned mantissas depending on signs.
+6. Register intermediate mantissa/sign/exponent information.
+7. Normalize the mantissa.
+8. Adjust exponent.
+9. Register output.
 
 Important fixes already made in this design:
 
@@ -232,6 +225,7 @@ Important fixes already made in this design:
 | Wrong same-sign normalization slice | Corrected carry/no-carry mantissa extraction. |
 | Negative add/sub mismatch | Added tests and fixed sign/magnitude handling. |
 | Input timing pressure | Added input registers. |
+| 100 MHz adder critical path | Split decode/compare/select from align/add-sub. |
 | Output normalization timing | Added output-side normalization register. |
 
 ## 8. Mandelbrot Core Architecture

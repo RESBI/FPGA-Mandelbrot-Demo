@@ -1,5 +1,7 @@
 # Mandelbrot FPGA Accelerator — 设计文档
 
+> Historical design notes. Some timing notes below describe earlier iterations of the design. The current validated configuration is documented in `README.md` and `ARCHITECTURE.md`: FP64, `FP_CE_DIV=1`, true 100 MHz core operation, 460800 baud UART.
+
 ## 1. 使用过程
 
 ### 1.1 上位机 Python 脚本

@@ -8,28 +8,29 @@ This file tracks the current project status and remaining work. Historical timin
 |---|---:|
 | Mode | FP64 |
 | System clock | 100 MHz |
-| Core/FP effective rate | 50 MHz (`FP_CE_DIV=2`) |
+| Core/FP effective rate | 100 MHz (`FP_CE_DIV=1`) |
 | UART baudrate | 460800 |
 | Pixel format | `uint16` iteration count, little-endian |
 | Max iteration | 65535 |
 | Largest validated frame | 1920x1080 |
 | Default host port | `COM4` |
 
-Latest representative timing after large-frame fix:
+Latest representative timing after true-100 MHz FP pipeline cuts:
 
 | Metric | Value |
 |---|---:|
-| WNS | 2.619 ns |
+| WNS | 0.258 ns |
 | TNS | 0.000 ns |
-| WHS | 0.023 ns |
+| WHS | 0.015 ns |
 | THS | 0.000 ns |
 
 ## Completed
 
 - Fixed FP64 hardware correctness issues in `fp_mul.v`, `fp_add.v`, and `mandelbrot_core.v`.
 - Added input/output/pipeline registers to improve timing closure.
-- Added CE-gated core design with `FP_CE_DIV=2` and matching multicycle constraints.
-- Validated effective 50 MHz core operation on board.
+- Closed true 100 MHz FP64 core timing with `FP_CE_DIV=1` and no multicycle exceptions.
+- Added FP adder and multiplier pipeline cuts for 100 MHz operation.
+- Validated true 100 MHz core operation on board.
 - Converted UART TX to single `sys_clk` domain.
 - Updated UART baudrate to stable `460800`.
 - Tested `921600`; it builds but is not board-stable with the current UART RX.
@@ -113,7 +114,7 @@ Tasks:
 
 ### Explore `PIPE_WAIT` Optimization
 
-Current `PIPE_WAIT=6` is conservative and stable.
+Current `PIPE_WAIT=9` is conservative and stable for the pipelined true-100 MHz datapath.
 
 Tasks:
 

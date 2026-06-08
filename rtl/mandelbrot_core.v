@@ -25,7 +25,7 @@ module mandelbrot_core (
 );
 
     // Core issues FP inputs on one ce and reads registered FP outputs on a later ce.
-    localparam PIPE_WAIT = 6;
+    localparam PIPE_WAIT = 9;
 
     // States
     localparam S_IDLE            = 6'd0;
@@ -52,7 +52,7 @@ module mandelbrot_core (
     localparam S_DONE            = 6'd21;
 
     reg [5:0] state = S_IDLE;
-    reg [2:0]  pipe_wait;  // pipeline wait counter
+    reg [3:0]  pipe_wait;  // pipeline wait counter
     reg        start_latched;  // latch start outside ce block
 
     // Capture start pulse on every clock (not just ce cycles)
