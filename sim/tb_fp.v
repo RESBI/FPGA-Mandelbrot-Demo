@@ -37,7 +37,7 @@ module tb_fp();
         begin
             @(negedge clk); ce = 1;
             @(negedge clk); ce = 0;
-            repeat(4) begin
+            repeat(6) begin
                 @(negedge clk); ce = 1;
                 @(negedge clk); ce = 0;
             end

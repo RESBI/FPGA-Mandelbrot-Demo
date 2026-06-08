@@ -143,12 +143,9 @@ module fp_add (
         end
     end
 
-    wire exp_of_s2 = (exp_final >= `FP_EXP_MAX);
-
     reg [`FP_MAN_W-1:0] man_final_r;
     reg [`FP_EXP_W-1:0] exp_final_r;
     reg                 sign_final_r;
-    reg                 exp_of_r;
     reg                 result_is_zero_r;
     reg                 a_zero_s3, b_zero_s3;
     reg [`FP_WIDTH-1:0] a_store_s3, b_store_s3;
@@ -158,7 +155,6 @@ module fp_add (
             man_final_r      <= man_final;
             exp_final_r      <= exp_final;
             sign_final_r     <= sign_final;
-            exp_of_r         <= exp_of_s2;
             result_is_zero_r <= result_is_zero_s2;
             a_zero_s3        <= a_zero_r;
             b_zero_s3        <= b_zero_r;
@@ -167,18 +163,40 @@ module fp_add (
         end
     end
 
+    reg [`FP_MAN_W-1:0] man_final_s4;
+    reg [`FP_EXP_W-1:0] exp_final_s4;
+    reg                 sign_final_s4;
+    reg                 exp_of_s4;
+    reg                 result_is_zero_s4;
+    reg                 a_zero_s4, b_zero_s4;
+    reg [`FP_WIDTH-1:0] a_store_s4, b_store_s4;
+
+    always @(posedge clk) begin
+        if (ce) begin
+            man_final_s4      <= man_final_r;
+            exp_final_s4      <= exp_final_r;
+            sign_final_s4     <= sign_final_r;
+            exp_of_s4         <= (exp_final_r >= `FP_EXP_MAX);
+            result_is_zero_s4 <= result_is_zero_r;
+            a_zero_s4         <= a_zero_s3;
+            b_zero_s4         <= b_zero_s3;
+            a_store_s4        <= a_store_s3;
+            b_store_s4        <= b_store_s3;
+        end
+    end
+
     always @(posedge clk) begin
         if (rst) begin
             sum <= 0;
         end else if (ce) begin
-            if (a_zero_s3) begin
-                sum <= b_store_s3;
-            end else if (b_zero_s3) begin
-                sum <= a_store_s3;
-            end else if (exp_of_r || result_is_zero_r) begin
+            if (a_zero_s4) begin
+                sum <= b_store_s4;
+            end else if (b_zero_s4) begin
+                sum <= a_store_s4;
+            end else if (exp_of_s4 || result_is_zero_s4) begin
                 sum <= 0;
             end else begin
-                sum <= {sign_final_r, exp_final_r, man_final_r};
+                sum <= {sign_final_s4, exp_final_s4, man_final_s4};
             end
         end
     end

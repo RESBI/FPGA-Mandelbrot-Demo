@@ -2,9 +2,9 @@
 
 ## 1. Overview
 
-This project implements a UART-controlled Mandelbrot accelerator on FPGA. The host sends one binary command describing a complete image, and the FPGA streams back one 16-bit iteration count per pixel. The current stable configuration is FP64, `FP_CE_DIV=1`, true 100 MHz core operation, and 460800 baud UART.
+This project implements a UART-controlled Mandelbrot accelerator on FPGA. The host sends one binary command describing a complete image, and the FPGA streams back one 16-bit iteration count per pixel. The current stable configuration is FP64, four Mandelbrot workers, `FP_CE_DIV=1`, true 100 MHz operation per worker, and 500000 baud UART.
 
-The design is intentionally streaming-oriented. It does not store a full frame on FPGA. The compute core produces pixels in raster order, a small FIFO absorbs rate mismatch, and the transmit controller streams pixels to the host as soon as they are available.
+The design is intentionally streaming-oriented. It does not store a full frame on FPGA. Four workers compute interleaved rows, per-core FIFOs absorb local imbalance, a raster-order merger restores the original host-visible pixel order, and the transmit controller streams pixels to the host as soon as they are available.
 
 Current validated capabilities:
 
@@ -12,7 +12,8 @@ Current validated capabilities:
 |---|---:|
 | System clock | 100 MHz |
 | FP/core effective clock enable rate | 100 MHz (`FP_CE_DIV=1`) |
-| UART baudrate | 460800 baud |
+| Mandelbrot workers | 4 |
+| UART baudrate | 500000 baud |
 | Pixel format | `uint16`, little-endian iteration count |
 | Maximum iteration count | 65535 |
 | Width/height fields | 16-bit each |
@@ -36,24 +37,31 @@ cmd_parser
   |
   |  compute_start, image parameters
   v
-mandelbrot_core -- fifo_wr/fifo_data --> queue(128 x 16-bit) --> tx_ctrl --> uart_tx
+mandelbrot_multicore -- raster fifo_wr/fifo_data --> queue(1024 x 16-bit) --> tx_ctrl --> uart_tx
        |
-       +-- fp_mul
-       +-- fp_add
+       +-- work_dispatch_static_rows
+       +-- 4 x mandelbrot_core_worker -- per-core FIFO --> raster_merge_static_rows
+              |
+              +-- fp_mul
+              +-- fp_add
 ```
 
 The main modules are:
 
 | Module | File | Role |
 |---|---|---|
-| `top` | `rtl/top.v` | Instantiates clock-enable generator, UART, command parser, core, FIFO, and TX controller. |
-| `uart_rx` | `rtl/uart_rx.v` | Receives 8N1 UART bytes at 460800 baud. |
-| `uart_tx` | `rtl/uart_tx.v` | Sends 8N1 UART bytes at 460800 baud. |
+| `top` | `rtl/top.v` | Instantiates clock-enable generator, UART, command parser, 4-core wrapper, output FIFO, and TX controller. |
+| `uart_rx` | `rtl/uart_rx.v` | Receives 8N1 UART bytes at 500000 baud. |
+| `uart_tx` | `rtl/uart_tx.v` | Sends 8N1 UART bytes at 500000 baud. |
 | `cmd_parser` | `rtl/cmd_parser.v` | Parses command packet and validates XOR checksum. |
-| `mandelbrot_core` | `rtl/mandelbrot_core.v` | Raster-order Mandelbrot iteration engine. |
+| `mandelbrot_multicore` | `rtl/mandelbrot_multicore.v` | 4-core wrapper with scheduler, per-core FIFOs, raster merger, and `tx_start` handling. |
+| `work_dispatch_static_rows` | `rtl/work_dispatch_static_rows.v` | Current modular scheduler. Assigns static interleaved rows to workers. |
+| `mandelbrot_core_worker` | `rtl/mandelbrot_core_worker.v` | Row-start/stride worker version of the Mandelbrot iteration engine. |
+| `raster_merge_static_rows` | `rtl/raster_merge_static_rows.v` | Restores per-worker row streams to strict row-major output order. |
+| `mandelbrot_core` | `rtl/mandelbrot_core.v` | Legacy/single-core raster-order Mandelbrot engine used by regression simulation. |
 | `fp_mul` | `rtl/fp_mul.v` | Parameterized FP multiplier. |
 | `fp_add` | `rtl/fp_add.v` | Parameterized FP adder/subtractor. |
-| `queue` | `rtl/queue.v` | Small synchronous FIFO for pixel buffering. |
+| `queue` | `rtl/queue.v` | Synchronous FIFO for per-core and output buffering. |
 | `tx_ctrl` | `rtl/tx_ctrl.v` | Builds response header, drains FIFO, transmits pixels and checksum. |
 
 ## 3. Command And Response Protocol
@@ -130,13 +138,13 @@ Benefits:
 
 Current FP64 builds use normal single-cycle timing at 100 MHz. No `u_core` multicycle exceptions are required. Older effective-50 MHz experiments used `FP_CE_DIV=2` plus setup/hold multicycle constraints, but the current pipelined FP datapath closes timing at `FP_CE_DIV=1`.
 
-Current routed timing after FP adder and multiplier pipeline cuts:
+Current routed timing after 4-core integration and FP adder output-side pipeline cut:
 
 | Metric | Value |
 |---|---:|
-| WNS | 0.258 ns |
+| WNS | 0.224 ns |
 | TNS | 0.000 ns |
-| WHS | 0.015 ns |
+| WHS | 0.005 ns |
 | THS | 0.000 ns |
 
 ## 5. Floating-Point Format
@@ -190,13 +198,13 @@ This encourages DSP-based implementation. The Zynq-7010 implementation uses mult
 
 ### 6.1 Multiplier Pipeline Behavior
 
-The core does not assume a single-cycle FP unit. Instead, it issues an operation and waits `PIPE_WAIT` CE cycles before capturing the result. Current `mandelbrot_core.v` uses:
+The core does not assume a single-cycle FP unit. Instead, it issues an operation and waits `PIPE_WAIT` CE cycles before capturing the result. Current worker and legacy single-core RTL use:
 
 ```verilog
-localparam PIPE_WAIT = 9;
+localparam PIPE_WAIT = 10;
 ```
 
-This wait value is conservative relative to the internal FP pipeline and has been validated in simulation and hardware at true 100 MHz.
+This wait value is conservative relative to the internal FP pipeline and has been validated in simulation and hardware at true 100 MHz. It increased from 9 to 10 when the 4-core build added one more adder output-side pipeline stage to close timing.
 
 ## 7. Floating-Point Adder Pipeline
 
@@ -226,11 +234,11 @@ Important fixes already made in this design:
 | Negative add/sub mismatch | Added tests and fixed sign/magnitude handling. |
 | Input timing pressure | Added input registers. |
 | 100 MHz adder critical path | Split decode/compare/select from align/add-sub. |
-| Output normalization timing | Added output-side normalization register. |
+| Output normalization timing | Added output-side normalization/output registers. |
 
 ## 8. Mandelbrot Core Architecture
 
-`mandelbrot_core.v` computes pixels in raster order. For each pixel, it iterates:
+`mandelbrot_core_worker.v` computes one interleaved subset of rows. The legacy `mandelbrot_core.v` computes pixels in raster order and remains useful for focused single-core regression. For each pixel, both engines iterate:
 
 ```text
 z_{n+1} = z_n^2 + c
@@ -240,7 +248,7 @@ z_im_next = 2 * z_re * z_im + c_im
 escape if z_re^2 + z_im^2 > 4
 ```
 
-The core uses one FP multiplier and one FP adder. It time-multiplexes those units across each iteration through a finite-state machine.
+Each worker uses one FP multiplier and one FP adder. It time-multiplexes those units across each iteration through a finite-state machine. The 4-core wrapper instantiates four independent workers.
 
 ### 8.1 Coordinate Generation
 
@@ -254,7 +262,7 @@ c_re_start = center_re - half_w * step
 c_im_start = center_im + half_h * step
 ```
 
-For each row:
+For each row in the single-core engine:
 
 ```text
 c_re = c_re_start
@@ -264,7 +272,34 @@ after row: c_im -= step
 
 The software reference intentionally mirrors this integer-center behavior. This avoids false mismatches versus a conventional floating-centered renderer.
 
-### 8.2 Per-Pixel FSM Pipeline
+### 8.2 4-Core Row Scheduling
+
+The current multi-core scheduler uses static interleaved rows:
+
+| Core | First row | Stride | Rows |
+|---:|---:|---:|---|
+| 0 | 0 | 4 | `0, 4, 8, ...` |
+| 1 | 1 | 4 | `1, 5, 9, ...` |
+| 2 | 2 | 4 | `2, 6, 10, ...` |
+| 3 | 3 | 4 | `3, 7, 11, ...` |
+
+This is implemented by `work_dispatch_static_rows.v`. The worker receives `row_start_in` and `row_stride_in`, computes `row_stride * step` once during initialization, and then jumps directly from one assigned row to the next.
+
+The scheduler is intentionally modular. Future dynamic tile scheduling or out-of-order row dispatch should replace `work_dispatch_static_rows.v` and the matching merger without changing the UART command parser or the worker arithmetic datapath.
+
+### 8.3 Raster Merge
+
+The unchanged host protocol expects pixels in row-major order with no row or tile IDs. `raster_merge_static_rows.v` preserves that contract in hardware.
+
+For output row `y`:
+
+```text
+source_core = y % 4
+```
+
+The merger waits until the selected core FIFO has data, reads one pixel, waits one synchronous FIFO read cycle, and writes the pixel into the shared output FIFO. This keeps the host protocol unchanged while allowing workers to run independently behind per-core FIFOs.
+
+### 8.4 Per-Pixel FSM Pipeline
 
 The core advances one FSM state per asserted `ce`, except when `pipe_wait` is nonzero. Each FP operation is issued, then the FSM waits `PIPE_WAIT` CE pulses before consuming the registered result.
 
@@ -311,7 +346,7 @@ S_ITER_INC
   else issue next z_re * z_re
 ```
 
-### 8.3 Escape Check
+### 8.5 Escape Check
 
 Escape is detected with:
 
@@ -327,22 +362,22 @@ quick_esc(z_re_sq) || quick_esc(z_im_sq) || quick_esc(add_result)
 
 `quick_esc` compares the floating-point exponent against `bias + 2` and handles the exact `4.0` boundary by checking mantissa bits. Values greater than 4.0 escape. Exact 4.0 does not escape.
 
-### 8.4 Output And Backpressure
+### 8.6 Output And Backpressure
 
-When a pixel is complete, the core waits until the FIFO is not full, writes the 16-bit iteration count, and then advances to the next pixel.
+When a pixel is complete, a worker waits until its per-core FIFO is not full, writes the 16-bit iteration count, and then advances to the next pixel. The raster merger drains per-core FIFOs into the shared output FIFO. `tx_ctrl` then drains the shared output FIFO to UART.
 
-The FIFO has 128 entries of 16-bit data. This is enough to absorb short mismatch between compute bursts and UART TX, but the system is fundamentally streaming and will backpressure the core when UART is the bottleneck.
+The top-level output FIFO has 1024 entries of 16-bit data. Each worker also has a per-core FIFO. The system is still fundamentally streaming and will backpressure workers when UART is the bottleneck or when strict raster ordering waits for an earlier row.
 
 ## 9. UART Design
 
 UART is 8N1, no parity, no flow control.
 
-Current baudrate is 460800. With a 100 MHz clock:
+Current baudrate is 500000. With a 100 MHz clock:
 
 ```text
-CLOCKS_PER_BIT = 217
-actual baud ~= 100e6 / 217 = 460829.49 baud
-error ~= +0.0064%
+CLOCKS_PER_BIT = 200
+actual baud = 100e6 / 200 = 500000 baud
+error = 0.0000%
 ```
 
 `uart_rx.v` synchronizes the asynchronous RX input with two flip-flops, detects the falling start edge, waits half a bit, then samples each data bit every `CLOCKS_PER_BIT` clocks. The current implementation uses `CLOCKS_PER_BIT - 1` comparisons to avoid off-by-one bit timing drift.
@@ -356,10 +391,14 @@ The design was tested at higher baudrates:
 | Baudrate | Result |
 |---:|---|
 | 115200 | Stable, original baseline. |
-| 460800 | Stable, current default. |
+| 460800 | Stable previous default. |
+| 500000 | Stable current default. |
+| 625000 | Built, exact divider, but board-level UART communication timed out. |
+| 800000 | Built, exact divider, but board-level UART communication timed out. |
 | 921600 | Built and met timing, but board-level UART communication timed out. |
+| 1000000 | Built, exact divider, but board-level UART communication timed out. |
 
-921600 likely needs a more robust UART RX design, such as oversampling or a fractional baud generator.
+Rates above 500000 likely need a more robust UART RX design, such as 8x/16x oversampling, majority voting near the bit center, and possibly a fractional baud generator for standard rates.
 
 ## 10. TX Controller And Large-Frame Support
 
@@ -387,7 +426,7 @@ Responsibilities:
 | CLI parser | Accept center, step, max iteration, dimensions, output, mode, port, timeout, verify flag. |
 | FP encoding | Pack FP64 with Python `struct.pack('<d')`; pack FP128 manually for experimental mode. |
 | Command builder | Build little-endian command packet and XOR checksum. |
-| Serial transport | Open `COM4` by default at 460800 baud. |
+| Serial transport | Open `COM4` by default at 500000 baud. |
 | Response receiver | Read header, expected pixel bytes, checksum, and convert to uint16 pixels. |
 | Renderer | Convert iteration counts to PNG or text output. |
 | Software reference | Optional `--verify` computes a Python Mandelbrot image matching RTL coordinate rules. |
@@ -450,7 +489,23 @@ Expected pass marker:
 === CORE TEST PASS ===
 ```
 
-### 12.3 Host-Side Random Reference Testing
+### 12.3 Multicore Simulation
+
+`sim/tb_multicore.v` instantiates `mandelbrot_multicore` with four workers and checks that the merged output stream matches row-major software reference order.
+
+Run:
+
+```bash
+vivado -mode batch -source sim_multicore.tcl
+```
+
+Expected pass marker:
+
+```text
+=== MULTICORE TEST PASS: 192 pixels ===
+```
+
+### 12.4 Host-Side Random Reference Testing
 
 `python/test_random_compare.py` compares host/software reference conventions across randomized cases. This catches coordinate convention errors, checksum assumptions, and corner cases in command construction.
 
@@ -460,7 +515,7 @@ Example validated command:
 python python/test_random_compare.py --cases 300 --seed 20260608
 ```
 
-### 12.4 Hardware Smoke Tests
+### 12.5 Hardware Smoke Tests
 
 `python/test_esc.py` sends 1x1-like commands for obvious escape points. It verifies UART RX, command parsing, core start, escape logic, FIFO/TX, and host parsing.
 
@@ -473,7 +528,7 @@ c=(3.0,0) -> iter=1
 c=(4.1,0) -> iter=1
 ```
 
-### 12.5 Hardware Image Verification
+### 12.6 Hardware Image Verification
 
 For moderate images, the host can run software verification:
 
@@ -485,7 +540,7 @@ Many tested cases reached `100.00%` match.
 
 For large 1080p or very high iteration tests, `--verify` is normally skipped because Python software rendering becomes slow.
 
-### 12.6 Large-Frame Verification
+### 12.7 Large-Frame Verification
 
 The 32-bit pixel-count fix was validated with:
 
@@ -501,58 +556,60 @@ The system has two main bottlenecks:
 1. UART bandwidth for fast-escaping or low-iteration scenes.
 2. FP/core compute for high-iteration zooms.
 
-At 460800 baud, the practical upper bound is roughly:
+At 500000 baud, the practical upper bound is roughly:
 
 ```text
-460800 bits/s / 10 UART bits/byte / 2 bytes/pixel ~= 23040 pixels/s
+500000 bits/s / 10 UART bits/byte / 2 bytes/pixel ~= 25000 pixels/s
 ```
 
-Measured fast-escape throughput is close to this limit:
+Measured current fast throughput is close to this limit:
 
 ```text
-160x120 fast escape: 22623.99 pixels/s
-320x240 fast escape: 22873.22 pixels/s
+1080p standard @64: 24833.32 pixels/s
+1080p deep triple spiral @8192: 24790.22 pixels/s
 ```
 
-High-iteration examples:
+Current 4-core high-iteration examples:
 
-| Case | Throughput |
-|---|---:|
-| `160x120 @ 512`, standard view | 2162.71 pixels/s |
-| `640x360 @ 1024`, Seahorse zoom | 13209.46 pixels/s |
-| `320x180 @ 4096`, deep Seahorse `step=1e-8` | 366.16 pixels/s |
-| `160x90 @ 16384`, deep Seahorse `step=1e-8` | 80.89 pixels/s |
-| `80x45 @ 65535`, deep Seahorse `step=1e-8` | 20.43 pixels/s |
+| Case | FPGA Time | Throughput | Single-Core 500k Baseline | Speedup |
+|---|---:|---:|---:|---:|
+| `160x120 @256`, standard view | `0.902s` | `21292.23 pps` | `3.193s` | `3.54x` |
+| `1080p deep tendrils @8192` | `93.960s` | `22068.99 pps` | `340.029s` | `3.62x` |
+| `1080p deep minibrot @8192` | `234.261s` | `8851.67 pps` | `850.720s` | `3.63x` |
+| `1080p deep seahorse @1024` | `103.032s` | `20125.73 pps` | `363.253s` | `3.53x` |
 
 Validated 1080p examples:
 
 | Case | FPGA Time | Throughput |
 |---|---:|---:|
-| 1080p fast escape @128 | 104.666 s | 19811.65 pixels/s |
-| 1080p standard @64 | 94.546 s | 21932.26 pixels/s |
-| 1080p Seahorse @512, step `5e-6` | 235.503 s | 8804.97 pixels/s |
-| 1080p Mini-brot @8192, step `1e-9` | 1198.049 s | 1730.81 pixels/s |
+| 1080p fast escape @128 | 83.520 s | 24827.49 pixels/s |
+| 1080p standard @64 | 83.501 s | 24833.32 pixels/s |
+| 1080p Seahorse @512, step `5e-6` | 83.956 s | 24698.58 pixels/s |
+| 1080p deep triple spiral @8192 | 83.646 s | 24790.22 pixels/s |
+| 1080p deep tendrils @8192, step `1e-9` | 93.960 s | 22068.99 pixels/s |
+| 1080p Mini-brot @8192, step `1e-9` | 234.261 s | 8851.67 pixels/s |
+| 1080p deep Seahorse @1024, step `1e-8` | 103.032 s | 20125.73 pixels/s |
 
 ## 14. Resource Use
 
-Latest representative FP64 placed utilization after timing fixes:
+Latest representative 4-core FP64 placed utilization:
 
 | Resource | Usage |
 |---|---:|
-| Slice LUTs | 1993 / 17600, 11.32% |
-| Slice Registers | 2659 / 35200, 7.55% |
-| DSP48E1 | 10 / 80, 12.50% |
-| Block RAM Tile | 0.5 / 60, 0.83% |
+| Slice LUTs | 8597 / 17600, 48.85% |
+| Slice Registers | 9807 / 35200, 27.86% |
+| DSP48E1 | 38 / 80, 47.50% |
+| Block RAM Tile | 8.5 / 60, 14.17% |
 | RAMB18 | 1 / 120, 0.83% |
 
-The design is not resource-limited. It is primarily limited by FP iteration latency and UART bandwidth.
+The design still has logic and DSP headroom, but many practical scenes are now limited by UART bandwidth. More cores only help the most compute-bound views unless the output link improves.
 
 ## 15. Known Limitations
 
 | Limitation | Details |
 |---|---|
-| One compute core | Pixels are computed serially. High-iteration images can take minutes to hours. |
-| UART output | Fast scenes are capped near 23000 pixels/s at 460800 baud. |
+| Static 4-core scheduler | Interleaved rows balance many views, but strict raster ordering can still wait on a slower row. |
+| UART output | Fast scenes are capped near 25000 pixels/s at 500000 baud. |
 | FP64 precision | Very deep zooms below approximately `1e-12` to `1e-14` pixel step become precision-sensitive. |
 | FP units are IEEE-like, not full IEEE-754 | No full NaN/Inf/denormal/rounding support. |
 | FP128 mode exists structurally | Most validation and performance work has focused on FP64. |
@@ -562,13 +619,13 @@ The design is not resource-limited. It is primarily limited by FP iteration late
 
 Most valuable next steps:
 
-1. Add multiple Mandelbrot cores sharing one UART/TX stream or using a wider output path.
-2. Improve UART to 921600 or higher with oversampling/fractional baud generation.
-3. Add an optional faster transport, such as USB FIFO, SPI, Ethernet, or memory-mapped PS interface on Zynq.
-4. Add cardioid and period-2 bulb classification to skip interior pixels quickly.
-5. Evaluate fixed-point arithmetic for Mandelbrot-specific deep zoom windows.
-6. Validate and optimize FP128 mode for deeper zooms beyond FP64 precision comfort.
-7. Replace the simple FIFO with deeper buffering if future transports create burstier output patterns.
+1. Add a higher-bandwidth transport, such as USB FIFO, SPI, Ethernet, or memory-mapped PS interface on Zynq.
+2. Add row/tile IDs to the response protocol so the host can accept out-of-order rows or tiles.
+3. Replace static row dispatch with a dynamic tile scheduler once the protocol can carry coordinates.
+4. Improve UART to 921600 or higher with oversampling/fractional baud generation if UART must remain the transport.
+5. Add cardioid and period-2 bulb classification to skip interior pixels quickly.
+6. Evaluate fixed-point arithmetic for Mandelbrot-specific deep zoom windows.
+7. Validate and optimize FP128 mode for deeper zooms beyond FP64 precision comfort.
 
 ## 17. Build And Run Commands
 
@@ -577,6 +634,7 @@ Simulation:
 ```bash
 vivado -mode batch -source sim_fp.tcl
 vivado -mode batch -source sim_core.tcl
+vivado -mode batch -source sim_multicore.tcl
 ```
 
 Build and program:

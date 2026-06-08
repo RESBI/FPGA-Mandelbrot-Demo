@@ -95,7 +95,7 @@ module top (
         .precision_mode (cmd_precision)
     );
 
-    mandelbrot_core u_core (
+    mandelbrot_multicore #(.CORE_COUNT(4), .CORE_FIFO_DEPTH(4096)) u_core (
         .clk            (sys_clk),
         .rst            (rst),
         .ce             (fp_ce),
@@ -116,11 +116,11 @@ module top (
         .tx_cols        (tx_ctrl_cols)
     );
 
-    // Result FIFO: 128 entries x 8 bits
+    // Result FIFO: 1024 entries x 16 bits
     wire fifo_write_avail;
     assign fifo_full = !fifo_write_avail;
 
-    queue #(.DEPTH(128), .DATA_W(16)) u_fifo (
+    queue #(.DEPTH(1024), .DATA_W(16)) u_fifo (
         .clk         (sys_clk),
         .write_avail (fifo_write_avail),
         .read_avail  (fifo_rd_avail),

@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 `include "fp_defines.vh"
 
-module mandelbrot_core (
+module mandelbrot_core_worker (
     input  wire                     clk,
     input  wire                     rst,
     input  wire                     ce,
@@ -14,48 +14,48 @@ module mandelbrot_core (
     input  wire [15:0]              max_iter_in,
     input  wire [15:0]              rows_in,
     input  wire [15:0]              cols_in,
+    input  wire [15:0]              row_start_in,
+    input  wire [15:0]              row_stride_in,
 
     output reg  [15:0]              fifo_data,
     output reg                      fifo_wr,
-    input  wire                     fifo_full,
-
-    output reg                      tx_start,
-    output reg  [15:0]              tx_rows,
-    output reg  [15:0]              tx_cols
+    input  wire                     fifo_full
 );
 
-    // Core issues FP inputs on one ce and reads registered FP outputs on a later ce.
     localparam PIPE_WAIT = 10;
 
-    // States
-    localparam S_IDLE            = 6'd0;
-    localparam S_INIT_START      = 6'd1;
-    localparam S_INIT_W_CAPTURE  = 6'd2;
-    localparam S_INIT_W2_CAPTURE = 6'd3;
-    localparam S_INIT_H_CAPTURE  = 6'd4;
-    localparam S_INIT_H2_CAPTURE = 6'd5;
-    localparam S_ROW_START       = 6'd6;
-    localparam S_ITER_START      = 6'd7;
-    localparam S_MUL_ZRSQ_CAPT   = 6'd8;
-    localparam S_MUL_ZISQ_CAPT   = 6'd9;
-    localparam S_MUL_ZRZI_CAPT   = 6'd10;
-    localparam S_SUB_RE_CAPT     = 6'd11;
-    localparam S_ADD_NEXTRE_CAPT = 6'd12;
-    localparam S_ADD_2X_CAPT     = 6'd13;
-    localparam S_ADD_NEXTIM_CAPT = 6'd14;
-    localparam S_ITER_INC        = 6'd15;
-    localparam S_OUTPUT_WAIT     = 6'd16;
-    localparam S_OUTPUT          = 6'd17;
-    localparam S_NEXT_COL        = 6'd18;
-    localparam S_NEXT_ROW        = 6'd19;
-    localparam S_NEXT_ROW_WAIT   = 6'd20;
-    localparam S_DONE            = 6'd21;
+    localparam S_IDLE                 = 6'd0;
+    localparam S_INIT_START           = 6'd1;
+    localparam S_INIT_W_CAPTURE       = 6'd2;
+    localparam S_INIT_W2_CAPTURE      = 6'd3;
+    localparam S_INIT_H_CAPTURE       = 6'd4;
+    localparam S_INIT_H2_CAPTURE      = 6'd5;
+    localparam S_INIT_ROWSTEP_MUL     = 6'd6;
+    localparam S_INIT_ROWSTEP_CAPTURE = 6'd7;
+    localparam S_INIT_ROWSTART_MUL    = 6'd8;
+    localparam S_INIT_ROWSTART_SUB    = 6'd9;
+    localparam S_INIT_ROWSTART_CAPTURE= 6'd10;
+    localparam S_ROW_START            = 6'd11;
+    localparam S_ITER_START           = 6'd12;
+    localparam S_MUL_ZRSQ_CAPT        = 6'd13;
+    localparam S_MUL_ZISQ_CAPT        = 6'd14;
+    localparam S_MUL_ZRZI_CAPT        = 6'd15;
+    localparam S_SUB_RE_CAPT          = 6'd16;
+    localparam S_ADD_NEXTRE_CAPT      = 6'd17;
+    localparam S_ADD_2X_CAPT          = 6'd18;
+    localparam S_ADD_NEXTIM_CAPT      = 6'd19;
+    localparam S_ITER_INC             = 6'd20;
+    localparam S_OUTPUT_WAIT          = 6'd21;
+    localparam S_OUTPUT               = 6'd22;
+    localparam S_NEXT_COL             = 6'd23;
+    localparam S_NEXT_ROW             = 6'd24;
+    localparam S_NEXT_ROW_WAIT        = 6'd25;
+    localparam S_DONE                 = 6'd26;
 
     reg [5:0] state = S_IDLE;
-    reg [3:0]  pipe_wait;  // pipeline wait counter
-    reg        start_latched;  // latch start outside ce block
+    reg [3:0] pipe_wait;
+    reg       start_latched;
 
-    // Capture start pulse on every clock (not just ce cycles)
     always @(posedge clk) begin
         if (rst)
             start_latched <= 0;
@@ -66,12 +66,12 @@ module mandelbrot_core (
     end
 
     reg [`FP_WIDTH-1:0] center_re, center_im, step_val;
-    reg [15:0] max_iter, rows, cols;
-    reg [`FP_WIDTH-1:0] c_re, c_im, c_re_start;
+    reg [`FP_WIDTH-1:0] c_re, c_im, c_re_start, c_im_top, row_step;
     reg [`FP_WIDTH-1:0] z_re, z_im;
     reg [`FP_WIDTH-1:0] z_re_sq, z_im_sq, z_re_z_im;
-    reg [15:0] row, col;
-    reg [15:0] iter;
+    reg [15:0] max_iter, rows, cols;
+    reg [15:0] row_start, row_stride;
+    reg [15:0] row, col, iter;
     reg [15:0] half_w, half_h;
 
     reg [`FP_WIDTH-1:0] mul_a, mul_b;
@@ -85,7 +85,6 @@ module mandelbrot_core (
     fp_mul u_mul (.clk(clk), .rst(rst), .ce(ce), .a(mul_a), .b(mul_b), .product(mul_result));
     fp_add u_add (.clk(clk), .rst(rst), .ce(ce), .a(add_a), .b(add_b_eff), .sum(add_result));
 
-    // Check if value > 4.0
     function quick_esc;
         input [`FP_WIDTH-1:0] val;
         begin
@@ -94,7 +93,6 @@ module mandelbrot_core (
         end
     endfunction
 
-    // Integer to FP
     function [`FP_WIDTH-1:0] int2fp;
         input [15:0] val;
         reg [3:0] msb;
@@ -139,7 +137,6 @@ module mandelbrot_core (
             busy      <= 0;
             done      <= 0;
             fifo_wr   <= 0;
-            tx_start  <= 0;
             pipe_wait <= 0;
         end else if (ce) begin
             if (pipe_wait) begin
@@ -149,7 +146,6 @@ module mandelbrot_core (
                     S_IDLE: begin
                         done <= 0;
                         fifo_wr <= 0;
-                        tx_start <= 0;
                         if (start_latched) begin
                             center_re <= center_re_in;
                             center_im <= center_im_in;
@@ -157,18 +153,15 @@ module mandelbrot_core (
                             max_iter  <= max_iter_in;
                             rows      <= rows_in;
                             cols      <= cols_in;
+                            row_start <= row_start_in;
+                            row_stride <= row_stride_in;
                             busy      <= 1;
-                            tx_rows   <= rows_in;
-                            tx_cols   <= cols_in;
-                            tx_start  <= 1;
                             half_w <= (cols_in - 16'd1) >> 1;
-                            state <= S_INIT_START;
+                            state <= (row_start_in >= rows_in || rows_in == 0 || cols_in == 0) ? S_DONE : S_INIT_START;
                         end
                     end
 
-                    // --- Initialization with pipelined FP ---
                     S_INIT_START: begin
-                        tx_start <= 0;
                         mul_a <= int2fp(half_w);
                         mul_b <= step_val;
                         pipe_wait <= PIPE_WAIT;
@@ -176,16 +169,14 @@ module mandelbrot_core (
                     end
 
                     S_INIT_W_CAPTURE: begin
-                        // mul_result = re_offset = half_w * step
                         add_a <= center_re;
                         add_b <= mul_result;
-                        add_neg <= 1;  // c_re_start = center_re - re_offset
+                        add_neg <= 1;
                         pipe_wait <= PIPE_WAIT;
                         state <= S_INIT_W2_CAPTURE;
                     end
 
                     S_INIT_W2_CAPTURE: begin
-                        // add_result = c_re_start
                         c_re_start <= add_result;
                         half_h <= (rows - 16'd1) >> 1;
                         mul_a <= int2fp((rows - 16'd1) >> 1);
@@ -195,21 +186,43 @@ module mandelbrot_core (
                     end
 
                     S_INIT_H_CAPTURE: begin
-                        // mul_result = im_offset = half_h * step
                         add_a <= center_im;
                         add_b <= mul_result;
-                        add_neg <= 0;  // c_im = center_im + im_offset
+                        add_neg <= 0;
                         pipe_wait <= PIPE_WAIT;
                         state <= S_INIT_H2_CAPTURE;
                     end
 
                     S_INIT_H2_CAPTURE: begin
+                        c_im_top <= add_result;
+                        mul_a <= int2fp(row_stride);
+                        mul_b <= step_val;
+                        pipe_wait <= PIPE_WAIT;
+                        state <= S_INIT_ROWSTEP_MUL;
+                    end
+
+                    S_INIT_ROWSTEP_MUL: begin
+                        row_step <= mul_result;
+                        mul_a <= int2fp(row_start);
+                        mul_b <= step_val;
+                        pipe_wait <= PIPE_WAIT;
+                        state <= S_INIT_ROWSTART_MUL;
+                    end
+
+                    S_INIT_ROWSTART_MUL: begin
+                        add_a <= c_im_top;
+                        add_b <= mul_result;
+                        add_neg <= 1;
+                        pipe_wait <= PIPE_WAIT;
+                        state <= S_INIT_ROWSTART_SUB;
+                    end
+
+                    S_INIT_ROWSTART_SUB: begin
                         c_im <= add_result;
-                        row <= 0;
+                        row <= row_start;
                         state <= S_ROW_START;
                     end
 
-                    // --- Row / Column iteration ---
                     S_ROW_START: begin
                         c_re <= c_re_start;
                         col <= 0;
@@ -224,59 +237,54 @@ module mandelbrot_core (
                             state <= S_OUTPUT_WAIT;
                         end else begin
                             mul_a <= 0;
-                            mul_b <= 0;  // z_re * z_re (initial)
+                            mul_b <= 0;
                             pipe_wait <= PIPE_WAIT;
                             state <= S_MUL_ZRSQ_CAPT;
                         end
                     end
 
-                    // --- Pipelined iteration loop ---
-                    // Each capture state: gets result of previous op, starts next op
                     S_MUL_ZRSQ_CAPT: begin
-                        z_re_sq <= mul_result;    // z_re^2
+                        z_re_sq <= mul_result;
                         mul_a <= z_im;
-                        mul_b <= z_im;             // start z_im^2
+                        mul_b <= z_im;
                         pipe_wait <= PIPE_WAIT;
                         state <= S_MUL_ZISQ_CAPT;
                     end
 
                     S_MUL_ZISQ_CAPT: begin
-                        z_im_sq <= mul_result;    // z_im^2
-                        // Start z_re*z_im AND escape add (both have same pipeline depth)
+                        z_im_sq <= mul_result;
                         mul_a <= z_re;
-                        mul_b <= z_im;             // z_re * z_im
+                        mul_b <= z_im;
                         add_a <= z_re_sq;
                         add_b <= mul_result;
-                        add_neg <= 0;              // z_re^2 + z_im^2 (escape check)
+                        add_neg <= 0;
                         pipe_wait <= PIPE_WAIT;
                         state <= S_MUL_ZRZI_CAPT;
                     end
 
-                S_MUL_ZRZI_CAPT: begin
-                    z_re_z_im <= mul_result;
-                    if (quick_esc(z_re_sq) || quick_esc(z_im_sq) || quick_esc(add_result)) begin
-                        state <= S_OUTPUT_WAIT;
-                    end else begin
-                        add_a <= z_re_sq;
-                        add_b <= z_im_sq;
-                        add_neg <= 1;
-                        pipe_wait <= PIPE_WAIT;
-                        state <= S_SUB_RE_CAPT;
+                    S_MUL_ZRZI_CAPT: begin
+                        z_re_z_im <= mul_result;
+                        if (quick_esc(z_re_sq) || quick_esc(z_im_sq) || quick_esc(add_result)) begin
+                            state <= S_OUTPUT_WAIT;
+                        end else begin
+                            add_a <= z_re_sq;
+                            add_b <= z_im_sq;
+                            add_neg <= 1;
+                            pipe_wait <= PIPE_WAIT;
+                            state <= S_SUB_RE_CAPT;
+                        end
                     end
-                end
 
                     S_SUB_RE_CAPT: begin
-                        // add_result = z_re^2 - z_im^2
                         add_a <= add_result;
                         add_b <= c_re;
-                        add_neg <= 0;              // (z_re^2 - z_im^2) + c_re
+                        add_neg <= 0;
                         pipe_wait <= PIPE_WAIT;
                         state <= S_ADD_NEXTRE_CAPT;
                     end
 
                     S_ADD_NEXTRE_CAPT: begin
-                        z_re <= add_result;        // new z_re
-                        // 2 * z_re_z_im = z_re_z_im + z_re_z_im
+                        z_re <= add_result;
                         add_a <= z_re_z_im;
                         add_b <= z_re_z_im;
                         add_neg <= 0;
@@ -285,16 +293,15 @@ module mandelbrot_core (
                     end
 
                     S_ADD_2X_CAPT: begin
-                        // add_result = 2 * z_re_z_im
                         add_a <= add_result;
                         add_b <= c_im;
-                        add_neg <= 0;              // 2*z_re*z_im + c_im
+                        add_neg <= 0;
                         pipe_wait <= PIPE_WAIT;
                         state <= S_ADD_NEXTIM_CAPT;
                     end
 
                     S_ADD_NEXTIM_CAPT: begin
-                        z_im <= add_result;        // new z_im
+                        z_im <= add_result;
                         iter <= iter + 1;
                         state <= S_ITER_INC;
                     end
@@ -304,7 +311,7 @@ module mandelbrot_core (
                             state <= S_OUTPUT_WAIT;
                         end else begin
                             mul_a <= z_re;
-                            mul_b <= z_re;          // next z_re^2
+                            mul_b <= z_re;
                             pipe_wait <= PIPE_WAIT;
                             state <= S_MUL_ZRSQ_CAPT;
                         end
@@ -322,7 +329,7 @@ module mandelbrot_core (
                         fifo_wr <= 0;
                         add_a <= c_re;
                         add_b <= step_val;
-                        add_neg <= 0;              // c_re + step
+                        add_neg <= 0;
                         pipe_wait <= PIPE_WAIT;
                         state <= S_NEXT_COL;
                     end
@@ -339,18 +346,17 @@ module mandelbrot_core (
 
                     S_NEXT_ROW: begin
                         add_a <= c_im;
-                        add_b <= step_val;
-                        add_neg <= 1;              // c_im - step
+                        add_b <= row_step;
+                        add_neg <= 1;
                         pipe_wait <= PIPE_WAIT;
                         state <= S_NEXT_ROW_WAIT;
                     end
 
                     S_NEXT_ROW_WAIT: begin
-                        // add_result ready: c_im - step
-                        if ((row + 1) >= rows) begin
+                        if ((row + row_stride) >= rows) begin
                             state <= S_DONE;
                         end else begin
-                            row <= row + 1;
+                            row <= row + row_stride;
                             c_im <= add_result;
                             state <= S_ROW_START;
                         end

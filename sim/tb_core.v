@@ -79,7 +79,7 @@ module tb_core();
             @(negedge clk); start = 1;
             @(negedge clk); start = 0;
 
-            for (cycles = 0; cycles < 5000 && !seen_wr; cycles = cycles + 1) begin
+            for (cycles = 0; cycles < 8000 && !seen_wr; cycles = cycles + 1) begin
                 @(posedge clk);
                 if (fifo_wr) begin
                     seen_wr = 1;
