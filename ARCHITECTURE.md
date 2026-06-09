@@ -192,14 +192,14 @@ Detailed multiplier pipeline:
 
 ```mermaid
 flowchart LR
-    IN[Input a,b] --> R0[Stage M0\ninput registers\na_r,b_r]
-    R0 --> D0[Stage M1 comb\ndecode sign/exp/man\nzero detect]
-    D0 --> R1[Stage M1 reg\nfull_man_a_r/full_man_b_r\nresult_sign_man_r\nexp_sum_man_r\nzero flags]
-    R1 --> DSP[Stage M2 comb\nFP64 53x53 mantissa multiply\nDSP48E1 cascade]
-    DSP --> R2[Stage M2 reg\nman_product_dsp_r\nmetadata delay]
-    R2 --> R3[Stage M3 reg\nproduct + sign/exp/zero aligned]
-    R3 --> NORM[Stage M4 comb\nnormalize product\nadjust exponent\nzero/overflow handling]
-    NORM --> OUT[Stage M4 reg\nproduct output]
+    IN["Input a,b"] --> R0["Stage M0<br/>input registers<br/>a_r,b_r"]
+    R0 --> D0["Stage M1 comb<br/>decode sign/exp/man<br/>zero detect"]
+    D0 --> R1["Stage M1 reg<br/>full_man_a_r/full_man_b_r<br/>result_sign_man_r<br/>exp_sum_man_r<br/>zero flags"]
+    R1 --> DSP["Stage M2 comb<br/>FP64 53x53 mantissa multiply<br/>DSP48E1 cascade"]
+    DSP --> R2["Stage M2 reg<br/>man_product_dsp_r<br/>metadata delay"]
+    R2 --> R3["Stage M3 reg<br/>product + sign/exp/zero aligned"]
+    R3 --> NORM["Stage M4 comb<br/>normalize product<br/>adjust exponent<br/>zero/overflow handling"]
+    NORM --> OUT["Stage M4 reg<br/>product output"]
 ```
 
 Pipeline intent:
@@ -254,15 +254,15 @@ Detailed adder/subtractor pipeline:
 
 ```mermaid
 flowchart LR
-    IN[Input a,b] --> R0[Stage A0\ninput registers\na_r,b_r]
-    R0 --> D0[Stage A1 comb\ndecode sign/exp/man\nzero detect\ncompare magnitude]
-    D0 --> R1[Stage A1 reg\nlarge/small mantissas\nexp_large,diff\nsigns,zero flags]
-    R1 --> ALIGN[Stage A2 comb\nright shift small mantissa\nadd/sub aligned mantissas]
-    ALIGN --> R2[Stage A2 reg\nman_result_r\nexp/sign/zero/input bypass]
-    R2 --> LZ[Stage A3 comb\nleading-zero scan\nnormalize mantissa\nadjust exponent]
-    LZ --> R3[Stage A3 reg\nman_final_r\nexp_final_r\nsign_final_r\nzero/bypass flags]
-    R3 --> OF[Stage A4 comb\noverflow test\nfinal mux]
-    OF --> OUT[Stage A4 reg\nsum output]
+    IN["Input a,b"] --> R0["Stage A0<br/>input registers<br/>a_r,b_r"]
+    R0 --> D0["Stage A1 comb<br/>decode sign/exp/man<br/>zero detect<br/>compare magnitude"]
+    D0 --> R1["Stage A1 reg<br/>large/small mantissas<br/>exp_large,diff<br/>signs,zero flags"]
+    R1 --> ALIGN["Stage A2 comb<br/>right shift small mantissa<br/>add/sub aligned mantissas"]
+    ALIGN --> R2["Stage A2 reg<br/>man_result_r<br/>exp/sign/zero/input bypass"]
+    R2 --> LZ["Stage A3 comb<br/>leading-zero scan<br/>normalize mantissa<br/>adjust exponent"]
+    LZ --> R3["Stage A3 reg<br/>man_final_r<br/>exp_final_r<br/>sign_final_r<br/>zero/bypass flags"]
+    R3 --> OF["Stage A4 comb<br/>overflow test<br/>final mux"]
+    OF --> OUT["Stage A4 reg<br/>sum output"]
 ```
 
 Pipeline intent:
@@ -325,19 +325,19 @@ Worker coordinate initialization pipeline:
 
 ```mermaid
 flowchart TB
-    START[compute_start + image parameters] --> HW[Compute half_w\n(cols - 1) >> 1]
-    HW --> MW[Issue half_w * step\nfp_mul]
-    MW --> RE0[Issue center_re - half_w_step\nfp_add]
-    RE0 --> CRE[c_re_start ready]
-    CRE --> HH[Compute half_h\n(rows - 1) >> 1]
-    HH --> MH[Issue half_h * step\nfp_mul]
-    MH --> IMTOP[Issue center_im + half_h_step\nfp_add]
-    IMTOP --> CIMTOP[c_im_top ready]
-    CIMTOP --> RS[Issue row_stride * step\nfp_mul]
-    RS --> ROWSTEP[row_step ready]
-    ROWSTEP --> RSOFF[Issue row_start * step\nfp_mul]
-    RSOFF --> RSUB[Issue c_im_top - row_start_step\nfp_add]
-    RSUB --> FIRSTROW[first worker row c_im ready]
+    START["compute_start + image parameters"] --> HW["Compute half_w<br/>(cols - 1) >> 1"]
+    HW --> MW["Issue half_w * step<br/>fp_mul"]
+    MW --> RE0["Issue center_re - half_w_step<br/>fp_add"]
+    RE0 --> CRE["c_re_start ready"]
+    CRE --> HH["Compute half_h<br/>(rows - 1) >> 1"]
+    HH --> MH["Issue half_h * step<br/>fp_mul"]
+    MH --> IMTOP["Issue center_im + half_h_step<br/>fp_add"]
+    IMTOP --> CIMTOP["c_im_top ready"]
+    CIMTOP --> RS["Issue row_stride * step<br/>fp_mul"]
+    RS --> ROWSTEP["row_step ready"]
+    ROWSTEP --> RSOFF["Issue row_start * step<br/>fp_mul"]
+    RSOFF --> RSUB["Issue c_im_top - row_start_step<br/>fp_add"]
+    RSUB --> FIRSTROW["first worker row c_im ready"]
 ```
 
 For the current 4-core static scheduler, `row_stride=4` for every worker and `row_start` is the worker ID. This lets each worker advance from row `y` to row `y+4` with one precomputed FP decrement.
@@ -361,11 +361,11 @@ Static dispatch structure:
 
 ```mermaid
 flowchart LR
-    PARAM[Image parameters\ncenter, step, rows, cols, max_iter] --> DISP[work_dispatch_static_rows]
-    DISP -->|start,row_start=0,row_stride=4| C0[worker 0]
-    DISP -->|start,row_start=1,row_stride=4| C1[worker 1]
-    DISP -->|start,row_start=2,row_stride=4| C2[worker 2]
-    DISP -->|start,row_start=3,row_stride=4| C3[worker 3]
+    PARAM["Image parameters<br/>center, step, rows, cols, max_iter"] --> DISP["work_dispatch_static_rows"]
+    DISP -->|"start,row_start=0,row_stride=4"| C0["worker 0"]
+    DISP -->|"start,row_start=1,row_stride=4"| C1["worker 1"]
+    DISP -->|"start,row_start=2,row_stride=4"| C2["worker 2"]
+    DISP -->|"start,row_start=3,row_stride=4"| C3["worker 3"]
 
     subgraph ReplaceableBoundary[Replaceable scheduling boundary]
         DISP
@@ -390,14 +390,14 @@ Raster merge pipeline:
 
 ```mermaid
 flowchart TB
-    POS[Current output position\nrow,col,pixels_written] --> SEL[Select source_core = row % 4]
-    SEL --> WAIT{Selected core FIFO has data\nand output FIFO not full?}
+    POS["Current output position<br/>row,col,pixels_written"] --> SEL["Select source_core = row % 4"]
+    SEL --> WAIT{"Selected core FIFO has data<br/>and output FIFO not full?"}
     WAIT -->|no| SEL
     WAIT -->|yes| RD[Assert selected core_fifo_rd]
-    RD --> RWAIT[Wait one cycle\nsynchronous FIFO data valid]
-    RWAIT --> WR[Write fifo_data to shared output FIFO]
-    WR --> ADV[Advance col; wrap to next row]
-    ADV --> DONE{all pixels emitted?}
+    RD --> RWAIT["Wait one cycle<br/>synchronous FIFO data valid"]
+    RWAIT --> WR["Write fifo_data to shared output FIFO"]
+    WR --> ADV["Advance col; wrap to next row"]
+    ADV --> DONE{"all pixels emitted?"}
     DONE -->|no| POS
     DONE -->|yes| FRAME_DONE[merge done]
 ```
@@ -408,7 +408,7 @@ Merger state machine:
 stateDiagram-v2
     [*] --> S_IDLE
     S_IDLE --> S_WAIT: start
-    S_WAIT --> S_READ_WAIT: selected FIFO ready\nand output FIFO not full
+    S_WAIT --> S_READ_WAIT: selected FIFO ready and output FIFO not full
     S_READ_WAIT --> S_WRITE: read data valid
     S_WRITE --> S_WAIT: more pixels
     S_WRITE --> S_DONE: last pixel
@@ -466,23 +466,23 @@ Per-iteration issue/capture pipeline view:
 
 ```mermaid
 flowchart LR
-    I0[S_ITER_START\nissue z_re*z_re] --> W0[wait PIPE_WAIT]
-    W0 --> I1[S_MUL_ZRSQ_CAPT\ncapture z_re_sq\nissue z_im*z_im]
-    I1 --> W1[wait PIPE_WAIT]
-    W1 --> I2[S_MUL_ZISQ_CAPT\ncapture z_im_sq\nissue z_re*z_im\nissue z_re_sq+z_im_sq]
-    I2 --> W2[wait PIPE_WAIT]
-    W2 --> I3[S_MUL_ZRZI_CAPT\ncapture z_re_z_im\ncheck escape]
+    I0["S_ITER_START<br/>issue z_re*z_re"] --> W0["wait PIPE_WAIT"]
+    W0 --> I1["S_MUL_ZRSQ_CAPT<br/>capture z_re_sq<br/>issue z_im*z_im"]
+    I1 --> W1["wait PIPE_WAIT"]
+    W1 --> I2["S_MUL_ZISQ_CAPT<br/>capture z_im_sq<br/>issue z_re*z_im<br/>issue z_re_sq+z_im_sq"]
+    I2 --> W2["wait PIPE_WAIT"]
+    W2 --> I3["S_MUL_ZRZI_CAPT<br/>capture z_re_z_im<br/>check escape"]
     I3 -->|escaped| OUT[output iter]
-    I3 -->|not escaped| I4[issue z_re_sq-z_im_sq]
-    I4 --> W3[wait PIPE_WAIT]
-    W3 --> I5[S_SUB_RE_CAPT\nissue diff+c_re]
-    I5 --> W4[wait PIPE_WAIT]
-    W4 --> I6[S_ADD_NEXTRE_CAPT\ncapture z_re_next\nissue z_re_z_im+z_re_z_im]
-    I6 --> W5[wait PIPE_WAIT]
-    W5 --> I7[S_ADD_2X_CAPT\nissue 2*z_re*z_im+c_im]
-    I7 --> W6[wait PIPE_WAIT]
-    W6 --> I8[S_ADD_NEXTIM_CAPT\ncapture z_im_next\niter++]
-    I8 --> I9[S_ITER_INC]
+    I3 -->|not escaped| I4["issue z_re_sq-z_im_sq"]
+    I4 --> W3["wait PIPE_WAIT"]
+    W3 --> I5["S_SUB_RE_CAPT<br/>issue diff+c_re"]
+    I5 --> W4["wait PIPE_WAIT"]
+    W4 --> I6["S_ADD_NEXTRE_CAPT<br/>capture z_re_next<br/>issue z_re_z_im+z_re_z_im"]
+    I6 --> W5["wait PIPE_WAIT"]
+    W5 --> I7["S_ADD_2X_CAPT<br/>issue 2*z_re*z_im+c_im"]
+    I7 --> W6["wait PIPE_WAIT"]
+    W6 --> I8["S_ADD_NEXTIM_CAPT<br/>capture z_im_next<br/>iter++"]
+    I8 --> I9["S_ITER_INC"]
     I9 -->|iter < max_iter| I0
     I9 -->|iter >= max_iter| OUT
 ```
@@ -528,15 +528,15 @@ Output buffering and backpressure path:
 
 ```mermaid
 flowchart LR
-    W[worker pixel complete] --> CFULL{per-core FIFO full?}
-    CFULL -->|yes| WSTALL[stall worker output state]
-    CFULL -->|no| CWR[write per-core FIFO]
-    CWR --> MERGE[raster merger]
-    MERGE --> OFULL{shared output FIFO full?}
-    OFULL -->|yes| MSTALL[stall merger]
-    OFULL -->|no| OWR[write shared output FIFO]
-    OWR --> TXC[tx_ctrl reads FIFO]
-    TXC --> UART[UART TX]
+    W["worker pixel complete"] --> CFULL{"per-core FIFO full?"}
+    CFULL -->|yes| WSTALL["stall worker output state"]
+    CFULL -->|no| CWR["write per-core FIFO"]
+    CWR --> MERGE["raster merger"]
+    MERGE --> OFULL{"shared output FIFO full?"}
+    OFULL -->|yes| MSTALL["stall merger"]
+    OFULL -->|no| OWR["write shared output FIFO"]
+    OWR --> TXC["tx_ctrl reads FIFO"]
+    TXC --> UART["UART TX"]
 
     MSTALL -. backpressure .-> MERGE
     WSTALL -. backpressure .-> W
@@ -578,11 +578,11 @@ UART transmit pipeline:
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> START_BIT: transmit asserted\nand byte accepted
+    IDLE --> START_BIT: transmit asserted and byte accepted
     START_BIT --> DATA_BITS: send 0 start bit
     DATA_BITS --> DATA_BITS: send bit0..bit7 LSB first
     DATA_BITS --> STOP_BIT: all data bits sent
-    STOP_BIT --> IDLE: send 1 stop bit\ntransmit_avail high
+    STOP_BIT --> IDLE: send 1 stop bit, transmit_avail high
 ```
 
 ### 9.1 Baudrate Experiment Summary
@@ -620,15 +620,15 @@ TX controller response pipeline:
 
 ```mermaid
 flowchart LR
-    START[tx_start rows/cols] --> H0[Send header byte 0\n0x52]
-    H0 --> H1[Send header byte 1\n0x4B]
-    H1 --> HR[Send rows LE]
-    HR --> HC[Send cols LE]
-    HC --> PIXWAIT{pixels_sent < rows*cols?}
+    START["tx_start rows/cols"] --> H0["Send header byte 0<br/>0x52"]
+    H0 --> H1["Send header byte 1<br/>0x4B"]
+    H1 --> HR["Send rows LE"]
+    HR --> HC["Send cols LE"]
+    HC --> PIXWAIT{"pixels_sent < rows*cols?"}
     PIXWAIT -->|yes| RD[Assert fifo_rd]
-    RD --> RWAIT[S_READ_WAIT\nsynchronous FIFO data valid]
-    RWAIT --> LO[Send pixel low byte\nchecksum xor]
-    LO --> HI[Send pixel high byte\nchecksum xor]
+    RD --> RWAIT["S_READ_WAIT<br/>synchronous FIFO data valid"]
+    RWAIT --> LO["Send pixel low byte<br/>checksum xor"]
+    LO --> HI["Send pixel high byte<br/>checksum xor"]
     HI --> PIXWAIT
     PIXWAIT -->|no| CS[Send checksum]
     CS --> DONE[Return idle]
