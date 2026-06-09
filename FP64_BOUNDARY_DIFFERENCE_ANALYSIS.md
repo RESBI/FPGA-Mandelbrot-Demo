@@ -126,17 +126,17 @@ exponent (typically λ ≈ ln 2 ≈ 0.69 for the Mandelbrot set boundary).
 
 ### Trace of Pixel [539, 210] (Standard benchmark, SW=64, HW=49)
 
-| Iteration | SW z_re | HW z_re | |z|_SW | |z|_HW | |Δ| |
+| Iteration | SW z_re | HW z_re | mag(SW) | mag(HW) | \|Δ\||
 |---:|---:|---:|---:|---:|---:|
-| 10 | 1.964606 | 1.964606 | 1.96461 | 1.96461 | 2.7×10⁻¹³ |
-| 20 | −1.294359 | −1.294358 | 1.29436 | 1.29436 | 1.1×10⁻⁹ |
-| 30 | −0.377914 | −0.377916 | 0.37791 | 0.37792 | 1.4×10⁻⁶ |
-| 40 | 1.910899 | 1.910505 | 1.91090 | 1.91051 | 3.9×10⁻⁴ |
-| 44 | 0.122077 | 0.143358 | 0.12208 | 0.14336 | 2.1×10⁻² |
+| 10 | 1.964606 | 1.964606 | 1.96461 | 1.96461 | 2.7e-13 |
+| 20 | -1.294359 | -1.294358 | 1.29436 | 1.29436 | 1.1e-9 |
+| 30 | -0.377914 | -0.377916 | 0.37791 | 0.37792 | 1.4e-6 |
+| 40 | 1.910899 | 1.910505 | 1.91090 | 1.91051 | 3.9e-4 |
+| 44 | 0.122077 | 0.143358 | 0.12208 | 0.14336 | **0.021** |
 | 48 | 1.046909 | 0.753957 | 1.04691 | 0.75396 | **0.29** |
-| 50 | −1.184428 | 0.045609 | 1.18443 | 0.04561 | **1.23** |
-| 52 | −1.643820 | 1.985696 | 1.64382 | 1.98570 | **3.63** |
-| 54 | −1.502182 | 1.784979 | 1.50218 | 1.78498 | **3.29** |
+| 50 | -1.184428 | 0.045609 | 1.18443 | 0.04561 | **1.23** |
+| 52 | -1.643820 | 1.985696 | 1.64382 | 1.98570 | **3.63** |
+| 54 | -1.502182 | 1.784979 | 1.50218 | 1.78498 | **3.29** |
 | ... | ... | ... | ... | ... | ... |
 
 **Key observations:**
@@ -212,8 +212,8 @@ None of these are necessary for the project’s goals.
 | ±1 iteration | Chaotic divergence of 1 bounce near threshold | ~90% of diffs | Negligible; visually identical |
 | ±(2–5) iterations | Earlier/later escape due to trajectory bifurcation | ~9% of diffs | Minor; not visible in rendered image |
 | ±(5+) iterations | Deep boundary points with many‑iteration divergence | ~1% of diffs | Occasionally visible as single‑pixel color shift in zoomed renders |
-| False escape (should be in set) | Truncation pushes |z|² past 4.0 earlier | Rare | Extremely rare; not observed in tested scenes |
-| Missed escape (should have escaped) | Truncation keeps |z|² below 4.0 | ~0 | `quick_esc` individual square check prevents this |
+| False escape (should be in set) | Truncation pushes mag² past 4.0 earlier | Rare | Extremely rare; not observed in tested scenes |
+| Missed escape (should have escaped) | Truncation keeps mag² below 4.0 | ~0 | `quick_esc` individual square check prevents this |
 
 ---
 
