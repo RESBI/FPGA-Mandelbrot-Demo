@@ -21,7 +21,7 @@ Current validated default configuration:
 | Floating-point mode | FP64 |
 | Compute cores | 4 |
 | Core effective rate | 100 MHz per core (`FP_CE_DIV=1`) |
-| UART baudrate | 500000 |
+| UART baudrate | 576000 |
 | Host serial port default | `COM4` |
 | Pixel format | `uint16` iteration count, little-endian |
 | Maximum iteration count | 65535 |
@@ -58,7 +58,9 @@ Mandelbrot/
 │   ├── test_esc.py
 │   ├── test_points.py
 │   ├── scan_points.py
-│   └── test_random_compare.py
+│   ├── test_random_compare.py
+│   ├── uart_raw_probe.py
+│   └── uart_listen_raw.py
 ├── build_fp64.tcl               FP64 Vivado build script
 ├── build_fp128.tcl              FP128 Vivado build script
 ├── program.tcl                  JTAG programming script
@@ -70,6 +72,9 @@ Mandelbrot/
 ├── MULTICORE_4CORE_ARCHITECTURE.md
 ├── PERFORMANCE_100MHZ.md
 ├── UART_BAUDRATE_BENCHMARK.md
+├── UART_BAUDRATE_INVESTIGATION.md
+├── UART_TIMING_ANALYSIS.md
+├── FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md
 ├── MULTICORE_FEASIBILITY.md
 └── DESIGN.md                    Original design notes
 ```
@@ -100,8 +105,8 @@ flowchart TB
         CLK[sys_clk 100 MHz] --> CE[fp_ce generator<br/>FP_CE_DIV=1]
         RST[reset counter]
 
-        URX[uart_rx<br/>500000 baud]
-        UTX[uart_tx<br/>500000 baud]
+        URX[uart_rx<br/>576000 baud]
+        UTX[uart_tx<br/>576000 baud]
         CMD[cmd_parser]
         CORE[mandelbrot_multicore<br/>CORE_COUNT=4]
         FIFO[queue<br/>1024 x 16-bit]
@@ -207,15 +212,15 @@ You can override it on every command:
 python python\mandelbrot_host.py --port COM5
 ```
 
-5. Confirm baudrate. The RTL and Python host currently use `500000` baud.
+5. Confirm baudrate. The RTL and Python host currently use `576000` baud.
 
 Relevant files:
 
 | File | Setting |
 |---|---|
-| `rtl/uart_rx.v` | `CLOCKS_PER_BIT = 200` |
-| `rtl/uart_tx.v` | `CLOCKS_PER_BIT = 200` |
-| `python/mandelbrot_host.py` | `BAUD = 500000` |
+| `rtl/uart_rx.v` | `CLOCKS_PER_BIT = 174` |
+| `rtl/uart_tx.v` | `CLOCKS_PER_BIT = 174` |
+| `python/mandelbrot_host.py` | `BAUD = 576000` |
 
 Do not change only one side. The RTL and host must match.
 
@@ -405,24 +410,34 @@ sequenceDiagram
 
 ## Performance Notes
 
-At 500000 baud, the UART ceiling is approximately:
+At 576000 baud, the UART ceiling is approximately:
 
 ```text
-500000 bits/s / 10 bits per UART byte / 2 bytes per pixel = 25000 pixels/s
+576000 bits/s / 10 bits per UART byte / 2 bytes per pixel = 28800 pixels/s
 ```
 
-Measured current 4-core examples:
+Measured current 4-core examples (576000 baud):
 
 | Case | Center | Step | Max Iter | FPGA Time | Throughput |
-|---|---|---:|---:|---:|---:|
-| `160x120`, standard | `(-0.5, 0.0)` | `0.005` | `256` | `0.902s` | `21292.23 pps` |
-| `1920x1080`, standard | `(-0.5, 0.0)` | `0.002` | `64` | `83.501s` | `24833.32 pps` |
-| `1920x1080`, Seahorse zoom | `(-0.743643887037151, 0.13182590420533)` | `5e-6` | `512` | `83.956s` | `24698.58 pps` |
-| `1920x1080`, deep tendrils | `(-0.77568377, 0.13646737)` | `1e-9` | `8192` | `93.960s` | `22068.99 pps` |
-| `1920x1080`, Mini-brot | `(-1.25066, 0.02012)` | `1e-9` | `8192` | `234.261s` | `8851.67 pps` |
-| `1920x1080`, deep Seahorse | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` | `103.032s` | `20125.73 pps` |
+|---:|---:|---:|---:|---:|
+| `160x120`, standard | `(-0.5, 0.0)` | `0.005` | `256` | `0.896s` | `21432.32 pps` |
+| `1920x1080`, standard | `(-0.5, 0.0)` | `0.002` | `64` | `72.735s` | `28508.82 pps` |
+| `1920x1080`, Seahorse zoom | `(-0.743643887037151, 0.13182590420533)` | `5e-6` | `512` | `74.265s` | `27921.47 pps` |
+| `1920x1080`, deep Seahorse | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` | `100.658s` | `20600.46 pps` |
 
 Fast scenes are UART-limited. Deep zoom/high-iteration scenes benefit from 4 cores until aggregate compute throughput approaches the UART ceiling.
+
+### Baudrate Investigation
+
+Higher baudrates were tested with a 100 MHz integer divider and a TX-only isolation experiment. The failure boundary above 520000 baud is primarily caused by the single-sample UART RX lacking oversampling, combined with CP2102 baud-rate quantisation error at non-standard rates. 576000 baud (a common PC standard rate) works stably and provides a ~15% throughput improvement over 500000 baud.
+
+Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md), [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md).
+
+### HW/SW Boundary Differences
+
+The FPGA FP64 engine uses truncation-rounding (round-toward-zero) while the Python software reference uses IEEE 754 round-to-nearest-even. This causes small pixel-level differences near the Mandelbrot set boundary where chaotic dynamics amplify sub-ULP errors across iterations. These differences are not a bug and do not affect visual image quality.
+
+Detailed report: [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md).
 
 Current 4-core 100 MHz FP64 routed timing is signed off with `WNS=0.224ns`, `TNS=0.000ns`, `WHS=0.005ns`, and no multicycle exceptions.
 
@@ -465,6 +480,9 @@ ARCHITECTURE.md
 ARCHITECTURE_EVOLUTION_REPORT.md
 PERFORMANCE_100MHZ.md
 UART_BAUDRATE_BENCHMARK.md
+UART_BAUDRATE_INVESTIGATION.md
+UART_TIMING_ANALYSIS.md
+FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md
 MULTICORE_FEASIBILITY.md
 MULTICORE_4CORE_ARCHITECTURE.md
 ```

@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This project implements a UART-controlled Mandelbrot accelerator on FPGA. The host sends one binary command describing a complete image, and the FPGA streams back one 16-bit iteration count per pixel. The current stable configuration is FP64, four Mandelbrot workers, `FP_CE_DIV=1`, true 100 MHz operation per worker, and 500000 baud UART.
+This project implements a UART-controlled Mandelbrot accelerator on FPGA. The host sends one binary command describing a complete image, and the FPGA streams back one 16-bit iteration count per pixel. The current stable configuration is FP64, four Mandelbrot workers, `FP_CE_DIV=1`, true 100 MHz operation per worker, and 576000 baud UART.
 
 The design is intentionally streaming-oriented. It does not store a full frame on FPGA. Four workers compute interleaved rows, per-core FIFOs absorb local imbalance, a raster-order merger restores the original host-visible pixel order, and the transmit controller streams pixels to the host as soon as they are available.
 
@@ -13,7 +13,7 @@ Current validated capabilities:
 | System clock | 100 MHz |
 | FP/core effective clock enable rate | 100 MHz (`FP_CE_DIV=1`) |
 | Mandelbrot workers | 4 |
-| UART baudrate | 500000 baud |
+| UART baudrate | 576000 baud |
 | Pixel format | `uint16`, little-endian iteration count |
 | Maximum iteration count | 65535 |
 | Width/height fields | 16-bit each |
@@ -51,8 +51,8 @@ The main modules are:
 | Module | File | Role |
 |---|---|---|
 | `top` | `rtl/top.v` | Instantiates clock-enable generator, UART, command parser, 4-core wrapper, output FIFO, and TX controller. |
-| `uart_rx` | `rtl/uart_rx.v` | Receives 8N1 UART bytes at 500000 baud. |
-| `uart_tx` | `rtl/uart_tx.v` | Sends 8N1 UART bytes at 500000 baud. |
+| `uart_rx` | `rtl/uart_rx.v` | Receives 8N1 UART bytes at 576000 baud. |
+| `uart_tx` | `rtl/uart_tx.v` | Sends 8N1 UART bytes at 576000 baud. |
 | `cmd_parser` | `rtl/cmd_parser.v` | Parses command packet and validates XOR checksum. |
 | `mandelbrot_multicore` | `rtl/mandelbrot_multicore.v` | 4-core wrapper with scheduler, per-core FIFOs, raster merger, and `tx_start` handling. |
 | `work_dispatch_static_rows` | `rtl/work_dispatch_static_rows.v` | Current modular scheduler. Assigns static interleaved rows to workers. |
@@ -171,7 +171,7 @@ Important simplifications:
 | Rounding | Truncation/limited normalization behavior, not full IEEE rounding. |
 | Exceptions | No exception flags. |
 
-The FPGA and software reference are compared against the implemented RTL behavior, not a full IEEE-754 formal model.
+The FPGA and software reference are compared against the implemented RTL behavior, not a full IEEE-754 formal model. A detailed analysis of boundary pixel differences (truncation vs IEEE round-to-nearest-even) is available in [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md).
 
 ## 6. Floating-Point Multiplier Pipeline
 
@@ -554,12 +554,12 @@ Because `queue.v` has synchronous read data, both the raster merger and `tx_ctrl
 
 UART is 8N1, no parity, no flow control.
 
-Current baudrate is 500000. With a 100 MHz clock:
+Current baudrate is 576000. With a 100 MHz clock:
 
 ```text
-CLOCKS_PER_BIT = 200
-actual baud = 100e6 / 200 = 500000 baud
-error = 0.0000%
+CLOCKS_PER_BIT = 174
+actual baud = 100e6 / 174 = 574712.64 baud
+error = -0.2235% (vs host requested 576000)
 ```
 
 `uart_rx.v` synchronizes the asynchronous RX input with two flip-flops, detects the falling start edge, waits half a bit, then samples each data bit every `CLOCKS_PER_BIT` clocks. The current implementation uses `CLOCKS_PER_BIT - 1` comparisons to avoid off-by-one bit timing drift.
@@ -593,19 +593,24 @@ stateDiagram-v2
 
 ### 9.1 Baudrate Experiment Summary
 
-The design was tested at higher baudrates:
+The UART baudrate was systematically investigated above 500000 baud. Key findings:
 
-| Baudrate | Result |
-|---:|---|
-| 115200 | Stable, original baseline. |
-| 460800 | Stable previous default. |
-| 500000 | Stable current default. |
-| 625000 | Built, exact divider, but board-level UART communication timed out. |
-| 800000 | Built, exact divider, but board-level UART communication timed out. |
-| 921600 | Built and met timing, but board-level UART communication timed out. |
-| 1000000 | Built, exact divider, but board-level UART communication timed out. |
+| Baudrate | CPB | FPGA actual | Result | Root cause |
+|---:|---:|---:|---:|---|
+| 500000 | 200 | 500000.00 | Pass (was default) | Exact divider, clean CP2102 |
+| 520833 | 192 | 520833.33 | Pass | Exact divider |
+| 523560 | 191 | 523560.21 | Marginal (1/8 corrupt) | CP2102 baud quantisation mismatch |
+| 526316 | 190 | 526315.79 | Fail (byte corruption) | CP2102 baud quantisation mismatch |
+| 530000 | 189 | 529100.53 | Fail (silent) | RX timing margin collapse |
+| 540000 | 185 | 540540.54 | Fail (silent) | RX timing margin collapse |
+| **576000** | **174** | **574712.64** | **Pass (current)** | **Standard PC baud, clean CP2102 support** |
+| 625000 | 160 | 625000.00 | Fail (silent) | FPGA RX uplink failure |
+| 800000 | 125 | 800000.00 | Fail (silent) | FPGA RX uplink failure |
+| 1000000 | 100 | 1000000.00 | Fail (silent) | FPGA RX uplink failure |
 
-Rates above 500000 likely need a more robust UART RX design, such as 8x/16x oversampling, majority voting near the bit center, and possibly a fractional baud generator for standard rates.
+A TX-only isolation experiment using `uart_tx_pattern_top.v` proved that the FPGA TX downlink functions correctly at 625000, 800000, and 1000000 baud. The failure at those rates is in the FPGA RX uplink path, caused by the single-sample architecture lacking oversampling and start/stop-bit verification.
+
+Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md), [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md).
 
 ## 10. TX Controller And Large-Frame Support
 
@@ -651,7 +656,7 @@ Responsibilities:
 | CLI parser | Accept center, step, max iteration, dimensions, output, mode, port, timeout, verify flag. |
 | FP encoding | Pack FP64 with Python `struct.pack('<d')`; pack FP128 manually for experimental mode. |
 | Command builder | Build little-endian command packet and XOR checksum. |
-| Serial transport | Open `COM4` by default at 500000 baud. |
+| Serial transport | Open `COM4` by default at 576000 baud. |
 | Response receiver | Read header, expected pixel bytes, checksum, and convert to uint16 pixels. |
 | Renderer | Convert iteration counts to PNG or text output. |
 | Software reference | Optional `--verify` computes a Python Mandelbrot image matching RTL coordinate rules. |
@@ -781,17 +786,17 @@ The system has two main bottlenecks:
 1. UART bandwidth for fast-escaping or low-iteration scenes.
 2. FP/core compute for high-iteration zooms.
 
-At 500000 baud, the practical upper bound is roughly:
+At 576000 baud, the practical upper bound is roughly:
 
 ```text
-500000 bits/s / 10 UART bits/byte / 2 bytes/pixel ~= 25000 pixels/s
+576000 bits/s / 10 UART bits/byte / 2 bytes/pixel ~= 28800 pixels/s
 ```
 
 Measured current fast throughput is close to this limit:
 
 ```text
-1080p standard @64: 24833.32 pixels/s
-1080p deep triple spiral @8192: 24790.22 pixels/s
+1080p standard @64: 28508.82 pixels/s
+1080p Seahorse zoom @512: 27921.47 pixels/s
 ```
 
 Current 4-core high-iteration examples:
@@ -803,17 +808,14 @@ Current 4-core high-iteration examples:
 | `1080p deep minibrot @8192` | `234.261s` | `8851.67 pps` | `850.720s` | `3.63x` |
 | `1080p deep seahorse @1024` | `103.032s` | `20125.73 pps` | `363.253s` | `3.53x` |
 
-Validated 1080p examples:
+Validated 1080p examples (576000 baud):
 
 | Case | FPGA Time | Throughput |
 |---|---:|---:|
-| 1080p fast escape @128 | 83.520 s | 24827.49 pixels/s |
-| 1080p standard @64 | 83.501 s | 24833.32 pixels/s |
-| 1080p Seahorse @512, step `5e-6` | 83.956 s | 24698.58 pixels/s |
-| 1080p deep triple spiral @8192 | 83.646 s | 24790.22 pixels/s |
-| 1080p deep tendrils @8192, step `1e-9` | 93.960 s | 22068.99 pixels/s |
-| 1080p Mini-brot @8192, step `1e-9` | 234.261 s | 8851.67 pixels/s |
-| 1080p deep Seahorse @1024, step `1e-8` | 103.032 s | 20125.73 pixels/s |
+| 1080p fast escape @128 | 72.735 s | 28508.82 pixels/s |
+| 1080p standard @64 | 72.735 s | 28508.82 pixels/s |
+| 1080p Seahorse @512, step `5e-6` | 74.265 s | 27921.47 pixels/s |
+| 1080p deep Seahorse @1024, step `1e-8` | 100.658 s | 20600.46 pixels/s |
 
 ## 14. Resource Use
 
@@ -834,7 +836,7 @@ The design still has logic and DSP headroom, but many practical scenes are now l
 | Limitation | Details |
 |---|---|
 | Static 4-core scheduler | Interleaved rows balance many views, but strict raster ordering can still wait on a slower row. |
-| UART output | Fast scenes are capped near 25000 pixels/s at 500000 baud. |
+| UART output | Fast scenes are capped near 28800 pixels/s at 576000 baud. |
 | FP64 precision | Very deep zooms below approximately `1e-12` to `1e-14` pixel step become precision-sensitive. |
 | FP units are IEEE-like, not full IEEE-754 | No full NaN/Inf/denormal/rounding support. |
 | FP128 mode exists structurally | Most validation and performance work has focused on FP64. |

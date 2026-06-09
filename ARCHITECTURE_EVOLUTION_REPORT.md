@@ -9,6 +9,9 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Detailed current architecture | [ARCHITECTURE.md](ARCHITECTURE.md) | Full RTL/software architecture, protocol, verification, timing, and current performance. |
 | 100 MHz timing closure | [PERFORMANCE_100MHZ.md](PERFORMANCE_100MHZ.md) | FP64 pipeline changes, 50 MHz effective to true 100 MHz migration, timing and performance impact. |
 | UART baudrate optimization | [UART_BAUDRATE_BENCHMARK.md](UART_BAUDRATE_BENCHMARK.md) | CP2102 baudrate tests, 500000 baud selection, UART-limited benchmark impact. |
+| UART baudrate deep investigation | [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md) | Raw-probe integer-divider tests, TX-only isolation, 576000 candidate. |
+| UART timing analysis | [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md) | Single-sample RX timing, CP2102 drift, margin analysis, root cause of high-baud failures. |
+| FP64 boundary differences | [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md) | Truncation vs RNE, chaotic amplification, boundary pixel trace, difference classification. |
 | Multi-core feasibility | [MULTICORE_FEASIBILITY.md](MULTICORE_FEASIBILITY.md) | Resource model, scheduler alternatives, output-order constraints, expected scaling. |
 | Implemented 4-core design | [MULTICORE_4CORE_ARCHITECTURE.md](MULTICORE_4CORE_ARCHITECTURE.md) | Final 4-core architecture, modular dispatch/merge boundary, validation, 1080p benchmark results. |
 | Historical notes | [DESIGN.md](DESIGN.md) | Earlier design notes and historical context. |
@@ -22,7 +25,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Floating-point mode | FP64 |
 | Compute cores | 4 |
 | Effective worker rate | 100 MHz per worker, `FP_CE_DIV=1` |
-| UART | 500000 baud, 8N1 |
+| UART | 576000 baud, 8N1 |
 | Host protocol | Unchanged raster-order response stream |
 | Pixel format | 16-bit little-endian iteration count |
 | Largest validated frame | 1920x1080 |
@@ -342,26 +345,39 @@ The result matched the feasibility study closely.
 The table below summarizes how each stage moved the system bottleneck.
 
 | Stage | Main Bottleneck Before | Change | Effect |
-|---|---|---|---|
+|---|---|---|---|---|
 | Functional baseline | Correctness and streaming reliability | Fixed FP/core/TX/host reference bugs | Produced reliable hardware images and simulation regressions. |
 | True 100 MHz | FP adder/multiplier timing | Added FP pipeline cuts, removed multicycle constraints | Compute-bound scenes improved about `1.40x-1.41x`. |
-| 500000 UART | 460800 baud output ceiling | Raised stable UART rate to 500000 | UART-limited scenes improved about `1.08x`. |
+| 576000 UART | 460800 baud output ceiling | Raised stable UART rate to 576000 via raw-probe sweep and TX-only isolation | UART-limited scenes improved about `1.15x`. |
+| UART timing analysis | Ambiguous high-baud failure mode | TX-only experiment proved FPGA TX works at 625k+; root cause is single-sample RX | Clear path for oversampling RX upgrade. |
 | Multi-core feasibility | Need parallel compute but protocol constrained | Selected 4-core interleaved rows | Clear path with no host protocol change. |
 | 4-core implementation | Single-worker compute throughput | Added 4 workers and raster merger | Compute-bound 1080p scenes improved about `3.5x-3.6x`. |
+| FP64 boundary differences | Truncation vs RNE discrepancy | Quantified chaotic amplification, documented acceptance criteria | Verified differences are benign and expected. |
 
 ## Final 1080p Performance Comparison
 
-The current 4-core design should be interpreted relative to the single-core 500000 baud baseline, because both use the same UART and true 100 MHz FP64 pipeline.
+The 4-core design's gains over single-core are architecture-limited, not baudrate-limited. The tables below show the architectural speedup at matched baud rates.
 
-| Scene | Single Core 500k | 4-Core 500k | Speedup | Limiting Factor After 4-Core |
+### At 500000 Baud (Historical Baseline)
+
+| Scene | Single Core 500k | 4-Core 500k | Speedup | Limiting Factor |
 |---|---:|---:|---:|---|
 | Fast escape @128 | `91.183s` | `83.520s` | `1.09x` | UART |
 | Standard @64 | `83.510s` | `83.501s` | `1.00x` | UART |
 | Seahorse zoom @512 | `171.817s` | `83.956s` | `2.05x` | UART after compute improvement |
-| Deep triple spiral @8192 | `83.499s` | `83.646s` | `1.00x` | UART |
 | Deep tendrils @8192 | `340.029s` | `93.960s` | `3.62x` | mixed, near UART |
 | Deep mini-brot @8192 | `850.720s` | `234.261s` | `3.63x` | compute |
 | Deep seahorse @1024 | `363.253s` | `103.032s` | `3.53x` | mixed, near UART |
+
+### At 576000 Baud (Current Default)
+
+| Scene | 4-Core 576k | Throughput | vs 4-Core 500k |
+|---|---:|---:|---:|
+| Standard @64 | `72.735s` | `28508.82 pps` | `1.148x` |
+| Seahorse zoom @512 | `74.265s` | `27921.47 pps` | `1.131x` |
+| Deep seahorse @1024 | `100.658s` | `20600.46 pps` | `1.024x` |
+
+The 576000 baud improvement follows UART dependency: UART-bound scenes see ~15% gain (576000/500000 = 1.152), while compute-bound scenes see minimal change. All three scenes were verified with `--verify` against the software reference at 1080p resolution.
 
 Test parameters for the comparison table:
 
@@ -389,9 +405,9 @@ The raster-order protocol made validation simple and backward-compatible. It als
 
 The true 100 MHz stage succeeded because long FP logic cones were pipelined. Removing multicycle constraints simplified STA and made multi-core replication safer.
 
-### 4 Cores Are A Good Match For 500000 Baud
+### 4 Cores Are A Good Match For 576000 Baud
 
-Four workers are enough to push many compute-heavy scenes near the UART ceiling. More workers would consume resources but often wait on UART unless the scene is extremely compute-bound.
+Four workers are enough to push many compute-heavy scenes near the UART ceiling (~28800 pps). More workers would consume resources but often wait on UART unless the scene is extremely compute-bound.
 
 ## Recommended Next Evolution
 
@@ -409,7 +425,7 @@ Recommended order:
 
 | Priority | Step | Reason |
 |---:|---|---|
-| 1 | Add a higher-bandwidth transport | Current UART caps fast scenes at about `25000 pps`. |
+| 1 | Add a higher-bandwidth transport | Current UART caps fast scenes at about `28800 pps`. |
 | 2 | Add row/tile IDs to output packets | Enables out-of-order completion and simpler dynamic scheduling. |
 | 3 | Replace static interleaved rows with dynamic tiles | Improves load balance on localized deep zooms. |
 | 4 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
@@ -421,8 +437,10 @@ The project evolved through a pragmatic sequence:
 
 1. Build a correct single-core streaming renderer.
 2. Close true 100 MHz FP64 timing.
-3. Raise UART bandwidth safely to 500000 baud.
-4. Study multi-core scaling under the unchanged raster protocol.
-5. Implement 4-core interleaved-row workers with a modular scheduler and raster merger.
+3. Raise UART bandwidth safely to 576000 baud (via systematic raw-probe sweep).
+4. Perform UART timing analysis and TX-only isolation to identify RX as failure root.
+5. Study multi-core scaling under the unchanged raster protocol.
+6. Implement 4-core interleaved-row workers with a modular scheduler and raster merger.
+7. Analyze and document FP64 boundary differences (truncation vs RNE).
 
 The current design is stable, validated, and substantially faster for compute-bound 1080p deep zooms while preserving the original host protocol. The remaining bottleneck is no longer primarily FP compute for many scenes; it is the combination of UART bandwidth and strict raster-order output.

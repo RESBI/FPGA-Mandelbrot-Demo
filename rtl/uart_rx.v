@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module uart_rx #(
-    parameter CLOCKS_PER_BIT = 200
+    parameter CLOCKS_PER_BIT = 174
 ) (
     input  wire         rx,
     input  wire         clk,

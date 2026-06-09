@@ -19,7 +19,7 @@ import argparse
 import os
 
 PORT = "COM4"
-BAUD = 500000
+BAUD = 576000
 TIMEOUT = 180.0
 
 # ============================================================
