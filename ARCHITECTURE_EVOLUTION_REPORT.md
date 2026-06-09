@@ -388,13 +388,16 @@ The 4-core design's gains over single-core are architecture-limited, not baudrat
 
 ### At 576000 Baud (Current Default)
 
-| Scene | 4-Core 576k | Throughput | vs 4-Core 500k |
-|---|---:|---:|---:|
-| Standard @64 | `72.735s` | `28508.82 pps` | `1.148x` |
-| Seahorse zoom @512 | `74.265s` | `27921.47 pps` | `1.131x` |
-| Deep seahorse @1024 | `100.658s` | `20600.46 pps` | `1.024x` |
+| Scene | 4-Core 500k | 4-Core 576k | Throughput | vs 4-Core 500k |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `83.520s` | `72.736s` | `28508.56 pps` | `1.15x` |
+| Standard @64 | `83.510s` | `72.735s` | `28508.82 pps` | `1.15x` |
+| Seahorse zoom @512 | `83.956s` | `74.265s` | `27921.47 pps` | `1.13x` |
+| Deep tendrils @8192 | `93.960s` | `93.916s` | `22079.29 pps` | `1.00x` |
+| Deep mini-brot @8192 | `234.261s` | `234.231s` | `8852.78 pps` | `1.00x` |
+| Deep seahorse @1024 | `103.032s` | `100.658s` | `20600.46 pps` | `1.02x` |
 
-The 576000 baud improvement follows UART dependency: UART-bound scenes see ~15% gain (576000/500000 = 1.152), while compute-bound scenes see minimal change. All three scenes were verified with `--verify` against the software reference at 1080p resolution.
+The 576000 baud improvement follows UART dependency precisely: UART-bound scenes see the full ~15% raw bandwidth gain (576000/500000 = 1.152), mixed-bound scenes see a partial improvement (1.02x–1.13x), and compute-bound scenes see no change. All six scenes ran successfully at 1080p resolution; the first three were verified with `--verify` against the software reference.
 
 Test parameters for the comparison table:
 

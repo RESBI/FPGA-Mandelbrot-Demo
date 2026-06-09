@@ -812,9 +812,11 @@ Validated 1080p examples (576000 baud):
 
 | Case | FPGA Time | Throughput |
 |---|---:|---:|
-| 1080p fast escape @128 | 72.735 s | 28508.82 pixels/s |
+| 1080p fast escape @128 | 72.736 s | 28508.56 pixels/s |
 | 1080p standard @64 | 72.735 s | 28508.82 pixels/s |
 | 1080p Seahorse @512, step `5e-6` | 74.265 s | 27921.47 pixels/s |
+| 1080p deep tendrils @8192, step `1e-9` | 93.916 s | 22079.29 pixels/s |
+| 1080p Mini-brot @8192, step `1e-9` | 234.231 s | 8852.78 pixels/s |
 | 1080p deep Seahorse @1024, step `1e-8` | 100.658 s | 20600.46 pixels/s |
 
 ## 14. Resource Use

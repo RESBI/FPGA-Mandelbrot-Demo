@@ -421,11 +421,14 @@ Measured current 4-core examples (576000 baud):
 | Case | Center | Step | Max Iter | FPGA Time | Throughput |
 |---:|---:|---:|---:|---:|
 | `160x120`, standard | `(-0.5, 0.0)` | `0.005` | `256` | `0.896s` | `21432.32 pps` |
+| `1920x1080`, fast escape | `(1.0, 1.0)` | `0.002` | `128` | `72.736s` | `28508.56 pps` |
 | `1920x1080`, standard | `(-0.5, 0.0)` | `0.002` | `64` | `72.735s` | `28508.82 pps` |
 | `1920x1080`, Seahorse zoom | `(-0.743643887037151, 0.13182590420533)` | `5e-6` | `512` | `74.265s` | `27921.47 pps` |
+| `1920x1080`, deep tendrils | `(-0.77568377, 0.13646737)` | `1e-9` | `8192` | `93.916s` | `22079.29 pps` |
+| `1920x1080`, Mini-brot | `(-1.25066, 0.02012)` | `1e-9` | `8192` | `234.231s` | `8852.78 pps` |
 | `1920x1080`, deep Seahorse | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` | `100.658s` | `20600.46 pps` |
 
-Fast scenes are UART-limited. Deep zoom/high-iteration scenes benefit from 4 cores until aggregate compute throughput approaches the UART ceiling.
+Fast scenes are UART-limited (~28500 pps ceiling). Deep zoom/high-iteration scenes benefit from 4 cores until aggregate compute throughput approaches the UART ceiling.
 
 ### Baudrate Investigation
 
