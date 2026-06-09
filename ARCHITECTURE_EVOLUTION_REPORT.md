@@ -184,7 +184,7 @@ UART-bound scenes barely improved, which exposed the next bottleneck.
 
 Once true 100 MHz was stable, fast scenes were capped by the serial output link.
 
-Detailed report: [UART_BAUDRATE_BENCHMARK.md](UART_BAUDRATE_BENCHMARK.md).
+Detailed reports: [UART_BAUDRATE_BENCHMARK.md](UART_BAUDRATE_BENCHMARK.md), [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md), [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md).
 
 ### Design Problem
 
@@ -196,7 +196,7 @@ At 460800 baud, the theoretical pixel ceiling was:
 
 Fast 1080p scenes were already near this ceiling.
 
-### Candidate Testing
+### Initial Sweep
 
 The 100 MHz clock allowed exact integer dividers for several candidate rates:
 
@@ -208,25 +208,43 @@ The 100 MHz clock allowed exact integer dividers for several candidate rates:
 | 500000 | 200 | pass |
 | 460800 | 217 | previous stable baseline |
 
-500000 baud was selected as the highest stable tested rate with the current single-sample UART RX and CP2102 link.
+500000 baud was initially selected as the highest stable tested rate.
+
+### Raw-Probe Deep Investigation
+
+A follow-up investigation used `python/uart_raw_probe.py` to dump raw byte-level responses at each integer-divided baud rate, identifying three distinct failure classes:
+
+| Baud | CPB | FPGA actual | Symptom | Root cause |
+|---:|---:|---:|---:|---|
+| 500000 | 200 | 500000.00 | Pass | Exact divider |
+| 520833 | 192 | 520833.33 | Pass | Exact divider |
+| 523560 | 191 | 523560.21 | 1/8 corrupt frames | CP2102 baud quantisation mismatch |
+| 526316 | 190 | 526315.79 | All frames byte-corrupted | CP2102 baud quantisation mismatch |
+| 530000–540000 | 189–185 | ~530k–541k | Zero response | RX timing margin collapse |
+| **576000** | **174** | **574712.64** | **Pass** | **Standard PC baud, clean CP2102 path** |
+| 625000 | 160 | 625000.00 | Zero response | FPGA RX uplink |
+| 800000 | 125 | 800000.00 | Zero response | FPGA RX uplink |
+| 1000000 | 100 | 1000000.00 | Zero response | FPGA RX uplink |
+
+A **TX-only isolation experiment** (`uart_tx_pattern_top.v`) proved definitively that the FPGA TX downlink functions correctly at 625000, 800000, and 1000000 baud — the host receives large volumes of bytes when TX is driven without depending on RX. The failures at those rates are in the **FPGA RX uplink**, caused by the single-sample architecture lacking oversampling, start-bit verification, and majority-vote sampling.
+
+Detailed timing analysis and CP2102 baud quantisation calculations are in [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md).
 
 ### Stage Effect
 
 The UART ceiling moved to:
 
 ```text
-500000 bits/s / 10 / 2 = 25000 pixels/s
+576000 bits/s / 10 / 2 = 28800 pixels/s
 ```
 
 Representative impact:
 
-| Case | 460800 | 500000 | Speedup |
-|---|---:|---:|---:|
-| 1080p standard @64 | `90.551s` | `83.510s` | `1.08x` |
-| 1080p deep triple spiral @8192 | `90.560s` | `83.499s` | `1.08x` |
-| Deep compute-bound cases | unchanged | unchanged | `1.00x` |
-
-The result was a safe incremental improvement, but compute-bound deep zooms still needed more hardware parallelism.
+| Case | 460800 | 500000 | 576000 | Speedup (500k→576k) |
+|---|---:|---:|---:|---:|
+| 1080p standard @64 | `90.551s` | `83.510s` | `72.735s` | `1.15x` |
+| 1080p Seahorse zoom @512 | — | `83.956s` | `74.265s` | `1.13x` |
+| Deep compute-bound cases | unchanged | unchanged | unchanged | `1.00x` |
 
 ## Stage 4: Multi-Core Feasibility Study
 
@@ -345,11 +363,10 @@ The result matched the feasibility study closely.
 The table below summarizes how each stage moved the system bottleneck.
 
 | Stage | Main Bottleneck Before | Change | Effect |
-|---|---|---|---|---|
+|---|---|---|---|
 | Functional baseline | Correctness and streaming reliability | Fixed FP/core/TX/host reference bugs | Produced reliable hardware images and simulation regressions. |
 | True 100 MHz | FP adder/multiplier timing | Added FP pipeline cuts, removed multicycle constraints | Compute-bound scenes improved about `1.40x-1.41x`. |
-| 576000 UART | 460800 baud output ceiling | Raised stable UART rate to 576000 via raw-probe sweep and TX-only isolation | UART-limited scenes improved about `1.15x`. |
-| UART timing analysis | Ambiguous high-baud failure mode | TX-only experiment proved FPGA TX works at 625k+; root cause is single-sample RX | Clear path for oversampling RX upgrade. |
+| UART 576k baud | 460800 baud output ceiling | Swept integer-divider bauds with raw-probe; TX-only isolation proved TX works at 625k+; 576k selected as stable standard-PC baud | UART-limited scenes improved about `1.15x`; systematic understanding of high-baud failure mode. |
 | Multi-core feasibility | Need parallel compute but protocol constrained | Selected 4-core interleaved rows | Clear path with no host protocol change. |
 | 4-core implementation | Single-worker compute throughput | Added 4 workers and raster merger | Compute-bound 1080p scenes improved about `3.5x-3.6x`. |
 | FP64 boundary differences | Truncation vs RNE discrepancy | Quantified chaotic amplification, documented acceptance criteria | Verified differences are benign and expected. |
@@ -437,10 +454,10 @@ The project evolved through a pragmatic sequence:
 
 1. Build a correct single-core streaming renderer.
 2. Close true 100 MHz FP64 timing.
-3. Raise UART bandwidth safely to 576000 baud (via systematic raw-probe sweep).
-4. Perform UART timing analysis and TX-only isolation to identify RX as failure root.
+3. Raise UART bandwidth safely to 576000 baud via systematic integer-divider sweep, raw-probe, and TX-only isolation experiments.
+4. Perform UART timing analysis proving FPGA RX is the high-baud failure root.
 5. Study multi-core scaling under the unchanged raster protocol.
 6. Implement 4-core interleaved-row workers with a modular scheduler and raster merger.
-7. Analyze and document FP64 boundary differences (truncation vs RNE).
+7. Analyze and document FP64 boundary differences (truncation vs RNE rounding, chaotic amplification).
 
 The current design is stable, validated, and substantially faster for compute-bound 1080p deep zooms while preserving the original host protocol. The remaining bottleneck is no longer primarily FP compute for many scenes; it is the combination of UART bandwidth and strict raster-order output.
