@@ -192,15 +192,17 @@ Detailed multiplier pipeline:
 
 ```mermaid
 flowchart LR
-    IN["Input a,b"] --> R0["Stage M0<br/>input registers<br/>a_r,b_r"]
-    R0 --> D0["Stage M1 comb<br/>decode sign/exp/man<br/>zero detect"]
-    D0 --> R1["Stage M1 reg<br/>full_man_a_r/full_man_b_r<br/>result_sign_man_r<br/>exp_sum_man_r<br/>zero flags"]
-    R1 --> DSP["Stage M2 comb<br/>FP64 53x53 mantissa multiply<br/>DSP48E1 cascade"]
-    DSP --> R2["Stage M2 reg<br/>man_product_dsp_r<br/>metadata delay"]
-    R2 --> R3["Stage M3 reg<br/>product + sign/exp/zero aligned"]
-    R3 --> NORM["Stage M4 comb<br/>normalize product<br/>adjust exponent<br/>zero/overflow handling"]
-    NORM --> OUT["Stage M4 reg<br/>product output"]
+    IN["Input a,b"] --> R0[["Stage M0<br/>input registers<br/>a_r,b_r"]]
+    R0 --> D0("Stage M1 comb<br/>decode sign/exp/man<br/>zero detect")
+    D0 --> R1[["Stage M1 reg<br/>full_man_a_r/full_man_b_r<br/>result_sign_man_r<br/>exp_sum_man_r<br/>zero flags"]]
+    R1 --> DSP("Stage M2 comb<br/>FP64 53x53 mantissa multiply<br/>DSP48E1 cascade")
+    DSP --> R2[["Stage M2 reg<br/>man_product_dsp_r<br/>metadata delay"]]
+    R2 --> R3[["Stage M3 reg<br/>product + sign/exp/zero aligned"]]
+    R3 --> NORM("Stage M4 comb<br/>normalize product<br/>adjust exponent<br/>zero/overflow handling")
+    NORM --> OUT[["Stage M4 reg<br/>product output"]]
 ```
+
+Shape convention: rounded boxes are combinational logic; double-sided boxes are register stages.
 
 Pipeline intent:
 
@@ -254,16 +256,18 @@ Detailed adder/subtractor pipeline:
 
 ```mermaid
 flowchart LR
-    IN["Input a,b"] --> R0["Stage A0<br/>input registers<br/>a_r,b_r"]
-    R0 --> D0["Stage A1 comb<br/>decode sign/exp/man<br/>zero detect<br/>compare magnitude"]
-    D0 --> R1["Stage A1 reg<br/>large/small mantissas<br/>exp_large,diff<br/>signs,zero flags"]
-    R1 --> ALIGN["Stage A2 comb<br/>right shift small mantissa<br/>add/sub aligned mantissas"]
-    ALIGN --> R2["Stage A2 reg<br/>man_result_r<br/>exp/sign/zero/input bypass"]
-    R2 --> LZ["Stage A3 comb<br/>leading-zero scan<br/>normalize mantissa<br/>adjust exponent"]
-    LZ --> R3["Stage A3 reg<br/>man_final_r<br/>exp_final_r<br/>sign_final_r<br/>zero/bypass flags"]
-    R3 --> OF["Stage A4 comb<br/>overflow test<br/>final mux"]
-    OF --> OUT["Stage A4 reg<br/>sum output"]
+    IN["Input a,b"] --> R0[["Stage A0<br/>input registers<br/>a_r,b_r"]]
+    R0 --> D0("Stage A1 comb<br/>decode sign/exp/man<br/>zero detect<br/>compare magnitude")
+    D0 --> R1[["Stage A1 reg<br/>large/small mantissas<br/>exp_large,diff<br/>signs,zero flags"]]
+    R1 --> ALIGN("Stage A2 comb<br/>right shift small mantissa<br/>add/sub aligned mantissas")
+    ALIGN --> R2[["Stage A2 reg<br/>man_result_r<br/>exp/sign/zero/input bypass"]]
+    R2 --> LZ("Stage A3 comb<br/>leading-zero scan<br/>normalize mantissa<br/>adjust exponent")
+    LZ --> R3[["Stage A3 reg<br/>man_final_r<br/>exp_final_r<br/>sign_final_r<br/>zero/bypass flags"]]
+    R3 --> OF("Stage A4 comb<br/>overflow test<br/>final mux")
+    OF --> OUT[["Stage A4 reg<br/>sum output"]]
 ```
+
+Shape convention: rounded boxes are combinational logic; double-sided boxes are register stages.
 
 Pipeline intent:
 
@@ -325,20 +329,22 @@ Worker coordinate initialization pipeline:
 
 ```mermaid
 flowchart TB
-    START["compute_start + image parameters"] --> HW["Compute half_w<br/>(cols - 1) >> 1"]
-    HW --> MW["Issue half_w * step<br/>fp_mul"]
-    MW --> RE0["Issue center_re - half_w_step<br/>fp_add"]
-    RE0 --> CRE["c_re_start ready"]
-    CRE --> HH["Compute half_h<br/>(rows - 1) >> 1"]
-    HH --> MH["Issue half_h * step<br/>fp_mul"]
-    MH --> IMTOP["Issue center_im + half_h_step<br/>fp_add"]
-    IMTOP --> CIMTOP["c_im_top ready"]
-    CIMTOP --> RS["Issue row_stride * step<br/>fp_mul"]
-    RS --> ROWSTEP["row_step ready"]
-    ROWSTEP --> RSOFF["Issue row_start * step<br/>fp_mul"]
-    RSOFF --> RSUB["Issue c_im_top - row_start_step<br/>fp_add"]
-    RSUB --> FIRSTROW["first worker row c_im ready"]
+    START["compute_start + image parameters"] --> HW("Compute half_w<br/>(cols - 1) >> 1")
+    HW --> MW("Issue half_w * step<br/>fp_mul")
+    MW --> RE0("Issue center_re - half_w_step<br/>fp_add")
+    RE0 --> CRE[["c_re_start ready"]]
+    CRE --> HH("Compute half_h<br/>(rows - 1) >> 1")
+    HH --> MH("Issue half_h * step<br/>fp_mul")
+    MH --> IMTOP("Issue center_im + half_h_step<br/>fp_add")
+    IMTOP --> CIMTOP[["c_im_top ready"]]
+    CIMTOP --> RS("Issue row_stride * step<br/>fp_mul")
+    RS --> ROWSTEP[["row_step ready"]]
+    ROWSTEP --> RSOFF("Issue row_start * step<br/>fp_mul")
+    RSOFF --> RSUB("Issue c_im_top - row_start_step<br/>fp_add")
+    RSUB --> FIRSTROW[["first worker row c_im ready"]]
 ```
+
+Shape convention: rounded boxes are issued combinational computations or FP operations; double-sided boxes are registered ready values captured after `PIPE_WAIT`.
 
 For the current 4-core static scheduler, `row_stride=4` for every worker and `row_start` is the worker ID. This lets each worker advance from row `y` to row `y+4` with one precomputed FP decrement.
 
