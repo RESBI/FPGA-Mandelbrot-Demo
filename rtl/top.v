@@ -2,8 +2,9 @@
 `include "fp_defines.vh"
 
 module top #(
-    parameter SCHED_MODE = 0,
-    parameter DYNAMIC_OWNER_DEPTH = 4096
+    parameter SCHED_MODE = 1,
+    parameter DYNAMIC_OWNER_DEPTH = 4096,
+    parameter WORKER_CONTEXTS = 2
 ) (
     input  wire uart_rx,
     output wire uart_tx,
@@ -102,7 +103,8 @@ module top #(
         .CORE_COUNT(4),
         .CORE_FIFO_DEPTH(4096),
         .SCHED_MODE(SCHED_MODE),
-        .DYNAMIC_OWNER_DEPTH(DYNAMIC_OWNER_DEPTH)
+        .DYNAMIC_OWNER_DEPTH(DYNAMIC_OWNER_DEPTH),
+        .WORKER_CONTEXTS(WORKER_CONTEXTS)
     ) u_core (
         .clk            (sys_clk),
         .rst            (rst),

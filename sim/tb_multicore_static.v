@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 `include "fp_defines.vh"
 
-module tb_multicore();
+module tb_multicore_static();
 
     reg clk = 0;
     reg rst = 1;
@@ -24,14 +24,12 @@ module tb_multicore();
     integer x;
     integer errors;
     reg [15:0] expected;
-    real step_real;
 
     mandelbrot_multicore #(
         .CORE_COUNT(4),
         .CORE_FIFO_DEPTH(128),
-        .SCHED_MODE(1),
-        .DYNAMIC_OWNER_DEPTH(64),
-        .WORKER_CONTEXTS(2)
+        .SCHED_MODE(0),
+        .WORKER_CONTEXTS(1)
     ) u_dut (
         .clk(clk),
         .rst(rst),
@@ -59,7 +57,7 @@ module tb_multicore();
         if (rst)
             ce <= 0;
         else
-            ce <= 1'b1;
+            ce <= ~ce;
     end
 
     function [`FP_WIDTH-1:0] f64;
@@ -77,7 +75,6 @@ module tb_multicore();
         input integer w;
         input integer h;
         input integer limit;
-        input real stp;
         real cre;
         real cim;
         real zre;
@@ -86,8 +83,8 @@ module tb_multicore();
         real zim_sq;
         integer count;
         begin
-            cre = -0.5 + (px - ((w - 1) / 2)) * stp;
-            cim =  0.0 + ((h - 1) / 2) * stp - py * stp;
+            cre = -0.5 + (px - ((w - 1) / 2)) * 0.005;
+            cim =  0.0 - (py - ((h - 1) / 2)) * 0.005;
             zre = 0.0;
             zim = 0.0;
             count = 0;
@@ -114,13 +111,12 @@ module tb_multicore();
         rst = 0;
         repeat(5) @(posedge clk);
 
-        rows = 24;
-        cols = 32;
+        rows = 12;
+        cols = 16;
         max_iter = 64;
-        step_real = 0.02;
         center_re = f64(-0.5);
         center_im = f64(0.0);
-        step = f64(step_real);
+        step = f64(0.005);
         pix = 0;
         errors = 0;
 
@@ -132,9 +128,9 @@ module tb_multicore();
             if (fifo_wr) begin
                 y = pix / cols;
                 x = pix % cols;
-                expected = sw_iter(x, y, cols, rows, max_iter, step_real);
+                expected = sw_iter(x, y, cols, rows, max_iter);
                 if (fifo_data !== expected) begin
-                    $display("FAIL dyn-default pix=%0d y=%0d x=%0d got=%0d expected=%0d", pix, y, x, fifo_data, expected);
+                    $display("FAIL static pix=%0d y=%0d x=%0d got=%0d expected=%0d", pix, y, x, fifo_data, expected);
                     errors = errors + 1;
                 end
                 pix = pix + 1;
@@ -142,11 +138,11 @@ module tb_multicore();
         end
 
         if (errors != 0) begin
-            $display("=== MULTICORE DEFAULT DYNAMIC TEST FAIL: %0d errors ===", errors);
+            $display("=== MULTICORE STATIC TEST FAIL: %0d errors ===", errors);
             $finish;
         end
 
-        $display("=== MULTICORE DEFAULT DYNAMIC TEST PASS: %0d pixels ===", pix);
+        $display("=== MULTICORE STATIC TEST PASS: %0d pixels ===", pix);
         $finish;
     end
 

@@ -1,26 +1,23 @@
 set part_name "xc7z010clg400-1"
-set proj_name "mandelbrot_fp64"
-set proj_dir  "./fp64_proj"
+set proj_name "mandelbrot_fp64_static"
+set proj_dir  "./fp64_static_proj"
 set rtl_dir   "./rtl"
 set xdc_dir   "./constraints"
 
 puts "========================================"
-puts " Mandelbrot FP64 Build Script"
+puts " Mandelbrot FP64 Static Scheduler Build"
 puts " Part: $part_name"
-puts " Default scheduler: dynamic idle-core rows (SCHED_MODE=1)"
-puts " Worker pipeline contexts: 2"
+puts " SCHED_MODE=0"
 puts "========================================"
 
 create_project -force $proj_name $proj_dir -part $part_name
 set_property target_language Verilog [current_project]
 
-# Add all RTL files
 add_files -fileset sources_1 [glob $rtl_dir/*.v]
 set_property top top [current_fileset]
-set_property generic {SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=2} [current_fileset]
+set_property generic {SCHED_MODE=0 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=1} [current_fileset]
 puts "Added [llength [glob $rtl_dir/*.v]] source files"
 
-# Set Verilog include path
 set_property include_dirs $rtl_dir [current_fileset]
 
 add_files -fileset constrs_1 [glob $xdc_dir/*.xdc]

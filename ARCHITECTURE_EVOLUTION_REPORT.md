@@ -25,12 +25,14 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | System clock | 100 MHz |
 | Floating-point mode | FP64 |
 | Compute cores | 4 |
+| Worker contexts | 2 per worker |
+| Default scheduler | Dynamic idle-core rows |
 | Effective worker rate | 100 MHz per worker, `FP_CE_DIV=1` |
 | UART | 576000 baud, 8N1 |
 | Host protocol | Unchanged raster-order response stream |
 | Pixel format | 16-bit little-endian iteration count |
 | Largest validated frame | 1920x1080 |
-| Final routed timing | `WNS=0.224ns`, `TNS=0.000ns`, `WHS=0.005ns`, `THS=0.000ns` |
+| Final routed timing | `WNS=0.091ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
 | Final placed DSP use | 38 / 80 DSP48E1, 47.50% |
 
 ## Initial Architecture Design Thinking
@@ -372,6 +374,8 @@ The table below summarizes how each stage moved the system bottleneck.
 | 4-core implementation | Single-worker compute throughput | Added 4 workers and raster merger | Compute-bound 1080p scenes improved about `3.5x-3.6x`. |
 | FP64 boundary differences | Truncation vs RNE discrepancy | Quantified chaotic amplification, documented acceptance criteria | Verified differences are benign and expected. |
 | Dynamic scheduler option | Static row modulo can leave row-level tail imbalance | Added `SCHED_MODE=1` idle-core row dispatcher and raster collector | Dynamic mode simulates and builds successfully while preserving the host protocol. |
+| Worker-internal 2-context interleaving | Per-worker FP pipelines underfed | Added `mandelbrot_core_worker_2ctx` with tagged FP writeback and ordered commit | Five of six 1080p scenes now hit UART ceiling; deep mini-brot improves `2.80x` vs 4-core 1ctx. |
+| Dynamic backpressure fix | Large UART-bound dynamic frames could deadlock | Gate dynamic row reuse on empty per-core FIFO | 1920-wide and full 1080p frames complete reliably under UART backpressure. |
 
 ## Final 1080p Performance Comparison
 
@@ -418,6 +422,31 @@ This confirms the scheduling model: the current real scenes have little row-leve
 
 The important lesson is that dynamic row assignment targeted the wrong dominant term for these measured scenes. Fast scenes are already limited by UART output time. Compute-heavy scenes are dominated by worker-internal FP latency rather than row ownership imbalance. The existing static scheduler already interleaves adjacent rows, so it was much closer to balanced than a contiguous-band split would have been.
 
+### Default Dynamic + Two-Context Worker At 576000 Baud
+
+The current default combines dynamic row scheduling with two pixel contexts inside each of the four workers. Each worker still shares one FP64 multiplier and one FP64 adder; the improvement comes from tagged FP writeback and context interleaving, not from adding more FP units.
+
+| Scene | Previous 4-Core 1ctx 576k | Default Dynamic 2ctx 576k | Throughput | Speedup |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `72.736s` | `72.720s` | `28514.74 pps` | `1.000x` |
+| Standard @64 | `72.735s` | `72.721s` | `28514.28 pps` | `1.000x` |
+| Seahorse zoom @512 | `74.265s` | `72.790s` | `28487.54 pps` | `1.020x` |
+| Deep tendrils @8192 | `93.916s` | `72.781s` | `28491.11 pps` | `1.290x` |
+| Deep mini-brot @8192 | `234.231s` | `83.708s` | `24771.84 pps` | `2.798x` |
+| Deep seahorse @1024 | `100.658s` | `72.776s` | `28493.04 pps` | `1.383x` |
+
+The result matches the earlier whole-system model. Fast escape and standard views had almost no headroom because they were already near the 576000 baud pixel ceiling. Tendrils and deep seahorse improve until they also hit UART. Deep mini-brot remains compute-bound, so it exposes the largest visible improvement.
+
+The implemented 2-context worker required three correctness details:
+
+| Detail | Why it matters |
+|---|---|
+| FP result tags | Back-to-back FP issues must route delayed results to the correct pixel context. |
+| Actual tag latencies | `MUL_LAT=6` and `ADD_LAT=7`; using old `PIPE_WAIT+1` timing mis-tagged adjacent context results. |
+| Ordered commit | Contexts can finish out of order, but the per-core FIFO must remain worker-local column order. |
+
+The dynamic scheduler also needed a backpressure rule: only assign a new row to a core when that core's FIFO is empty. Without this, a fast compute scene could fill a core FIFO with future rows while the raster collector waited for an earlier row from that same core, deadlocking under UART backpressure.
+
 Test parameters for the comparison table:
 
 | Scene | Center | Step | Max Iter |
@@ -425,7 +454,6 @@ Test parameters for the comparison table:
 | Fast escape @128 | `(1.0, 1.0)` | `0.002` | `128` |
 | Standard @64 | `(-0.5, 0.0)` | `0.002` | `64` |
 | Seahorse zoom @512 | `(-0.743643887037151, 0.13182590420533)` | `5e-6` | `512` |
-| Deep triple spiral @8192 | `(-0.088, 0.654)` | `1e-6` | `8192` |
 | Deep tendrils @8192 | `(-0.77568377, 0.13646737)` | `1e-9` | `8192` |
 | Deep mini-brot @8192 | `(-1.25066, 0.02012)` | `1e-9` | `8192` |
 | Deep seahorse @1024 | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` |
@@ -448,16 +476,16 @@ The true 100 MHz stage succeeded because long FP logic cones were pipelined. Rem
 
 Four workers are enough to push many compute-heavy scenes near the UART ceiling (~28800 pps). More workers would consume resources but often wait on UART unless the scene is extremely compute-bound.
 
-### Dynamic Row Scheduling Is Now A Switchable Option
+### Dynamic Row Scheduling Is Now The Default Scheduling Layer
 
-The original 4-core implementation deliberately separated dispatch and merge logic. That boundary has now been exercised by adding an optional dynamic row scheduler:
+The original 4-core implementation deliberately separated dispatch and merge logic. That boundary has now been exercised by making dynamic row scheduling the default path while keeping static scheduling as a regression mode:
 
 | Mode | Dispatcher | Collector | Protocol |
 |---|---|---|---|
-| Static default | `work_dispatch_static_rows` | `raster_merge_static_rows` | Existing raster stream. |
-| Dynamic optional | `work_dispatch_dynamic_rows` | `raster_collect_dynamic_rows` | Existing raster stream. |
+| Static regression | `work_dispatch_static_rows` | `raster_merge_static_rows` | Existing raster stream. |
+| Dynamic default | `work_dispatch_dynamic_rows` | `raster_collect_dynamic_rows` | Existing raster stream. |
 
-Dynamic mode assigns one full row at a time to an idle core and records row ownership. The collector still emits rows in order, so the host does not change. This validates the scheduler replacement boundary and gives a practical way to study row-level imbalance, but expected speedup on current measured 576k scenes is limited because UART and worker-internal FP latency remain dominant.
+Dynamic mode assigns one full row at a time to an idle core and records row ownership. The collector still emits rows in order, so the host does not change. The dispatcher now waits for a core's per-core FIFO to become empty before reusing that core. This prevents large UART-bound frames from deadlocking under strict raster output when compute runs ahead of transmit.
 
 Why the measured speedup is effectively zero:
 
@@ -469,7 +497,7 @@ Why the measured speedup is effectively zero:
 | The collector still emits strict raster order | A slow earlier row can still hold the output stream even if later rows completed. |
 | High-iteration views are dominated by the worker FSM and `PIPE_WAIT=10` FP latency | Row scheduling does not increase per-worker FP issue utilization. |
 
-The architectural value is therefore not immediate throughput. It is validation that the dispatch/collection boundary can be replaced without touching UART, command parsing, FP datapaths, or host protocol.
+The architectural value is therefore not just immediate throughput. It validates that the dispatch/collection boundary can be replaced without touching UART, command parsing, FP datapaths, or host protocol, and it is now the scheduling layer used by the 2-context default build.
 
 Validation after adding this mode:
 
@@ -498,7 +526,7 @@ Recommended order:
 |---:|---|---|
 | 1 | Add a higher-bandwidth transport | Current UART caps fast scenes at about `28800 pps`. |
 | 2 | Add row/tile IDs to output packets | Enables out-of-order completion beyond the current raster collector. |
-| 3 | De-bubble workers with multi-context interleaving | Attacks the real compute-bound bottleneck inside each worker. |
+| 3 | Scale worker contexts from 2 toward 4/8 | Attacks the remaining compute-bound bottleneck inside each worker without adding DSPs. |
 | 4 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
 | 5 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
 | 6 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
@@ -514,6 +542,8 @@ The project evolved through a pragmatic sequence:
 5. Study multi-core scaling under the unchanged raster protocol.
 6. Implement 4-core interleaved-row workers with a modular scheduler and raster merger.
 7. Analyze and document FP64 boundary differences (truncation vs RNE rounding, chaotic amplification).
-8. Add a switchable dynamic idle-core row scheduler and matching raster collector.
+8. Add a dynamic idle-core row scheduler and matching raster collector, now used by default.
+9. Add a two-context worker with tagged FP writeback and ordered commit.
+10. Fix dynamic row reuse under UART backpressure by requiring an empty per-core FIFO before assigning another row to a core.
 
-The current design is stable, validated, and substantially faster for compute-bound 1080p deep zooms while preserving the original host protocol. The remaining bottleneck is no longer primarily FP compute for many scenes; it is the combination of UART bandwidth and strict raster-order output.
+The current design is stable, validated, and substantially faster for compute-bound 1080p deep zooms while preserving the original host protocol. Five of the six measured 1080p scenes are now essentially UART-bound at about `28.5k pixels/s`; deep mini-brot remains compute-bound at `24.8k pixels/s` and is the best current target for deeper worker-context scaling.

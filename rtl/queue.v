@@ -16,35 +16,39 @@ module queue #(
     localparam ADDR_W = $clog2(DEPTH);
 
     reg [DATA_W-1:0] mem [0:DEPTH-1];
-    reg [ADDR_W:0]   write_ptr = 0;
-    reg [ADDR_W:0]   read_ptr  = 0;
-    reg              read_ctrl  = 1;
-    reg              write_ctrl = 1;
+    reg [ADDR_W-1:0] write_ptr = 0;
+    reg [ADDR_W-1:0] read_ptr  = 0;
+    reg [ADDR_W:0]   count     = 0;
 
-    wire read_valid  = write_ptr != read_ptr;
-    wire write_valid = ((write_ptr + 1) % DEPTH) != read_ptr;
+    wire write_fire = write_en && write_avail;
+    wire read_fire  = read_en && read_avail;
 
-    assign read_avail  = read_valid && read_ctrl;
-    assign write_avail = write_valid && write_ctrl;
+    assign read_avail  = (count != 0);
+    assign write_avail = (count != DEPTH);
 
     always @(posedge clk) begin
-        if (write_en && write_avail) begin
+        if (write_fire) begin
             mem[write_ptr[ADDR_W-1:0]] <= data_in;
-            write_ptr <= (write_ptr + 1) % DEPTH;
-            write_ctrl <= 0;
-        end else if (!write_en) begin
-            write_ctrl <= 1;
+            write_ptr <= write_ptr + 1'b1;
         end
+
+        if (read_fire) begin
+            data_out <= mem[read_ptr[ADDR_W-1:0]];
+            read_ptr <= read_ptr + 1'b1;
+        end
+
+        case ({write_fire, read_fire})
+            2'b10: count <= count + 1'b1;
+            2'b01: count <= count - 1'b1;
+            default: count <= count;
+        endcase
     end
 
-    always @(posedge clk) begin
-        if (read_en && read_avail) begin
-            data_out <= mem[read_ptr[ADDR_W-1:0]];
-            read_ptr <= (read_ptr + 1) % DEPTH;
-            read_ctrl <= 0;
-        end else if (!read_en) begin
-            read_ctrl <= 1;
-        end
+    initial begin
+        write_ptr = 0;
+        read_ptr = 0;
+        count = 0;
+        data_out = 0;
     end
 
 endmodule

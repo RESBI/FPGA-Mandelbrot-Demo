@@ -8,6 +8,7 @@ module work_dispatch_dynamic_rows #(
     input  wire                     start,
     input  wire [15:0]              rows,
     input  wire [CORE_COUNT-1:0]    core_done,
+    input  wire [CORE_COUNT-1:0]    core_fifo_avail,
 
     output reg  [CORE_COUNT-1:0]    core_start,
     output reg  [CORE_COUNT*16-1:0] row_start_bus,
@@ -54,7 +55,7 @@ module work_dispatch_dynamic_rows #(
                 core_done_block <= (core_done_block | core_done) & core_done;
                 assigned = 0;
                 for (i = 0; i < CORE_COUNT; i = i + 1) begin
-                    if (!assigned && !active_next[i] && !core_done_block[i] && !core_done[i] && next_row < rows) begin
+                    if (!assigned && !active_next[i] && !core_done_block[i] && !core_done[i] && !core_fifo_avail[i] && next_row < rows) begin
                         core_start[i] <= 1'b1;
                         row_start_bus[i*16 +: 16] <= next_row;
                         row_stride_bus[i*16 +: 16] <= rows;

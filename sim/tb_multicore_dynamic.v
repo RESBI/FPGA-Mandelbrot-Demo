@@ -57,7 +57,7 @@ module tb_multicore_dynamic();
         if (rst)
             ce <= 0;
         else
-            ce <= ~ce;
+            ce <= 1'b1;
     end
 
     function [`FP_WIDTH-1:0] f64;

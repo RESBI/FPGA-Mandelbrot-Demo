@@ -2,9 +2,9 @@
 
 ## 1. Overview
 
-This project implements a UART-controlled Mandelbrot accelerator on FPGA. The host sends one binary command describing a complete image, and the FPGA streams back one 16-bit iteration count per pixel. The current stable configuration is FP64, four Mandelbrot workers, `FP_CE_DIV=1`, true 100 MHz operation per worker, and 576000 baud UART.
+This project implements a UART-controlled Mandelbrot accelerator on FPGA. The host sends one binary command describing a complete image, and the FPGA streams back one 16-bit iteration count per pixel. The current stable configuration is FP64, four Mandelbrot workers, two pixel contexts per worker, dynamic row scheduling, `FP_CE_DIV=1`, true 100 MHz operation, and 576000 baud UART.
 
-The design is intentionally streaming-oriented. It does not store a full frame on FPGA. Four workers compute interleaved rows, per-core FIFOs absorb local imbalance, a raster-order merger restores the original host-visible pixel order, and the transmit controller streams pixels to the host as soon as they are available.
+The design is intentionally streaming-oriented. It does not store a full frame on FPGA. A dynamic row dispatcher assigns one row at a time to available workers, each worker interleaves two pixel contexts over one shared FP64 multiplier and one shared FP64 adder, per-core FIFOs absorb row output, a raster-order collector restores the original host-visible pixel order, and the transmit controller streams pixels to the host as soon as they are available.
 
 Current validated capabilities:
 
@@ -13,6 +13,8 @@ Current validated capabilities:
 | System clock | 100 MHz |
 | FP/core effective clock enable rate | 100 MHz (`FP_CE_DIV=1`) |
 | Mandelbrot workers | 4 |
+| Pixel contexts per worker | 2 |
+| Default scheduler | Dynamic idle-core row scheduling (`SCHED_MODE=1`) |
 | UART baudrate | 576000 baud |
 | Pixel format | `uint16`, little-endian iteration count |
 | Maximum iteration count | 65535 |
@@ -39,8 +41,8 @@ cmd_parser
   v
 mandelbrot_multicore -- raster fifo_wr/fifo_data --> queue(1024 x 16-bit) --> tx_ctrl --> uart_tx
        |
-       +-- work_dispatch_static_rows
-       +-- 4 x mandelbrot_core_worker -- per-core FIFO --> raster_merge_static_rows
+       +-- work_dispatch_dynamic_rows
+       +-- 4 x mandelbrot_core_worker_2ctx -- per-core FIFO --> raster_collect_dynamic_rows
               |
               +-- fp_mul
               +-- fp_add
@@ -55,11 +57,12 @@ The main modules are:
 | `uart_tx` | `rtl/uart_tx.v` | Sends 8N1 UART bytes at 576000 baud. |
 | `cmd_parser` | `rtl/cmd_parser.v` | Parses command packet and validates XOR checksum. |
 | `mandelbrot_multicore` | `rtl/mandelbrot_multicore.v` | 4-core wrapper with scheduler, per-core FIFOs, raster merger, and `tx_start` handling. |
-| `work_dispatch_static_rows` | `rtl/work_dispatch_static_rows.v` | Default modular scheduler. Assigns static interleaved rows to workers. |
-| `work_dispatch_dynamic_rows` | `rtl/work_dispatch_dynamic_rows.v` | Optional scheduler. Assigns one full row at a time to the first idle worker and records row ownership. |
-| `mandelbrot_core_worker` | `rtl/mandelbrot_core_worker.v` | Row-start/stride worker version of the Mandelbrot iteration engine. |
-| `raster_merge_static_rows` | `rtl/raster_merge_static_rows.v` | Restores per-worker row streams to strict row-major output order. |
-| `raster_collect_dynamic_rows` | `rtl/raster_collect_dynamic_rows.v` | Optional dynamic result collector. Uses the row-owner table to drain dynamically assigned rows in raster order. |
+| `work_dispatch_static_rows` | `rtl/work_dispatch_static_rows.v` | Static regression scheduler. Assigns interleaved rows to workers. |
+| `work_dispatch_dynamic_rows` | `rtl/work_dispatch_dynamic_rows.v` | Default scheduler. Assigns one full row at a time to an available worker and records row ownership. |
+| `mandelbrot_core_worker_2ctx` | `rtl/mandelbrot_core_worker_2ctx.v` | Default two-context row worker. Interleaves two pixel contexts over one FP64 multiplier and one FP64 adder. |
+| `mandelbrot_core_worker` | `rtl/mandelbrot_core_worker.v` | Stable single-context row worker used by static regression builds. |
+| `raster_merge_static_rows` | `rtl/raster_merge_static_rows.v` | Static-mode merger. Restores per-worker row streams to strict row-major output order. |
+| `raster_collect_dynamic_rows` | `rtl/raster_collect_dynamic_rows.v` | Default dynamic result collector. Uses the row-owner table to drain dynamically assigned rows in raster order. |
 | `mandelbrot_core` | `rtl/mandelbrot_core.v` | Legacy/single-core raster-order Mandelbrot engine used by regression simulation. |
 | `fp_mul` | `rtl/fp_mul.v` | Parameterized FP multiplier. |
 | `fp_add` | `rtl/fp_add.v` | Parameterized FP adder/subtractor. |
@@ -140,13 +143,13 @@ Benefits:
 
 Current FP64 builds use normal single-cycle timing at 100 MHz. No `u_core` multicycle exceptions are required. Older effective-50 MHz experiments used `FP_CE_DIV=2` plus setup/hold multicycle constraints, but the current pipelined FP datapath closes timing at `FP_CE_DIV=1`.
 
-Current routed timing after 4-core integration and FP adder output-side pipeline cut:
+Current routed timing after dynamic scheduling and 2-context worker integration:
 
 | Metric | Value |
 |---|---:|
-| WNS | 0.224 ns |
+| WNS | 0.091 ns |
 | TNS | 0.000 ns |
-| WHS | 0.005 ns |
+| WHS | 0.011 ns |
 | THS | 0.000 ns |
 
 ## 5. Floating-Point Format
@@ -193,7 +196,7 @@ Algorithm summary:
 Detailed multiplier pipeline:
 
 ```mermaid
-flowchart LR
+flowchart TB
     IN["Input a,b"] --> R0[["Stage M0<br/>input registers<br/>a_r,b_r"]]
     R0 --> D0("Stage M1 comb<br/>decode sign/exp/man<br/>zero detect")
     D0 --> R1[["Stage M1 reg<br/>full_man_a_r/full_man_b_r<br/>result_sign_man_r<br/>exp_sum_man_r<br/>zero flags"]]
@@ -257,7 +260,7 @@ Algorithm summary:
 Detailed adder/subtractor pipeline:
 
 ```mermaid
-flowchart LR
+flowchart TB
     IN["Input a,b"] --> R0[["Stage A0<br/>input registers<br/>a_r,b_r"]]
     R0 --> D0("Stage A1 comb<br/>decode sign/exp/man<br/>zero detect<br/>compare magnitude")
     D0 --> R1[["Stage A1 reg<br/>large/small mantissas<br/>exp_large,diff<br/>signs,zero flags"]]
@@ -371,7 +374,7 @@ The default multi-core scheduler uses static interleaved rows:
 
 This is implemented by `work_dispatch_static_rows.v`. The worker receives `row_start_in` and `row_stride_in`, computes `row_stride * step` once during initialization, and then jumps directly from one assigned row to the next.
 
-The scheduler is intentionally modular. Dynamic row scheduling now exists as an optional build mode, and future dynamic tile scheduling or out-of-order row dispatch can still replace the scheduler/collector pair without changing the UART command parser or the worker arithmetic datapath.
+The scheduler is intentionally modular. Dynamic row scheduling is now the default build mode, while static interleaved rows remain as a regression path. Future dynamic tile scheduling or out-of-order row dispatch can still replace the scheduler/collector pair without changing the UART command parser or the worker arithmetic datapath.
 
 Static dispatch structure:
 
@@ -399,6 +402,8 @@ row_stride = rows
 
 Because `row + row_stride >= rows` after one row, the existing worker finishes after that row and returns `done`. The dynamic dispatcher tracks which cores are active, waits for `done` to return low before reusing a core, and assigns the next unissued row to the first available core. It also emits `owner_row` and `owner_core` so the collector can later restore raster order.
 
+The dispatcher also waits until the selected core FIFO is empty before assigning another row to that core. This is a deliberate backpressure rule. A 1080p fast-escape workload can compute rows faster than UART can transmit them; without this guard, future rows can fill a per-core FIFO while the raster collector is waiting for an earlier row from that same core, creating a strict-raster deadlock. Requiring an empty per-core FIFO before row reuse keeps at most one completed row queued per core and preserves forward progress under UART backpressure.
+
 Dynamic dispatch structure:
 
 ```mermaid
@@ -412,7 +417,7 @@ flowchart LR
     DYN --> OWNER[["row owner table update<br/>row -> core"]]
 ```
 
-Dynamic mode preserves the existing host-visible raster stream. It is useful for row-level load-balance experiments, but it does not remove worker-internal FP pipeline bubbles and cannot improve scenes already capped by UART bandwidth.
+Dynamic mode preserves the existing host-visible raster stream. It is useful for row-level load-balance experiments and is now the default scheduling layer, but it does not by itself remove worker-internal FP pipeline bubbles and cannot improve scenes already capped by UART bandwidth.
 
 ### 8.3 Raster Merge
 
@@ -522,15 +527,16 @@ S_ITER_INC
 Per-iteration issue/capture pipeline view:
 
 ```mermaid
-flowchart LR
-    I0["S_ITER_START<br/>issue z_re*z_re"] --> W0["wait PIPE_WAIT"]
+flowchart TB
+    I0["S_ITER_START<br/>issue z_re*z_re"]
+    I0 --> W0["wait PIPE_WAIT"]
     W0 --> I1["S_MUL_ZRSQ_CAPT<br/>capture z_re_sq<br/>issue z_im*z_im"]
     I1 --> W1["wait PIPE_WAIT"]
     W1 --> I2["S_MUL_ZISQ_CAPT<br/>capture z_im_sq<br/>issue z_re*z_im<br/>issue z_re_sq+z_im_sq"]
     I2 --> W2["wait PIPE_WAIT"]
     W2 --> I3["S_MUL_ZRZI_CAPT<br/>capture z_re_z_im<br/>check escape"]
-    I3 -->|escaped| OUT[output iter]
     I3 -->|not escaped| I4["issue z_re_sq-z_im_sq"]
+    I3 -->|escaped| OUT["output iter"]
     I4 --> W3["wait PIPE_WAIT"]
     W3 --> I5["S_SUB_RE_CAPT<br/>issue diff+c_re"]
     I5 --> W4["wait PIPE_WAIT"]
@@ -557,9 +563,66 @@ Operation schedule per non-escaping iteration:
 | `S_ADD_2X_CAPT` | none | `2*z_re*z_im + c_im` | doubled product path |
 | `S_ADD_NEXTIM_CAPT` | none | none | `z_im_next` |
 
-The FSM is latency-tolerant rather than throughput-pipelined across pixels: a worker completes one pixel iteration sequence before advancing that worker's pixel. Parallelism comes from four independent workers, not from overlapping multiple pixels inside one worker.
+The single-context worker is latency-tolerant rather than throughput-pipelined across pixels: a worker completes one pixel iteration sequence before advancing that worker's pixel. It remains in the tree as the `WORKER_CONTEXTS=1` regression path.
 
-### 8.5 Escape Check
+### 8.5 Two-Context Worker
+
+The default worker is `mandelbrot_core_worker_2ctx.v`. It keeps the same external row-worker contract but maintains two active pixel contexts internally. Each worker still has exactly one FP64 multiplier and one FP64 adder, so the optimization does not increase worker count or FP unit count. It recovers idle FP issue slots by letting one pixel make progress while the other is waiting for an FP result.
+
+Per-context state includes:
+
+| State | Purpose |
+|---|---|
+| `c_c_re`, `c_c_im` | Pixel coordinate. |
+| `c_z_re`, `c_z_im` | Current complex value. |
+| `c_z_re_sq`, `c_z_im_sq`, `c_z_re_z_im` | Delayed FP intermediates. |
+| `c_iter` | Iteration count. |
+| `c_col` | Worker-local ordered commit column. |
+| `c_state` | Per-context micro-state. |
+| `c_result_valid`, `c_result_iter` | Completed pixel result waiting for ordered commit. |
+
+The shared FP units use operation and context tag delay lines:
+
+| Tag path | Latency | Purpose |
+|---|---:|---|
+| `mul_op_pipe`, `mul_ctx_pipe` | 6 cycles | Route `fp_mul` output back to the correct context and destination. |
+| `add_op_pipe`, `add_ctx_pipe` | 7 cycles | Route `fp_add` output back to the correct context and destination. |
+
+The tag latency is not the old single-context `PIPE_WAIT=10`. It is the actual back-to-back FP latency plus the worker-side operand register handoff. Using the old guard latency caused adjacent context results to be captured under the wrong tag during continuous issue; the board symptom was a repeatable 32x24 mismatch concentrated on odd columns. The fixed latencies are `MUL_LAT=6` and `ADD_LAT=7`.
+
+Conceptually, the two-context worker keeps two pixels, written here as `z1` and `z2`, moving through the same shared FP pipeline. The table below is illustrative rather than a cycle-exact trace; real issue depends on each context's ready state and on whether the shared multiplier or adder is free.
+
+| Step | Shared multiplier issue | Shared adder issue | `z1` context stage | `z2` context stage |
+|---:|---|---|---|---|
+| 1 | `z1_re * z1_re` | none | Issue real square. | Waiting or just launched. |
+| 2 | `z2_re * z2_re` | none | Waiting for `z1_re_sq`. | Issue real square. |
+| 3 | `z1_im * z1_im` | none | Issue imaginary square after `z1_re_sq` returns. | Waiting for `z2_re_sq`. |
+| 4 | `z2_im * z2_im` | none | Waiting for `z1_im_sq`. | Issue imaginary square after `z2_re_sq` returns. |
+| 5 | `z1_re * z1_im` | `z1_re_sq + z1_im_sq` | Issue cross product and magnitude sum. | Waiting for `z2_im_sq`. |
+| 6 | `z2_re * z2_im` | `z2_re_sq + z2_im_sq` | Waiting for `z1_zrzi` and `z1_mag`. | Issue cross product and magnitude sum. |
+| 7 | none or next ready multiply | `z1_re_sq - z1_im_sq` | If not escaped, issue real difference. | Waiting for `z2_zrzi` and `z2_mag`. |
+| 8 | none or next ready multiply | `z2_re_sq - z2_im_sq` | Waiting for `z1_tmp_re`. | If not escaped, issue real difference. |
+| 9 | none or next ready multiply | `z1_tmp_re + z1_c_re` | Issue next real part. | Waiting for `z2_tmp_re`. |
+| 10 | none or next ready multiply | `z2_tmp_re + z2_c_re` | Waiting for `z1_next_re`. | Issue next real part. |
+| 11 | none or next ready multiply | `z1_zrzi + z1_zrzi` | Issue doubled cross product. | Waiting for `z2_next_re`. |
+| 12 | none or next ready multiply | `z2_zrzi + z2_zrzi` | Waiting for `z1_2x`. | Issue doubled cross product. |
+| 13 | none or next ready multiply | `z1_2x + z1_c_im` | Issue next imaginary part and later increment `z1_iter`. | Waiting for `z2_2x`. |
+| 14 | none or next ready multiply | `z2_2x + z2_c_im` | Either starts next iteration or waits to commit. | Issue next imaginary part and later increment `z2_iter`. |
+
+The important property is not strict alternation. The arbiter can issue whichever context is ready, but every issued operation carries a context tag. When the delayed FP result returns, the tag writes it back to either the `z1` or `z2` context state.
+
+Two contexts can finish out of order, so the worker commits in column order. `commit_col` selects the next pixel that may be written to the per-core FIFO. If context 1 finishes before context 0, its result stays valid inside the worker until `commit_col` reaches its column. This preserves the existing per-core FIFO contract and keeps downstream raster collection unchanged.
+
+The 2-context worker was validated with:
+
+| Check | Result |
+|---|---|
+| Dynamic 32x24 value simulation | `768/768` pixels matched software reference. |
+| Dynamic 64x48 stress simulation | `3072` pixels completed. |
+| Board 32x24 verify | `768/768` matched. |
+| Board 160x120 verify | `19200/19200` matched. |
+
+### 8.6 Escape Check
 
 Escape is detected with:
 
@@ -575,7 +638,7 @@ quick_esc(z_re_sq) || quick_esc(z_im_sq) || quick_esc(add_result)
 
 `quick_esc` compares the floating-point exponent against `bias + 2` and handles the exact `4.0` boundary by checking mantissa bits. Values greater than 4.0 escape. Exact 4.0 does not escape.
 
-### 8.6 Output And Backpressure
+### 8.7 Output And Backpressure
 
 When a pixel is complete, a worker waits until its per-core FIFO is not full, writes the 16-bit iteration count, and then advances to the next pixel. The raster merger drains per-core FIFOs into the shared output FIFO. `tx_ctrl` then drains the shared output FIFO to UART.
 
@@ -584,7 +647,7 @@ The top-level output FIFO has 1024 entries of 16-bit data. Each worker also has 
 Output buffering and backpressure path:
 
 ```mermaid
-flowchart LR
+flowchart TB
     W["worker pixel complete"] --> CFULL{"per-core FIFO full?"}
     CFULL -->|yes| WSTALL["stall worker output state"]
     CFULL -->|no| CWR["write per-core FIFO"]
@@ -681,7 +744,7 @@ The explicit 32-bit cast is important. Without it, Verilog computes `rows * cols
 TX controller response pipeline:
 
 ```mermaid
-flowchart LR
+flowchart TB
     START["tx_start rows/cols"] --> H0["Send header byte 0<br/>0x52"]
     H0 --> H1["Send header byte 1<br/>0x4B"]
     H1 --> HR["Send rows LE"]
@@ -848,70 +911,57 @@ At 576000 baud, the practical upper bound is roughly:
 Measured current fast throughput is close to this limit:
 
 ```text
-1080p standard @64: 28508.82 pixels/s
-1080p Seahorse zoom @512: 27921.47 pixels/s
+1080p standard @64: 28514.28 pixels/s
+1080p Seahorse zoom @512: 28487.54 pixels/s
 ```
 
-Current 4-core high-iteration examples:
+Current default dynamic + 2-context high-iteration examples:
 
-| Case | FPGA Time | Throughput | Single-Core 500k Baseline | Speedup |
+| Case | FPGA Time | Throughput | Previous 4-core 1ctx 576k | Speedup |
 |---|---:|---:|---:|---:|
-| `160x120 @256`, standard view | `0.902s` | `21292.23 pps` | `3.193s` | `3.54x` |
-| `1080p deep tendrils @8192` | `93.960s` | `22068.99 pps` | `340.029s` | `3.62x` |
-| `1080p deep minibrot @8192` | `234.261s` | `8851.67 pps` | `850.720s` | `3.63x` |
-| `1080p deep seahorse @1024` | `103.032s` | `20125.73 pps` | `363.253s` | `3.53x` |
+| `1080p deep tendrils @8192` | `72.781s` | `28491.11 pps` | `93.916s` | `1.29x` |
+| `1080p deep minibrot @8192` | `83.708s` | `24771.84 pps` | `234.231s` | `2.80x` |
+| `1080p deep seahorse @1024` | `72.776s` | `28493.04 pps` | `100.658s` | `1.38x` |
 
-Validated 1080p examples (576000 baud):
+Validated 1080p examples, default dynamic + 2-context worker, 576000 baud:
 
 | Case | FPGA Time | Throughput |
 |---|---:|---:|
-| 1080p fast escape @128 | 72.736 s | 28508.56 pixels/s |
-| 1080p standard @64 | 72.735 s | 28508.82 pixels/s |
-| 1080p Seahorse @512, step `5e-6` | 74.265 s | 27921.47 pixels/s |
-| 1080p deep tendrils @8192, step `1e-9` | 93.916 s | 22079.29 pixels/s |
-| 1080p Mini-brot @8192, step `1e-9` | 234.231 s | 8852.78 pixels/s |
-| 1080p deep Seahorse @1024, step `1e-8` | 100.658 s | 20600.46 pixels/s |
+| 1080p fast escape @128 | 72.720 s | 28514.74 pixels/s |
+| 1080p standard @64 | 72.721 s | 28514.28 pixels/s |
+| 1080p Seahorse @512, step `5e-6` | 72.790 s | 28487.54 pixels/s |
+| 1080p deep tendrils @8192, step `1e-9` | 72.781 s | 28491.11 pixels/s |
+| 1080p Mini-brot @8192, step `1e-9` | 83.708 s | 24771.84 pixels/s |
+| 1080p deep Seahorse @1024, step `1e-8` | 72.776 s | 28493.04 pixels/s |
 
-Dynamic scheduler 1080p board benchmarks, using `SCHED_MODE=1`:
-
-| Case | Static 4-core | Dynamic 4-core | Dynamic throughput | Dynamic vs static |
-|---|---:|---:|---:|---:|
-| 1080p fast escape @128 | 72.736 s | 72.721 s | 28514.47 pixels/s | 1.000x |
-| 1080p standard @64 | 72.735 s | 72.719 s | 28515.41 pixels/s | 1.000x |
-| 1080p Seahorse @512, step `5e-6` | 74.265 s | 74.253 s | 27926.03 pixels/s | 1.000x |
-| 1080p deep tendrils @8192, step `1e-9` | 93.916 s | 93.907 s | 22081.36 pixels/s | 1.000x |
-| 1080p Mini-brot @8192, step `1e-9` | 234.231 s | 234.137 s | 8856.36 pixels/s | 1.000x |
-| 1080p deep Seahorse @1024, step `1e-8` | 100.658 s | 100.691 s | 20593.74 pixels/s | 1.000x |
-
-The dynamic scheduler preserves full-frame correctness and raster output on hardware, but the measured scenes do not show material speedup. The static interleaved scheduler is already well balanced for these views, and the remaining limits are UART bandwidth or worker-internal compute latency rather than row assignment tail imbalance.
+Five of the six scenes now run at about 99% of the UART pixel ceiling. Deep mini-brot remains compute-bound, but still improves from `8852.78 pps` to `24771.84 pps` because the two-context worker hides much of the old per-pixel FP wait time.
 
 ## 14. Resource Use
 
-Latest representative 4-core FP64 placed utilization:
+Latest representative default dynamic + 2-context FP64 placed utilization:
 
-| Resource | Static `SCHED_MODE=0` | Dynamic `SCHED_MODE=1` |
-|---|---:|---:|
-| Slice LUTs | 8599 / 17600, 48.86% | 8717 / 17600, 49.53% |
-| Slice Registers | 9807 / 35200, 27.86% | 10142 / 35200, 28.81% |
-| DSP48E1 | 38 / 80, 47.50% | 38 / 80, 47.50% |
-| Block RAM Tile | 8.5 / 60, 14.17% | 9.5 / 60, 15.83% |
-| RAMB18 | 1 / 120, 0.83% | 3 / 120, 2.50% |
+| Resource | Used | Device | Utilization |
+|---|---:|---:|---:|
+| Slice LUTs | 13630 | 17600 | 77.44% |
+| Slice Registers | 14391 | 35200 | 40.88% |
+| DSP48E1 | 38 | 80 | 47.50% |
+| Block RAM Tile | 9.5 | 60 | 15.83% |
 
-Latest routed timing after scheduler-mode support:
+Latest routed timing after dynamic + 2-context integration:
 
-| Build | Scheduler | WNS | TNS | WHS | THS |
-|---|---|---:|---:|---:|---:|
-| `build_fp64.tcl` | Static interleaved rows | 0.358 ns | 0.000 ns | 0.024 ns | 0.000 ns |
-| `build_fp64_dynamic.tcl` | Dynamic idle-core rows | 0.269 ns | 0.000 ns | 0.027 ns | 0.000 ns |
+| Build | Scheduler | Worker contexts | WNS | TNS | WHS | THS |
+|---|---|---:|---:|---:|---:|---:|
+| `build_fp64.tcl` | Dynamic idle-core rows | 2 | 0.091 ns | 0.000 ns | 0.011 ns | 0.000 ns |
 
-The design still has logic and DSP headroom, but many practical scenes are now limited by UART bandwidth. More cores only help the most compute-bound views unless the output link improves.
+The design is now LUT-dense but still has DSP headroom. Many practical scenes are limited by UART bandwidth. More worker contexts or more FP units only help the most compute-bound views unless the output link improves.
 
 ## 15. Known Limitations
 
 | Limitation | Details |
 |---|---|
-| Static 4-core scheduler | Default mode. Interleaved rows balance many views, but strict raster ordering can still wait on a slower row. |
-| Dynamic row scheduler | Optional mode. Reclaims some row-level tail imbalance, but still preserves strict raster output and does not remove per-worker FP pipeline bubbles. |
+| Static 4-core scheduler | Regression mode. Interleaved rows balance many views, but strict raster ordering can still wait on a slower row. |
+| Dynamic row scheduler | Default mode. Reclaims row-level tail imbalance while preserving strict raster output. It gates row reuse on an empty per-core FIFO to avoid UART-backpressure deadlock. |
+| Two-context worker | Hides only part of FP latency. More contexts are needed to approach full `1M+1A` issue saturation. |
 | UART output | Fast scenes are capped near 28800 pixels/s at 576000 baud. |
 | FP64 precision | Very deep zooms below approximately `1e-12` to `1e-14` pixel step become precision-sensitive. |
 | FP units are IEEE-like, not full IEEE-754 | No full NaN/Inf/denormal/rounding support. |
