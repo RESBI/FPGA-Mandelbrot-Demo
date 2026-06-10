@@ -55,9 +55,11 @@ The main modules are:
 | `uart_tx` | `rtl/uart_tx.v` | Sends 8N1 UART bytes at 576000 baud. |
 | `cmd_parser` | `rtl/cmd_parser.v` | Parses command packet and validates XOR checksum. |
 | `mandelbrot_multicore` | `rtl/mandelbrot_multicore.v` | 4-core wrapper with scheduler, per-core FIFOs, raster merger, and `tx_start` handling. |
-| `work_dispatch_static_rows` | `rtl/work_dispatch_static_rows.v` | Current modular scheduler. Assigns static interleaved rows to workers. |
+| `work_dispatch_static_rows` | `rtl/work_dispatch_static_rows.v` | Default modular scheduler. Assigns static interleaved rows to workers. |
+| `work_dispatch_dynamic_rows` | `rtl/work_dispatch_dynamic_rows.v` | Optional scheduler. Assigns one full row at a time to the first idle worker and records row ownership. |
 | `mandelbrot_core_worker` | `rtl/mandelbrot_core_worker.v` | Row-start/stride worker version of the Mandelbrot iteration engine. |
 | `raster_merge_static_rows` | `rtl/raster_merge_static_rows.v` | Restores per-worker row streams to strict row-major output order. |
+| `raster_collect_dynamic_rows` | `rtl/raster_collect_dynamic_rows.v` | Optional dynamic result collector. Uses the row-owner table to drain dynamically assigned rows in raster order. |
 | `mandelbrot_core` | `rtl/mandelbrot_core.v` | Legacy/single-core raster-order Mandelbrot engine used by regression simulation. |
 | `fp_mul` | `rtl/fp_mul.v` | Parameterized FP multiplier. |
 | `fp_add` | `rtl/fp_add.v` | Parameterized FP adder/subtractor. |
@@ -350,7 +352,15 @@ For the current 4-core static scheduler, `row_stride=4` for every worker and `ro
 
 ### 8.2 4-Core Row Scheduling
 
-The current multi-core scheduler uses static interleaved rows:
+`mandelbrot_multicore` supports a compile-time scheduling parameter:
+
+| Parameter | Value | Meaning |
+|---|---:|---|
+| `SCHED_MODE` | `0` | Static interleaved rows, default board mode. |
+| `SCHED_MODE` | `1` | Dynamic idle-core row scheduling. |
+| `DYNAMIC_OWNER_DEPTH` | `4096` default | Owner-table rows available in dynamic mode. |
+
+The default multi-core scheduler uses static interleaved rows:
 
 | Core | First row | Stride | Rows |
 |---:|---:|---:|---|
@@ -361,7 +371,7 @@ The current multi-core scheduler uses static interleaved rows:
 
 This is implemented by `work_dispatch_static_rows.v`. The worker receives `row_start_in` and `row_stride_in`, computes `row_stride * step` once during initialization, and then jumps directly from one assigned row to the next.
 
-The scheduler is intentionally modular. Future dynamic tile scheduling or out-of-order row dispatch should replace `work_dispatch_static_rows.v` and the matching merger without changing the UART command parser or the worker arithmetic datapath.
+The scheduler is intentionally modular. Dynamic row scheduling now exists as an optional build mode, and future dynamic tile scheduling or out-of-order row dispatch can still replace the scheduler/collector pair without changing the UART command parser or the worker arithmetic datapath.
 
 Static dispatch structure:
 
@@ -380,9 +390,33 @@ flowchart LR
 
 Dispatch is combinational for the current policy: every worker receives the same render parameters and a different row-start value. This keeps scheduler timing shallow and makes the future replacement point explicit.
 
+Dynamic idle-core scheduling uses `work_dispatch_dynamic_rows.v`. It reuses the existing row-start/stride worker interface by making each job one full row:
+
+```text
+row_start = assigned row
+row_stride = rows
+```
+
+Because `row + row_stride >= rows` after one row, the existing worker finishes after that row and returns `done`. The dynamic dispatcher tracks which cores are active, waits for `done` to return low before reusing a core, and assigns the next unissued row to the first available core. It also emits `owner_row` and `owner_core` so the collector can later restore raster order.
+
+Dynamic dispatch structure:
+
+```mermaid
+flowchart LR
+    PARAM["Image parameters<br/>center, step, rows, cols, max_iter"] --> DYN["work_dispatch_dynamic_rows"]
+    DONE["worker done pulses"] --> DYN
+    DYN -->|"next row job"| C0["worker 0"]
+    DYN -->|"next row job"| C1["worker 1"]
+    DYN -->|"next row job"| C2["worker 2"]
+    DYN -->|"next row job"| C3["worker 3"]
+    DYN --> OWNER[["row owner table update<br/>row -> core"]]
+```
+
+Dynamic mode preserves the existing host-visible raster stream. It is useful for row-level load-balance experiments, but it does not remove worker-internal FP pipeline bubbles and cannot improve scenes already capped by UART bandwidth.
+
 ### 8.3 Raster Merge
 
-The unchanged host protocol expects pixels in row-major order with no row or tile IDs. `raster_merge_static_rows.v` preserves that contract in hardware.
+The unchanged host protocol expects pixels in row-major order with no row or tile IDs. Static mode uses `raster_merge_static_rows.v`; dynamic mode uses `raster_collect_dynamic_rows.v`. Both preserve that contract in hardware.
 
 For output row `y`:
 
@@ -391,6 +425,8 @@ source_core = y % 4
 ```
 
 The merger waits until the selected core FIFO has data, reads one pixel, waits one synchronous FIFO read cycle, and writes the pixel into the shared output FIFO. This keeps the host protocol unchanged while allowing workers to run independently behind per-core FIFOs.
+
+In dynamic mode, `raster_collect_dynamic_rows.v` first waits until the owner table has an entry for the current raster row. The source core is then `owner_mem[row]`, not `row % CORE_COUNT`. After source selection, FIFO read/write sequencing is the same as the static merger. `DYNAMIC_OWNER_DEPTH` bounds the owner table; the default `4096` rows covers the validated 1080p use case.
 
 Raster merge pipeline:
 
@@ -419,6 +455,21 @@ stateDiagram-v2
     S_WRITE --> S_WAIT: more pixels
     S_WRITE --> S_DONE: last pixel
     S_DONE --> S_IDLE
+```
+
+Dynamic collector behavior:
+
+```mermaid
+flowchart TB
+    POS["Current output row,col"] --> OWN{"Owner entry exists<br/>for current row?"}
+    OWN -->|no| POS
+    OWN -->|yes| SRC["source_core = owner[row]"]
+    SRC --> WAIT{"Selected FIFO has data<br/>and output FIFO not full?"}
+    WAIT -->|no| SRC
+    WAIT -->|yes| RD["Assert selected core_fifo_rd"]
+    RD --> RWAIT["Wait one cycle"]
+    RWAIT --> WR["Write pixel to shared FIFO"]
+    WR --> ADV["Advance raster position"]
 ```
 
 ### 8.4 Per-Pixel FSM Pipeline
@@ -721,18 +772,20 @@ Expected pass marker:
 
 ### 12.3 Multicore Simulation
 
-`sim/tb_multicore.v` instantiates `mandelbrot_multicore` with four workers and checks that the merged output stream matches row-major software reference order.
+`sim/tb_multicore.v` instantiates `mandelbrot_multicore` with four workers and checks that the default static merged output stream matches row-major software reference order. `sim/tb_multicore_dynamic.v` runs the same raster-order check with `SCHED_MODE=1` dynamic idle-core row scheduling.
 
 Run:
 
 ```bash
 vivado -mode batch -source sim_multicore.tcl
+vivado -mode batch -source sim_multicore_dynamic.tcl
 ```
 
 Expected pass marker:
 
 ```text
 === MULTICORE TEST PASS: 192 pixels ===
+=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===
 ```
 
 ### 12.4 Host-Side Random Reference Testing
@@ -819,17 +872,37 @@ Validated 1080p examples (576000 baud):
 | 1080p Mini-brot @8192, step `1e-9` | 234.231 s | 8852.78 pixels/s |
 | 1080p deep Seahorse @1024, step `1e-8` | 100.658 s | 20600.46 pixels/s |
 
+Dynamic scheduler 1080p board benchmarks, using `SCHED_MODE=1`:
+
+| Case | Static 4-core | Dynamic 4-core | Dynamic throughput | Dynamic vs static |
+|---|---:|---:|---:|---:|
+| 1080p fast escape @128 | 72.736 s | 72.721 s | 28514.47 pixels/s | 1.000x |
+| 1080p standard @64 | 72.735 s | 72.719 s | 28515.41 pixels/s | 1.000x |
+| 1080p Seahorse @512, step `5e-6` | 74.265 s | 74.253 s | 27926.03 pixels/s | 1.000x |
+| 1080p deep tendrils @8192, step `1e-9` | 93.916 s | 93.907 s | 22081.36 pixels/s | 1.000x |
+| 1080p Mini-brot @8192, step `1e-9` | 234.231 s | 234.137 s | 8856.36 pixels/s | 1.000x |
+| 1080p deep Seahorse @1024, step `1e-8` | 100.658 s | 100.691 s | 20593.74 pixels/s | 1.000x |
+
+The dynamic scheduler preserves full-frame correctness and raster output on hardware, but the measured scenes do not show material speedup. The static interleaved scheduler is already well balanced for these views, and the remaining limits are UART bandwidth or worker-internal compute latency rather than row assignment tail imbalance.
+
 ## 14. Resource Use
 
 Latest representative 4-core FP64 placed utilization:
 
-| Resource | Usage |
-|---|---:|
-| Slice LUTs | 8597 / 17600, 48.85% |
-| Slice Registers | 9807 / 35200, 27.86% |
-| DSP48E1 | 38 / 80, 47.50% |
-| Block RAM Tile | 8.5 / 60, 14.17% |
-| RAMB18 | 1 / 120, 0.83% |
+| Resource | Static `SCHED_MODE=0` | Dynamic `SCHED_MODE=1` |
+|---|---:|---:|
+| Slice LUTs | 8599 / 17600, 48.86% | 8717 / 17600, 49.53% |
+| Slice Registers | 9807 / 35200, 27.86% | 10142 / 35200, 28.81% |
+| DSP48E1 | 38 / 80, 47.50% | 38 / 80, 47.50% |
+| Block RAM Tile | 8.5 / 60, 14.17% | 9.5 / 60, 15.83% |
+| RAMB18 | 1 / 120, 0.83% | 3 / 120, 2.50% |
+
+Latest routed timing after scheduler-mode support:
+
+| Build | Scheduler | WNS | TNS | WHS | THS |
+|---|---|---:|---:|---:|---:|
+| `build_fp64.tcl` | Static interleaved rows | 0.358 ns | 0.000 ns | 0.024 ns | 0.000 ns |
+| `build_fp64_dynamic.tcl` | Dynamic idle-core rows | 0.269 ns | 0.000 ns | 0.027 ns | 0.000 ns |
 
 The design still has logic and DSP headroom, but many practical scenes are now limited by UART bandwidth. More cores only help the most compute-bound views unless the output link improves.
 
@@ -837,7 +910,8 @@ The design still has logic and DSP headroom, but many practical scenes are now l
 
 | Limitation | Details |
 |---|---|
-| Static 4-core scheduler | Interleaved rows balance many views, but strict raster ordering can still wait on a slower row. |
+| Static 4-core scheduler | Default mode. Interleaved rows balance many views, but strict raster ordering can still wait on a slower row. |
+| Dynamic row scheduler | Optional mode. Reclaims some row-level tail imbalance, but still preserves strict raster output and does not remove per-worker FP pipeline bubbles. |
 | UART output | Fast scenes are capped near 28800 pixels/s at 576000 baud. |
 | FP64 precision | Very deep zooms below approximately `1e-12` to `1e-14` pixel step become precision-sensitive. |
 | FP units are IEEE-like, not full IEEE-754 | No full NaN/Inf/denormal/rounding support. |
@@ -850,7 +924,7 @@ Most valuable next steps:
 
 1. Add a higher-bandwidth transport, such as USB FIFO, SPI, Ethernet, or memory-mapped PS interface on Zynq.
 2. Add row/tile IDs to the response protocol so the host can accept out-of-order rows or tiles.
-3. Replace static row dispatch with a dynamic tile scheduler once the protocol can carry coordinates.
+3. Extend the current dynamic row scheduler toward dynamic tiles once the protocol can carry coordinates.
 4. Improve UART to 921600 or higher with oversampling/fractional baud generation if UART must remain the transport.
 5. Add cardioid and period-2 bulb classification to skip interior pixels quickly.
 6. Evaluate fixed-point arithmetic for Mandelbrot-specific deep zoom windows.
@@ -864,6 +938,7 @@ Simulation:
 vivado -mode batch -source sim_fp.tcl
 vivado -mode batch -source sim_core.tcl
 vivado -mode batch -source sim_multicore.tcl
+vivado -mode batch -source sim_multicore_dynamic.tcl
 ```
 
 Build and program:
@@ -871,6 +946,12 @@ Build and program:
 ```bash
 vivado -mode batch -source build_fp64.tcl
 vivado -mode batch -source program.tcl
+```
+
+Optional dynamic scheduler build:
+
+```bash
+vivado -mode batch -source build_fp64_dynamic.tcl
 ```
 
 Small hardware verification:

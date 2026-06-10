@@ -37,7 +37,9 @@ Mandelbrot/
 │   ├── mandelbrot_core_worker.v Row-start/stride worker core
 │   ├── mandelbrot_core.v        Legacy/single-core Mandelbrot FSM and FP scheduling
 │   ├── work_dispatch_static_rows.v
+│   ├── work_dispatch_dynamic_rows.v
 │   ├── raster_merge_static_rows.v
+│   ├── raster_collect_dynamic_rows.v
 │   ├── fp_add.v                 Parameterized FP adder/subtractor
 │   ├── fp_mul.v                 Parameterized FP multiplier
 │   ├── fp_defines.vh            FP64/FP128 parameters and CE divider
@@ -52,6 +54,7 @@ Mandelbrot/
 │   ├── tb_fp.v
 │   ├── tb_core.v
 │   ├── tb_multicore.v
+│   ├── tb_multicore_dynamic.v
 │   └── tb_core_count.v
 ├── python/                      Host and hardware test scripts
 │   ├── mandelbrot_host.py
@@ -62,11 +65,13 @@ Mandelbrot/
 │   ├── uart_raw_probe.py
 │   └── uart_listen_raw.py
 ├── build_fp64.tcl               FP64 Vivado build script
+├── build_fp64_dynamic.tcl       FP64 dynamic-scheduler build script
 ├── build_fp128.tcl              FP128 Vivado build script
 ├── program.tcl                  JTAG programming script
 ├── sim_fp.tcl                   FP unit simulation script
 ├── sim_core.tcl                 Core simulation script
 ├── sim_multicore.tcl            4-core raster-order simulation script
+├── sim_multicore_dynamic.tcl    Dynamic scheduler simulation script
 ├── ARCHITECTURE.md              Detailed architecture document
 ├── ARCHITECTURE_EVOLUTION_REPORT.md
 ├── MULTICORE_4CORE_ARCHITECTURE.md
@@ -121,13 +126,26 @@ flowchart TB
     end
 
     subgraph MC[Inside mandelbrot_multicore]
-        CORE --> DISP[work_dispatch_static_rows]
-        CORE --> MERGE[raster_merge_static_rows]
+        CORE --> DISP[static or dynamic dispatcher]
+        CORE --> MERGE[static merger or dynamic collector]
         DISP --> WORKERS[4 x mandelbrot_core_worker]
         WORKERS --> CFIFO[per-core FIFOs]
         CFIFO --> MERGE
     end
 ```
+
+## Scheduler Modes
+
+`mandelbrot_multicore` supports a compile-time `SCHED_MODE` generic:
+
+| `SCHED_MODE` | Dispatcher | Result collector | Status |
+|---:|---|---|---|
+| `0` | `work_dispatch_static_rows` | `raster_merge_static_rows` | Default stable board mode. |
+| `1` | `work_dispatch_dynamic_rows` | `raster_collect_dynamic_rows` | Dynamic idle-core row scheduling, simulation and build validated. |
+
+Static mode assigns interleaved row streams once at frame start. Dynamic mode assigns one full row at a time to the first available core, records the row owner, and drains each row in raster order from the recorded core FIFO. Both modes keep the existing host protocol unchanged.
+
+Dynamic mode is intended for scheduler experimentation and row-level load-balance studies. It can recover some tail imbalance, but it does not remove the internal FP pipeline bubbles inside each worker and cannot improve UART-bound scenes.
 
 ## Mandelbrot Core Pipeline
 
@@ -255,6 +273,21 @@ FP128 is structurally supported, but most validation has focused on FP64.
 vivado -mode batch -source build_fp128.tcl
 ```
 
+### Optional Dynamic Scheduler Build
+
+The default `build_fp64.tcl` uses `SCHED_MODE=0` static interleaved rows. To build the dynamic idle-core row scheduler variant:
+
+```bash
+vivado -mode batch -source build_fp64_dynamic.tcl
+```
+
+Expected output includes:
+
+```text
+BUILD SUCCESSFUL
+Bitstream: ./fp64_dynamic_proj/mandelbrot_fp64_dynamic.runs/impl_1/top.bit
+```
+
 ## Program The FPGA
 
 After building, program the board:
@@ -371,6 +404,12 @@ vivado -mode batch -source sim_core.tcl
 vivado -mode batch -source sim_multicore.tcl
 ```
 
+Dynamic scheduler simulation:
+
+```bash
+vivado -mode batch -source sim_multicore_dynamic.tcl
+```
+
 Random host/reference comparison:
 
 ```bash
@@ -419,7 +458,7 @@ At 576000 baud, the UART ceiling is approximately:
 Measured current 4-core examples (576000 baud):
 
 | Case | Center | Step | Max Iter | FPGA Time | Throughput |
-|---:|---:|---:|---:|---:|
+|---|---|---:|---:|---:|---:|
 | `160x120`, standard | `(-0.5, 0.0)` | `0.005` | `256` | `0.896s` | `21432.32 pps` |
 | `1920x1080`, fast escape | `(1.0, 1.0)` | `0.002` | `128` | `72.736s` | `28508.56 pps` |
 | `1920x1080`, standard | `(-0.5, 0.0)` | `0.002` | `64` | `72.735s` | `28508.82 pps` |
@@ -429,6 +468,19 @@ Measured current 4-core examples (576000 baud):
 | `1920x1080`, deep Seahorse | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` | `100.658s` | `20600.46 pps` |
 
 Fast scenes are UART-limited (~28500 pps ceiling). Deep zoom/high-iteration scenes benefit from 4 cores until aggregate compute throughput approaches the UART ceiling.
+
+Dynamic scheduler 1080p board benchmarks, using `build_fp64_dynamic.tcl` and the same 576000 baud host path:
+
+| Case | Static 4-core | Dynamic 4-core | Dynamic Throughput | Dynamic vs Static |
+|---|---:|---:|---:|---:|
+| `1920x1080`, fast escape @128 | `72.736s` | `72.721s` | `28514.47 pps` | `1.000x` |
+| `1920x1080`, standard @64 | `72.735s` | `72.719s` | `28515.41 pps` | `1.000x` |
+| `1920x1080`, Seahorse zoom @512 | `74.265s` | `74.253s` | `27926.03 pps` | `1.000x` |
+| `1920x1080`, deep tendrils @8192 | `93.916s` | `93.907s` | `22081.36 pps` | `1.000x` |
+| `1920x1080`, Mini-brot @8192 | `234.231s` | `234.137s` | `8856.36 pps` | `1.000x` |
+| `1920x1080`, deep Seahorse @1024 | `100.658s` | `100.691s` | `20593.74 pps` | `1.000x` |
+
+The dynamic scheduler is functionally validated on full 1080p frames, but these scenes show no material speedup. The static interleaved-row scheduler is already well balanced for the measured workloads, and remaining limits are UART bandwidth or worker-internal compute latency.
 
 ### Baudrate Investigation
 
@@ -443,6 +495,13 @@ The FPGA FP64 engine uses truncation-rounding (round-toward-zero) while the Pyth
 Detailed report: [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md).
 
 Current 4-core 100 MHz FP64 routed timing is signed off with `WNS=0.224ns`, `TNS=0.000ns`, `WHS=0.005ns`, and no multicycle exceptions.
+
+Recent build validation after adding scheduler-mode switching:
+
+| Build | Scheduler | WNS | TNS | WHS | THS |
+|---|---|---:|---:|---:|---:|
+| `build_fp64.tcl` | Static interleaved rows | `0.358ns` | `0.000ns` | `0.024ns` | `0.000ns` |
+| `build_fp64_dynamic.tcl` | Dynamic idle-core rows | `0.269ns` | `0.000ns` | `0.027ns` | `0.000ns` |
 
 ## Troubleshooting
 
@@ -488,6 +547,8 @@ UART_TIMING_ANALYSIS.md
 FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md
 MULTICORE_FEASIBILITY.md
 MULTICORE_4CORE_ARCHITECTURE.md
+DYNAMIC_IDLE_CORE_SCHEDULING.md
+DYNAMIC_IDLE_CORE_SCHEDULING_CN.md
 ```
 
 ## License

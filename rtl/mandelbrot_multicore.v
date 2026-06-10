@@ -3,7 +3,9 @@
 
 module mandelbrot_multicore #(
     parameter CORE_COUNT = 4,
-    parameter CORE_FIFO_DEPTH = 4096
+    parameter CORE_FIFO_DEPTH = 4096,
+    parameter SCHED_MODE = 0,
+    parameter DYNAMIC_OWNER_DEPTH = 4096
 ) (
     input  wire                     clk,
     input  wire                     rst,
@@ -41,18 +43,44 @@ module mandelbrot_multicore #(
     wire [CORE_COUNT-1:0] core_fifo_avail;
     wire [CORE_COUNT*16-1:0] core_fifo_rdata;
 
+    wire owner_wr;
+    wire [15:0] owner_row;
+    wire [7:0]  owner_core;
+
     reg active;
     wire merge_done;
 
     assign busy = active;
     assign done = merge_done;
 
-    work_dispatch_static_rows #(.CORE_COUNT(CORE_COUNT)) u_dispatch (
-        .start          (start),
-        .core_start     (core_start),
-        .row_start_bus  (row_start_bus),
-        .row_stride_bus (row_stride_bus)
-    );
+    generate
+        if (SCHED_MODE == 0) begin : g_static_sched
+            work_dispatch_static_rows #(.CORE_COUNT(CORE_COUNT)) u_dispatch (
+                .start          (start),
+                .core_start     (core_start),
+                .row_start_bus  (row_start_bus),
+                .row_stride_bus (row_stride_bus)
+            );
+
+            assign owner_wr = 1'b0;
+            assign owner_row = 16'd0;
+            assign owner_core = 8'd0;
+        end else begin : g_dynamic_sched
+            work_dispatch_dynamic_rows #(.CORE_COUNT(CORE_COUNT)) u_dispatch (
+                .clk            (clk),
+                .rst            (rst),
+                .start          (start),
+                .rows           (rows_in),
+                .core_done      (core_done),
+                .core_start     (core_start),
+                .row_start_bus  (row_start_bus),
+                .row_stride_bus (row_stride_bus),
+                .owner_wr       (owner_wr),
+                .owner_row      (owner_row),
+                .owner_core     (owner_core)
+            );
+        end
+    endgenerate
 
     genvar i;
     generate
@@ -91,20 +119,45 @@ module mandelbrot_multicore #(
         end
     endgenerate
 
-    raster_merge_static_rows #(.CORE_COUNT(CORE_COUNT)) u_merge (
-        .clk             (clk),
-        .rst             (rst),
-        .start           (start),
-        .rows            (rows_in),
-        .cols            (cols_in),
-        .done            (merge_done),
-        .core_fifo_rd    (core_fifo_rd),
-        .core_fifo_avail (core_fifo_avail),
-        .core_fifo_data  (core_fifo_rdata),
-        .fifo_data       (fifo_data),
-        .fifo_wr         (fifo_wr),
-        .fifo_full       (fifo_full)
-    );
+    generate
+        if (SCHED_MODE == 0) begin : g_static_merge
+            raster_merge_static_rows #(.CORE_COUNT(CORE_COUNT)) u_merge (
+                .clk             (clk),
+                .rst             (rst),
+                .start           (start),
+                .rows            (rows_in),
+                .cols            (cols_in),
+                .done            (merge_done),
+                .core_fifo_rd    (core_fifo_rd),
+                .core_fifo_avail (core_fifo_avail),
+                .core_fifo_data  (core_fifo_rdata),
+                .fifo_data       (fifo_data),
+                .fifo_wr         (fifo_wr),
+                .fifo_full       (fifo_full)
+            );
+        end else begin : g_dynamic_collect
+            raster_collect_dynamic_rows #(
+                .CORE_COUNT(CORE_COUNT),
+                .OWNER_TABLE_DEPTH(DYNAMIC_OWNER_DEPTH)
+            ) u_merge (
+                .clk             (clk),
+                .rst             (rst),
+                .start           (start),
+                .rows            (rows_in),
+                .cols            (cols_in),
+                .done            (merge_done),
+                .owner_wr        (owner_wr),
+                .owner_row       (owner_row),
+                .owner_core      (owner_core),
+                .core_fifo_rd    (core_fifo_rd),
+                .core_fifo_avail (core_fifo_avail),
+                .core_fifo_data  (core_fifo_rdata),
+                .fifo_data       (fifo_data),
+                .fifo_wr         (fifo_wr),
+                .fifo_full       (fifo_full)
+            );
+        end
+    endgenerate
 
     always @(posedge clk) begin
         if (rst) begin

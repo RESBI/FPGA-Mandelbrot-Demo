@@ -1,7 +1,10 @@
 `timescale 1ns / 1ps
 `include "fp_defines.vh"
 
-module top (
+module top #(
+    parameter SCHED_MODE = 0,
+    parameter DYNAMIC_OWNER_DEPTH = 4096
+) (
     input  wire uart_rx,
     output wire uart_tx,
     input  wire sys_clk
@@ -95,7 +98,12 @@ module top (
         .precision_mode (cmd_precision)
     );
 
-    mandelbrot_multicore #(.CORE_COUNT(4), .CORE_FIFO_DEPTH(4096)) u_core (
+    mandelbrot_multicore #(
+        .CORE_COUNT(4),
+        .CORE_FIFO_DEPTH(4096),
+        .SCHED_MODE(SCHED_MODE),
+        .DYNAMIC_OWNER_DEPTH(DYNAMIC_OWNER_DEPTH)
+    ) u_core (
         .clk            (sys_clk),
         .rst            (rst),
         .ce             (fp_ce),

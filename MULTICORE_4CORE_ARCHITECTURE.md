@@ -69,8 +69,10 @@ flowchart TB
 |---|---|
 | `mandelbrot_multicore.v` | 4-core wrapper. Owns worker instantiation, per-core FIFOs, scheduler, merger, and `tx_start` passthrough. |
 | `work_dispatch_static_rows.v` | Modular task assignment. Current policy is static interleaved rows. Replace this module for future dynamic or out-of-order work issue. |
+| `work_dispatch_dynamic_rows.v` | Optional task assignment. Issues one full row at a time to the first available worker and records row ownership. |
 | `mandelbrot_core_worker.v` | Worker version of the single-core FSM. Adds `row_start_in` and `row_stride_in`; otherwise computes the same FP64 Mandelbrot iterations. |
 | `raster_merge_static_rows.v` | Reorders per-core row streams into exact host-visible raster order. This preserves the existing host protocol. |
+| `raster_collect_dynamic_rows.v` | Optional dynamic-mode collector. Uses the owner table from the dynamic dispatcher to preserve host-visible raster order. |
 | `queue.v` | Existing synchronous FIFO, reused for per-core and output buffering. |
 | `top.v` | Instantiates `mandelbrot_multicore #(.CORE_COUNT(4), .CORE_FIFO_DEPTH(4096))`. |
 
@@ -93,6 +95,13 @@ This policy is a good fit for the unchanged raster protocol:
 | Merger complexity | Simple. Raster output row `y` always comes from `core = y % 4`. |
 | Protocol impact | None. Host still receives row-major pixels. |
 | Future replacement | Clear. Replace `work_dispatch_static_rows` and `raster_merge_static_rows` together when a future protocol can accept row IDs, tiles, or out-of-order packets. |
+
+An optional dynamic row scheduler is also available through `SCHED_MODE=1` in `mandelbrot_multicore`/`top`. It assigns one full-width row at a time to an idle worker and writes `owner[row] = core_id` into a small owner table. `raster_collect_dynamic_rows.v` drains rows in raster order by reading that owner table, so the UART/host protocol remains unchanged.
+
+| Mode | Dispatcher | Collector | Validation |
+|---:|---|---|---|
+| `SCHED_MODE=0` | `work_dispatch_static_rows` | `raster_merge_static_rows` | Default board mode. |
+| `SCHED_MODE=1` | `work_dispatch_dynamic_rows` | `raster_collect_dynamic_rows` | `sim_multicore_dynamic.tcl` and `build_fp64_dynamic.tcl` pass. |
 
 ## Raster Merge
 
@@ -205,7 +214,9 @@ The DSP count matches the feasibility estimate: roughly one top-level multiply f
 | `sim_fp.tcl` | Pass |
 | `sim_core.tcl` | Pass |
 | `sim_multicore.tcl` | `=== MULTICORE TEST PASS: 192 pixels ===` |
+| `sim_multicore_dynamic.tcl` | `=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===` |
 | `build_fp64.tcl` | Pass, bitstream generated |
+| `build_fp64_dynamic.tcl` | Pass, dynamic-scheduler bitstream generated |
 | `program.tcl` | Pass |
 | `python python\test_esc.py` | Pass |
 | `python python\mandelbrot_host.py --verify --width 160 --height 120 --max-iter 256 ...` | `19200/19200 match` |
@@ -232,6 +243,21 @@ All board tests used 100 MHz FP64, 4 cores, unchanged host protocol, and 500000 
 | Deep tendrils | `center=(-0.77568377,0.13646737)`, `step=1e-9`, `iter=8192` | `340.029s`, `6098.30 pps` | `93.960s`, `22068.99 pps` | `3.62x` |
 | Deep mini-brot | `center=(-1.25066,0.02012)`, `step=1e-9`, `iter=8192` | `850.720s`, `2437.46 pps` | `234.261s`, `8851.67 pps` | `3.63x` |
 | Deep seahorse | `center=(-0.743643887037151,0.13182590420533)`, `step=1e-8`, `iter=1024` | `363.253s`, `5708.41 pps` | `103.032s`, `20125.73 pps` | `3.53x` |
+
+### Dynamic Scheduler 1080p Cases
+
+The optional `SCHED_MODE=1` dynamic row scheduler was programmed and benchmarked with the same 576000 baud host path. It preserves the original raster protocol and rendered all six full 1080p scenes successfully.
+
+| Scene | Static 4-core 576k | Dynamic 4-core 576k | Dynamic throughput | Dynamic vs static |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `72.736s` | `72.721s` | `28514.47 pps` | `1.000x` |
+| Standard @64 | `72.735s` | `72.719s` | `28515.41 pps` | `1.000x` |
+| Seahorse zoom @512 | `74.265s` | `74.253s` | `27926.03 pps` | `1.000x` |
+| Deep tendrils @8192 | `93.916s` | `93.907s` | `22081.36 pps` | `1.000x` |
+| Deep mini-brot @8192 | `234.231s` | `234.137s` | `8856.36 pps` | `1.000x` |
+| Deep seahorse @1024 | `100.658s` | `100.691s` | `20593.74 pps` | `1.000x` |
+
+The result is intentionally documented as a neutral outcome: dynamic row assignment is functionally correct and timing-clean, but the measured scenes do not contain enough static row-assignment tail imbalance to produce a visible speedup.
 
 ## Interpretation
 

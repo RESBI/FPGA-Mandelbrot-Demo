@@ -12,6 +12,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | UART baudrate deep investigation | [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md) | Raw-probe integer-divider tests, TX-only isolation, 576000 candidate. |
 | UART timing analysis | [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md) | Single-sample RX timing, CP2102 drift, margin analysis, root cause of high-baud failures. |
 | FP64 boundary differences | [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md) | Truncation vs RNE, chaotic amplification, boundary pixel trace, difference classification. |
+| Dynamic idle-core scheduling | [DYNAMIC_IDLE_CORE_SCHEDULING.md](DYNAMIC_IDLE_CORE_SCHEDULING.md) | Optional row-level dynamic scheduler, result collector, mode switching, validation, and limits. |
 | Multi-core feasibility | [MULTICORE_FEASIBILITY.md](MULTICORE_FEASIBILITY.md) | Resource model, scheduler alternatives, output-order constraints, expected scaling. |
 | Implemented 4-core design | [MULTICORE_4CORE_ARCHITECTURE.md](MULTICORE_4CORE_ARCHITECTURE.md) | Final 4-core architecture, modular dispatch/merge boundary, validation, 1080p benchmark results. |
 | Historical notes | [DESIGN.md](DESIGN.md) | Earlier design notes and historical context. |
@@ -370,6 +371,7 @@ The table below summarizes how each stage moved the system bottleneck.
 | Multi-core feasibility | Need parallel compute but protocol constrained | Selected 4-core interleaved rows | Clear path with no host protocol change. |
 | 4-core implementation | Single-worker compute throughput | Added 4 workers and raster merger | Compute-bound 1080p scenes improved about `3.5x-3.6x`. |
 | FP64 boundary differences | Truncation vs RNE discrepancy | Quantified chaotic amplification, documented acceptance criteria | Verified differences are benign and expected. |
+| Dynamic scheduler option | Static row modulo can leave row-level tail imbalance | Added `SCHED_MODE=1` idle-core row dispatcher and raster collector | Dynamic mode simulates and builds successfully while preserving the host protocol. |
 
 ## Final 1080p Performance Comparison
 
@@ -398,6 +400,21 @@ The 4-core design's gains over single-core are architecture-limited, not baudrat
 | Deep seahorse @1024 | `103.032s` | `100.658s` | `20600.46 pps` | `1.02x` |
 
 The 576000 baud improvement follows UART dependency precisely: UART-bound scenes see the full ~15% raw bandwidth gain (576000/500000 = 1.152), mixed-bound scenes see a partial improvement (1.02x–1.13x), and compute-bound scenes see no change. All six scenes ran successfully at 1080p resolution; the first three were verified with `--verify` against the software reference.
+
+### Dynamic Scheduler At 576000 Baud
+
+The optional `SCHED_MODE=1` dynamic row scheduler was also benchmarked on the same six 1080p scenes after programming `fp64_dynamic_proj/mandelbrot_fp64_dynamic.runs/impl_1/top.bit`.
+
+| Scene | Static 4-Core 576k | Dynamic 4-Core 576k | Dynamic Throughput | Dynamic vs Static |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `72.736s` | `72.721s` | `28514.47 pps` | `1.000x` |
+| Standard @64 | `72.735s` | `72.719s` | `28515.41 pps` | `1.000x` |
+| Seahorse zoom @512 | `74.265s` | `74.253s` | `27926.03 pps` | `1.000x` |
+| Deep tendrils @8192 | `93.916s` | `93.907s` | `22081.36 pps` | `1.000x` |
+| Deep mini-brot @8192 | `234.231s` | `234.137s` | `8856.36 pps` | `1.000x` |
+| Deep seahorse @1024 | `100.658s` | `100.691s` | `20593.74 pps` | `1.000x` |
+
+This confirms the scheduling model: the current real scenes have little row-level tail imbalance left for dynamic assignment to recover. The dynamic scheduler is useful as an architecture option and validates the scheduler/collector replacement boundary, but the next major performance improvements still require transport upgrades, tagged/tile output, or worker-internal de-bubbling.
 
 Test parameters for the comparison table:
 
@@ -429,6 +446,26 @@ The true 100 MHz stage succeeded because long FP logic cones were pipelined. Rem
 
 Four workers are enough to push many compute-heavy scenes near the UART ceiling (~28800 pps). More workers would consume resources but often wait on UART unless the scene is extremely compute-bound.
 
+### Dynamic Row Scheduling Is Now A Switchable Option
+
+The original 4-core implementation deliberately separated dispatch and merge logic. That boundary has now been exercised by adding an optional dynamic row scheduler:
+
+| Mode | Dispatcher | Collector | Protocol |
+|---|---|---|---|
+| Static default | `work_dispatch_static_rows` | `raster_merge_static_rows` | Existing raster stream. |
+| Dynamic optional | `work_dispatch_dynamic_rows` | `raster_collect_dynamic_rows` | Existing raster stream. |
+
+Dynamic mode assigns one full row at a time to an idle core and records row ownership. The collector still emits rows in order, so the host does not change. This validates the scheduler replacement boundary and gives a practical way to study row-level imbalance, but expected speedup on current measured 576k scenes is limited because UART and worker-internal FP latency remain dominant.
+
+Validation after adding this mode:
+
+| Command | Result |
+|---|---|
+| `sim_multicore.tcl` | `=== MULTICORE TEST PASS: 192 pixels ===` |
+| `sim_multicore_dynamic.tcl` | `=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===` |
+| `build_fp64.tcl` | Static bitstream generated, timing met. |
+| `build_fp64_dynamic.tcl` | Dynamic bitstream generated, timing met. |
+
 ## Recommended Next Evolution
 
 The next major improvement should target protocol and transport before adding more compute cores.
@@ -446,8 +483,8 @@ Recommended order:
 | Priority | Step | Reason |
 |---:|---|---|
 | 1 | Add a higher-bandwidth transport | Current UART caps fast scenes at about `28800 pps`. |
-| 2 | Add row/tile IDs to output packets | Enables out-of-order completion and simpler dynamic scheduling. |
-| 3 | Replace static interleaved rows with dynamic tiles | Improves load balance on localized deep zooms. |
+| 2 | Add row/tile IDs to output packets | Enables out-of-order completion beyond the current raster collector. |
+| 3 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms. |
 | 4 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
 | 5 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
 
@@ -462,5 +499,6 @@ The project evolved through a pragmatic sequence:
 5. Study multi-core scaling under the unchanged raster protocol.
 6. Implement 4-core interleaved-row workers with a modular scheduler and raster merger.
 7. Analyze and document FP64 boundary differences (truncation vs RNE rounding, chaotic amplification).
+8. Add a switchable dynamic idle-core row scheduler and matching raster collector.
 
 The current design is stable, validated, and substantially faster for compute-bound 1080p deep zooms while preserving the original host protocol. The remaining bottleneck is no longer primarily FP compute for many scenes; it is the combination of UART bandwidth and strict raster-order output.
