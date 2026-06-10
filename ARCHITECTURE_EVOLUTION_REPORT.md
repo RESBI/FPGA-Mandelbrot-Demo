@@ -416,6 +416,8 @@ The optional `SCHED_MODE=1` dynamic row scheduler was also benchmarked on the sa
 
 This confirms the scheduling model: the current real scenes have little row-level tail imbalance left for dynamic assignment to recover. The dynamic scheduler is useful as an architecture option and validates the scheduler/collector replacement boundary, but the next major performance improvements still require transport upgrades, tagged/tile output, or worker-internal de-bubbling.
 
+The important lesson is that dynamic row assignment targeted the wrong dominant term for these measured scenes. Fast scenes are already limited by UART output time. Compute-heavy scenes are dominated by worker-internal FP latency rather than row ownership imbalance. The existing static scheduler already interleaves adjacent rows, so it was much closer to balanced than a contiguous-band split would have been.
+
 Test parameters for the comparison table:
 
 | Scene | Center | Step | Max Iter |
@@ -457,6 +459,18 @@ The original 4-core implementation deliberately separated dispatch and merge log
 
 Dynamic mode assigns one full row at a time to an idle core and records row ownership. The collector still emits rows in order, so the host does not change. This validates the scheduler replacement boundary and gives a practical way to study row-level imbalance, but expected speedup on current measured 576k scenes is limited because UART and worker-internal FP latency remain dominant.
 
+Why the measured speedup is effectively zero:
+
+| Cause | Effect |
+|---|---|
+| UART-bound views already run at about 99% of the 576000 baud pixel ceiling | A better scheduler cannot send pixels faster than UART. |
+| Static interleaved rows already spread smooth Mandelbrot row costs across all four cores | Dynamic assignment has little tail imbalance to recover. |
+| Dynamic mode uses one-row jobs to reuse the existing worker safely | Each row repeats worker startup work, which consumes part of any balancing gain. |
+| The collector still emits strict raster order | A slow earlier row can still hold the output stream even if later rows completed. |
+| High-iteration views are dominated by the worker FSM and `PIPE_WAIT=10` FP latency | Row scheduling does not increase per-worker FP issue utilization. |
+
+The architectural value is therefore not immediate throughput. It is validation that the dispatch/collection boundary can be replaced without touching UART, command parsing, FP datapaths, or host protocol.
+
 Validation after adding this mode:
 
 | Command | Result |
@@ -484,9 +498,10 @@ Recommended order:
 |---:|---|---|
 | 1 | Add a higher-bandwidth transport | Current UART caps fast scenes at about `28800 pps`. |
 | 2 | Add row/tile IDs to output packets | Enables out-of-order completion beyond the current raster collector. |
-| 3 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms. |
-| 4 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
-| 5 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
+| 3 | De-bubble workers with multi-context interleaving | Attacks the real compute-bound bottleneck inside each worker. |
+| 4 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
+| 5 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
+| 6 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
 
 ## Summary
 

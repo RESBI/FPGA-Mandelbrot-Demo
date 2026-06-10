@@ -192,6 +192,129 @@ Interpretation:
 
 These results confirm the model: the implemented dynamic row scheduler is useful as an architectural option and validation of the dispatch/collect boundary, but it is not a performance win for the current measured scenes. Bigger gains require either highly row-imbalanced views, tile-level dynamic scheduling, more cores, transport upgrades, or worker de-bubbling.
 
+## Why The Speedup Was Not Observed
+
+The dynamic scheduler did not underperform because the RTL failed to distribute work. It underperformed relative to the optimistic intuition because the current system has very little recoverable row-assignment idle time in the measured scenes. The measured result is therefore a useful negative result: it shows which bottleneck is not dominant.
+
+### 1. The Fast Scenes Are Already UART-Bound
+
+At 576000 baud, the hard pixel-output ceiling is:
+
+```text
+576000 bits/s / 10 UART bits/byte / 2 bytes/pixel = 28800 pixels/s
+```
+
+The dynamic fast/standard measurements are already essentially at that ceiling:
+
+| Scene | Dynamic pps | Fraction of UART ceiling | Remaining headroom |
+|---|---:|---:|---:|
+| Fast escape @128 | 28514.47 pps | 99.0% | 1.0% |
+| Standard @64 | 28515.41 pps | 99.0% | 1.0% |
+| Seahorse zoom @512 | 27926.03 pps | 97.0% | 3.1% |
+
+No row scheduler can materially improve a scene once the output link is the limiter. Even a perfect compute scheduler would spend most of the time waiting for `tx_ctrl`/UART to drain the same 4,147,200 pixel bytes.
+
+### 2. Static Interleaved Rows Were Already Well Balanced
+
+The static scheduler was not a weak contiguous-band split. It already interleaves rows:
+
+```text
+core0: rows 0,4,8,...
+core1: rows 1,5,9,...
+core2: rows 2,6,10,...
+core3: rows 3,7,11,...
+```
+
+Mandelbrot cost usually varies smoothly between neighboring rows for the tested views. Interleaving therefore distributes heavy regions across all cores reasonably well. Dynamic row assignment can only improve the residual imbalance after that distribution.
+
+The earlier single-core-to-4-core results already prove this point:
+
+| Scene | Single-core 500k | Static 4-core 500k | Static scaling |
+|---|---:|---:|---:|
+| Deep tendrils @8192 | 340.029 s | 93.960 s | 3.62x |
+| Deep mini-brot @8192 | 850.720 s | 234.261 s | 3.63x |
+| Deep seahorse @1024 | 363.253 s | 103.032 s | 3.53x |
+
+Those are already about 88% to 91% of ideal 4-core scaling. Dynamic row scheduling can only recover the missing tail imbalance, not create another multi-x gain.
+
+### 3. The Dynamic Job Granularity Adds Row-Start Work
+
+The implemented dynamic mode deliberately reuses the existing worker by making each job one row:
+
+```text
+row_start = assigned row
+row_stride = rows
+```
+
+This keeps the RTL small and safe, but every row becomes a separate worker job. Each job repeats worker initialization, including coordinate setup for that row. For 1920-wide rows this overhead is small, but it is not zero. The dynamic scheduler must first overcome this overhead before any load-balance gain becomes visible.
+
+This is why `CHUNK_ROWS > 1` may be worth prototyping later: it would reduce per-row startup overhead, but it would also make load balancing coarser.
+
+### 4. Strict Raster Collection Still Serializes Early Rows
+
+Dynamic mode keeps the old host protocol. The collector must emit:
+
+```text
+row 0, row 1, row 2, ...
+```
+
+It cannot transmit a completed later row before an earlier row. Therefore, dynamic dispatch improves compute assignment, but it does not remove all order-related stalls. If row `N` is slow, rows after `N` can be computed earlier, but the UART stream still waits at row `N`.
+
+A tagged protocol v2 would remove this restriction by letting the FPGA return completed row/tile chunks out of order and letting the host place them into the image buffer.
+
+### 5. Compute-Bound Scenes Are Mostly Worker-Internal, Not Assignment-Internal
+
+For high-iteration scenes, the dominant compute cost is inside each worker's Mandelbrot FSM. The worker is latency-scheduled: it issues an FP operation, waits `PIPE_WAIT=10`, captures the result, and then issues the next dependent operation.
+
+For a non-escaping iteration, the current worker performs roughly:
+
+```text
+3 multiplier issues + 5 adder issues over about 77 cycles
+```
+
+Dynamic row assignment does not change this per-worker schedule. It can make sure an idle worker receives another row, but it cannot make that worker feed its multiplier/adder every cycle. That is why compute-heavy mini-brot/tendrils cases remain effectively unchanged.
+
+### 6. The Tested Views Are Not Pathological For Row Modulo Assignment
+
+Dynamic scheduling is most useful when one static row class is much heavier than the others. For example:
+
+```text
+rows where y % 4 == 2 contain a localized expensive filament
+other row classes mostly escape quickly
+```
+
+The six benchmark views do not appear to have that kind of row-class pathology. They are either UART-bound, broadly distributed, or dominated by per-worker iteration latency. An artificial row-imbalanced benchmark would be better for demonstrating scheduler benefit in isolation.
+
+### 7. Whole-System Timing Is The Maximum Of Several Terms
+
+A useful mental model is:
+
+```text
+frame_time = max(output_time, compute_time_with_assignment, raster_wait_time) + overhead
+```
+
+The dynamic scheduler only reduces `compute_time_with_assignment` when static assignment imbalance is significant. It does not reduce `output_time`, does not reduce per-worker FP latency, and only partially affects `raster_wait_time` because the output stream remains ordered.
+
+For the measured scenes:
+
+| Scene class | Dominant term | Dynamic row scheduling effect |
+|---|---|---|
+| Fast escape / standard | `output_time` | None. UART dominates. |
+| Seahorse zoom / deep seahorse | mixed output + compute | Too little remaining row imbalance. |
+| Tendrils / mini-brot | worker-internal compute | Assignment is not the main limiter. |
+
+### Practical Conclusion
+
+The dynamic scheduler is still valuable because it proves the dispatch/collect boundary is replaceable and timing-clean. It also provides a platform for future schedulers. However, the result shows that row-level work stealing over the existing raster UART protocol is not enough. The next performance-oriented changes should target bottlenecks in this order:
+
+| Priority | Change | Reason |
+|---:|---|---|
+| 1 | Higher-bandwidth transport | Removes the ceiling for UART-bound scenes. |
+| 2 | Tagged row/tile output protocol | Removes strict raster collector stalls and lets the host reorder. |
+| 3 | Dynamic tile scheduling | Provides finer load balance for localized hotspots. |
+| 4 | Worker de-bubbling / multi-context interleaving | Attacks the real compute-bound bottleneck inside each worker. |
+| 5 | More cores | Useful only after output bandwidth and scheduling granularity improve. |
+
 ## Limitations
 
 | Limitation | Detail |
