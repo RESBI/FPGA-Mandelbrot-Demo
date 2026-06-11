@@ -381,6 +381,108 @@ That explains the measured table:
 
 The `2.80x` whole-system speedup on mini-brot is larger than the simple 2-context local model's balanced `2x` because the implemented worker is not just alternating two complete old FSMs. It also issues independent multiplier and adder operations through tagged pipelines with shorter true FPU latencies (`6/7`) than the old conservative single-context wait model (`11`). It still does not approach the ideal `15.4x` for a fully saturated `1M+1A` worker because two contexts are far below the 8-16 contexts needed to hide most dependency latency.
 
+## Generic C Pipeline Simulator
+
+The original exploratory model was `python/pipeline_2ctx_model.py`. It was useful for proving that ordered commit is required, but it only modeled `1M+1A` and 1 or 2 contexts. A faster and more general C simulator has now been added:
+
+| File | Purpose |
+|---|---|
+| `tools/pipeline_sim.c` | Generic Mandelbrot compute-side pipeline model. Supports `K` contexts per worker, `A` adders per worker, `M` multipliers per worker, dynamic/static row scheduling, and host-like scene parameters. |
+
+Build command:
+
+```bash
+gcc -O3 -std=c11 -Wall -Wextra -o tools\pipeline_sim.exe tools\pipeline_sim.c -lm
+```
+
+Example single configuration:
+
+```bash
+tools\pipeline_sim.exe --width 1920 --height 1080 \
+  --center -1.25066 0.02012 --step 1e-9 --max-iter 8192 \
+  --contexts 16 --multipliers 1 --adders 1
+```
+
+Example sweep over the architecture options in this report:
+
+```bash
+tools\pipeline_sim.exe --width 1920 --height 1080 \
+  --center -1.25066 0.02012 --step 1e-9 --max-iter 8192 \
+  --sweep
+```
+
+Supported host-like options include `--center`, `--step`, `--max-iter`, `--width`, `--height`, `--mode`, `--output`, `--format`, `--port`, `--timeout`, and `--verify`. The non-compute host options are accepted for CLI compatibility but ignored by the simulator. Pipeline-specific options are `--contexts`, `--adders`, `--multipliers`, `--workers`, `--add-lat`, `--mul-lat`, `--clock-hz`, `--scheduler`, `--sweep`, and `--exact`.
+
+Two model modes are available:
+
+| Mode | How to select | Intended use |
+|---|---|---|
+| Fast aggregate row model | Default | 1080p sweeps. Uses the actual Mandelbrot iteration-count trace, then estimates row compute cycles from context capacity and FP issue constraints. |
+| Exact stage scheduler | `--exact` | Small-frame debugging. Simulates per-context FP stage issue cycle by cycle. |
+
+Validation checks already run:
+
+| Check | Result |
+|---|---|
+| Built with `gcc -O3 -std=c11 -Wall -Wextra` | Clean after removing the local binary from version control. |
+| `tools\pipeline_sim.exe --self-test` | Passed known point checks such as `(2.5,0) -> 1` and `(0,0) -> max_iter`. |
+| 32x24 exact model, `2ctx 1M+1A`, `MUL_LAT=6`, `ADD_LAT=7` | `768` pixels, average iteration `61.605469`, `1124348` compute cycles. |
+| 32x24 fast model, same scene/config | `1088955` compute cycles, within about `3.1%` of exact for this small frame. |
+| Legacy latency cross-check, `MUL_LAT=11`, `ADD_LAT=11` | C exact model gives `1842020` cycles versus Python model `1827819` cycles for 32x24 2ctx; close enough for scheduler-level modeling, with differences from the generalized issue arbitration. |
+
+The simulator intentionally reports `compute_pps` without applying the UART ceiling. This lets the model expose FPGA-side compute throughput that is otherwise hidden by the current 576000 baud output link.
+
+## C Simulator Predictions For Architecture Options
+
+All rows below use the fast aggregate model, four workers, 100 MHz, dynamic row scheduling, `MUL_LAT=6`, `ADD_LAT=7`, and no UART cap. These are compute-side predictions, not end-to-end UART throughput.
+
+### Standard And Fast Scenes
+
+| Worker architecture | Fast escape @128 | Standard @64 | Seahorse zoom @512 |
+|---|---:|---:|---:|
+| `1ctx 1M+1A` | `584357 pps` | `542667 pps` | `77823 pps` |
+| `2ctx 1M+1A` | `1168700 pps` | `1085321 pps` | `155645 pps` |
+| `4ctx 1M+1A` | `2337330 pps` | `2170582 pps` | `311289 pps` |
+| `8ctx 1M+1A` | `4674297 pps` | `4340850 pps` | `622572 pps` |
+| `16ctx 1M+1A` | `5438297 pps` | `5040573 pps` | `717116 pps` |
+| `16ctx 1M+2A` | `8637619 pps` | `8069140 pps` | `1187095 pps` |
+| `24ctx 2M+2A` | `10873088 pps` | `10078126 pps` | `1434171 pps` |
+| `32ctx 2M+3A` | `15986164 pps` | `15033418 pps` | `2151132 pps` |
+| `48ctx 3M+5A` | `25868054 pps` | `24168190 pps` | `3560438 pps` |
+
+Fast scenes have low average iteration counts, so their compute-only pps is already very high. On the actual board they are completely UART-bound long before these compute limits matter.
+
+### Deep Zoom Scenes
+
+| Worker architecture | Deep tendrils @8192 | Deep mini-brot @8192 | Deep seahorse @1024 |
+|---|---:|---:|---:|
+| `1ctx 1M+1A` | `37734 pps` | `15059 pps` | `35304 pps` |
+| `2ctx 1M+1A` | `75468 pps` | `30117 pps` | `70608 pps` |
+| `4ctx 1M+1A` | `150936 pps` | `60234 pps` | `141216 pps` |
+| `8ctx 1M+1A` | `301870 pps` | `120468 pps` | `282431 pps` |
+| `16ctx 1M+1A` | `347437 pps` | `138584 pps` | `325037 pps` |
+| `16ctx 1M+2A` | `577052 pps` | `230653 pps` | `540038 pps` |
+| `24ctx 2M+2A` | `694860 pps` | `277165 pps` | `650061 pps` |
+| `32ctx 2M+3A` | `1042261 pps` | `415743 pps` | `975067 pps` |
+| `48ctx 3M+5A` | `1730956 pps` | `691926 pps` | `1619938 pps` |
+
+The deep mini-brot scene is the useful compute-bound reference. The current implemented `2ctx 1M+1A` model predicts about `30117 pps` compute-side throughput, while the measured board throughput is `24771.84 pps`. That is close enough to confirm the scale of the model and leaves plausible room for RTL overhead, dynamic row/FIFO effects, ordered commit stalls, and UART still consuming about 14% of the theoretical `28800 pps` link.
+
+### Prediction Versus Current Board Measurements
+
+This table compares the compute-only C model for the current implemented architecture, `2ctx 1M+1A`, against measured 1080p board throughput. The board numbers include UART output, so they are expected to be far below compute-only predictions once a scene reaches the link ceiling.
+
+| Scene | C model compute pps, `2ctx 1M+1A` | Measured board pps | Board / model | Main limiter in measurement |
+|---|---:|---:|---:|---|
+| Fast escape @128 | `1168700` | `28514.74` | `2.4%` | UART ceiling. |
+| Standard @64 | `1085321` | `28514.28` | `2.6%` | UART ceiling. |
+| Seahorse zoom @512 | `155645` | `28487.54` | `18.3%` | Mostly UART ceiling. |
+| Deep tendrils @8192 | `75468` | `28491.11` | `37.8%` | UART ceiling after 2ctx. |
+| Deep mini-brot @8192 | `30117` | `24771.84` | `82.3%` | Still partly compute-bound. |
+| Deep seahorse @1024 | `70608` | `28493.04` | `40.4%` | UART ceiling after 2ctx. |
+
+The comparison gives the intended answer that the UART hides most compute improvements. If the output link were upgraded, a 4/8/16-context `1M+1A` worker would matter immediately. Adding more FP units only becomes worthwhile after enough contexts exist to feed them and after the output path no longer caps the frame rate.
+
 ## Whole-System Model With Faster Output
 
 If the output path allowed 100000 pixels/s, a compute-speedup of 8x from a practical 8-context `1M+1A` worker would become much more visible:
@@ -394,9 +496,7 @@ If the output path allowed 100000 pixels/s, a compute-speedup of 8x from a pract
 
 This shows the architectural dependency: de-bubbling is compute-significant, but it should be paired with transport/protocol improvement to be system-significant.
 
-## Recommended De-Bubbled Worker Architecture
-
-## 2-Context Prototype Model And Results
+## Legacy Python 2-Context Prototype Model
 
 Before changing synthesizable worker RTL, a cycle model was added to validate the scheduling rules and quantify best/worst-case behavior for a two-context worker:
 
@@ -405,7 +505,7 @@ Before changing synthesizable worker RTL, a cycle model was added to validate th
 | `python/pipeline_2ctx_model.py` | Cycle model for 1-context vs 2-context FP issue scheduling, tagged completion, and ordered commit. |
 | `sim_worker_2ctx_model.tcl` | Convenience Tcl wrapper that runs the model with a fast default trace. |
 
-This is a performance/timing model, not a bitstream replacement. It exists to verify the 2-context design requirements before committing to a larger RTL rewrite.
+This is a legacy performance/timing model, not a bitstream replacement. It remains useful for explaining why ordered commit is mandatory, but it only covers the original 1/2-context `1M+1A` experiment and uses the old conservative `PIPE_WAIT + 1 = 11` latency assumption. Use `tools/pipeline_sim.c` for current `MUL_LAT=6`, `ADD_LAT=7`, `K`-context, multi-adder, and multi-multiplier predictions.
 
 ### Modeled 2-Context Timing Plan
 
@@ -515,6 +615,8 @@ The theoretical upper bound for two contexts is near 2x because, with only two i
 | Out-of-order completion must be handled. | Confirmed: reorder occupancy reaches 2 and commit waits appear on nonuniform traces. |
 | Pathological alternating long/short traces can defeat ordered commit. | Confirmed: speedup drops to 1.02x with 1.23M commit-wait cycles. |
 | More contexts are needed for robust throughput. | Confirmed: 2 contexts are a correctness and timing proof, not the final performance target. |
+
+## Recommended De-Bubbled Worker Architecture
 
 ### Design Implication
 
