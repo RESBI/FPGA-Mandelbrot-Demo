@@ -732,7 +732,7 @@ flowchart TB
     RX --> CMD["cmd_parser"]
     CMD --> CORE["4-worker FP64 core"]
     CORE --> OFIFO[["1024 x 16 output FIFO"]]
-    OFIFO --> TXC["tx_ctrl<br/>header/pixels/checksum"]
+    OFIFO --> TXC["tx_ctrl<br/>legacy or tiled response"]
     TXC --> TX("uart_tx<br/>fractional NCO")
     TX --> HOST
 ```
@@ -757,7 +757,33 @@ Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.m
 
 ## 10. TX Controller And Large-Frame Support
 
-`tx_ctrl.v` sends response header, drains pixels from the FIFO, sends each pixel little-endian, computes checksum, and sends one checksum byte.
+`tx_ctrl.v` drains pixels from the FIFO and serializes the response. The host still supports the original monolithic response format, but the current RTL response path is packetized into tiles so that the host can detect byte slips earlier and resynchronize between packets.
+
+Supported response formats:
+
+| Format | Magic | Purpose | Checksum |
+|---|---|---|---|
+| Legacy full frame | `RK` | Original single payload response. | One final XOR byte over all payload bytes. |
+| Tiled frame header | `RT` | Announces frame dimensions before tile packets. | Magic/dimensions checked by host. |
+| Tiled data packet | `TD` | Carries one rectangular pixel tile with row/column coordinates. | One XOR byte over the tile payload. |
+| Tiled frame end | `TE` | Marks completion of the frame dimensions. | Magic/dimensions checked by host. |
+
+Tiled data packet layout:
+
+```text
+TD row_lo row_hi col_lo col_hi tile_rows_lo tile_rows_hi tile_cols_lo tile_cols_hi payload checksum
+```
+
+The current source defaults are:
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `CFG_RESPONSE_TILE_COLS` | `64` | Maximum RTL response packet width. |
+| `CFG_RESPONSE_TILE_GAP_CYCLES` | `1000` | Inter-packet idle gap at 100 MHz, about 10 us. |
+
+The packet checksum is payload-only; the host validates packet magic, frame dimensions, row/column bounds, payload length, and checksum. This is intentionally minimal and keeps the RTL small. It does not yet provide sequence IDs or packet-level retransmission from the FPGA.
+
+Host-driven tiling builds reliability above this packetized response format. Instead of requesting a full 1920x1080 frame in one command, the host sends multiple smaller compute commands and stitches the returned subframes into the final image. If a subframe fails checksum or framing, the host drains the serial stream and retries that compute tile. The recommended 1080p shape is `1920x120`, producing nine retryable stripes per frame.
 
 The response size is based on:
 
@@ -788,6 +814,24 @@ flowchart TB
     CS --> DONE[Return idle]
 ```
 
+The legacy pipeline above is still the conceptual data path: read pixels, serialize low/high bytes, and compute an XOR checksum. The current tiled implementation wraps the same pixel stream in repeated `TD` packets and emits `RT`/`TE` frame markers.
+
+Tiled response pipeline:
+
+```mermaid
+flowchart TB
+    START["tx_start rows/cols"] --> RT["Send RT frame header"]
+    RT --> NEXT{"More pixels?"}
+    NEXT -->|yes| TDH["Send TD tile header<br/>row/col/tile size"]
+    TDH --> RD["Read FIFO pixels"]
+    RD --> PAYLOAD["Send tile payload<br/>update XOR checksum"]
+    PAYLOAD --> TCS["Send tile checksum"]
+    TCS --> GAP["Optional inter-packet gap"]
+    GAP --> NEXT
+    NEXT -->|no| TE["Send TE frame end"]
+    TE --> DONE["Return idle"]
+```
+
 ## 11. Host Software Architecture
 
 Host code is in `python/mandelbrot_host.py`.
@@ -800,7 +844,8 @@ Responsibilities:
 | FP encoding | Pack FP64 with Python `struct.pack('<d')`; pack FP128 manually for experimental mode. |
 | Command builder | Build little-endian command packet and XOR checksum. |
 | Serial transport | Open `COM6` by default at 12000000 baud. |
-| Response receiver | Read header, expected pixel bytes, checksum, and convert to uint16 pixels. |
+| Response receiver | Read legacy `RK` or tiled `RT`/`TD`/`TE` responses, validate checksums, and convert to uint16 pixels. |
+| Host-driven tiling | Optional `--tile-width`, `--tile-height`, and `--tile-retries` split a frame into retryable compute tiles. |
 | Renderer | Convert iteration counts to PNG or text output. |
 | Software reference | Optional `--verify` computes a Python Mandelbrot image matching RTL coordinate rules. |
 | Timing | Print FPGA elapsed, pixels/s, render elapsed, software elapsed, and total elapsed. |
@@ -811,7 +856,28 @@ Typical command:
 python python\mandelbrot_host.py --width 1920 --height 1080 --max-iter 512 --center -0.743643887037151 0.13182590420533 --step 0.000005 --timeout 1800 --output python\hw_1080p_zoom.png
 ```
 
-### 11.1 Software Reference Matching RTL
+Recommended high-baud 1080p host-tiled command:
+
+```bash
+python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
+```
+
+### 11.1 Host-Tiled 12 Mbaud Stability
+
+The host-tiled mode was stress-tested with the six standard 1080p scenes, five repeated runs per scene. The first pass lost the USB serial device after 23 completed frame runs; after reconnecting `COM6`, the stale failed/open-port logs were rerun with `--resume`, completing the full 30-run sweep:
+
+| Scene | Completed runs | Tile retries | Mean FPGA s | Min s | Max s | Stddev s | CV | Mean pps |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Fast escape @128 | `5/5` | `0` | `4.844` | `4.843` | `4.845` | `0.001` | `0.02%` | `428068.64` |
+| Standard @64 | `5/5` | `0` | `4.450` | `4.449` | `4.451` | `0.001` | `0.02%` | `466030.04` |
+| Seahorse zoom @512 | `5/5` | `1` | `17.598` | `17.081` | `19.657` | `1.151` | `6.54%` | `118207.86` |
+| Deep tendrils @8192 | `5/5` | `1` | `34.026` | `33.186` | `37.377` | `1.873` | `5.51%` | `61080.26` |
+| Deep mini-brot @8192 | `5/5` | `0` | `83.281` | `83.280` | `83.282` | `0.001` | `0.00%` | `24898.89` |
+| Deep Seahorse @1024 | `5/5` | `0` | `36.343` | `36.341` | `36.345` | `0.002` | `0.00%` | `57056.36` |
+
+The two retry events were recovered by recomputing one 1920x120 host tile. Without host-driven tiling, an equivalent byte slip in a monolithic 4 MiB response would normally invalidate the entire frame. The variability in Seahorse zoom and deep tendrils is therefore dominated by the occasional tile retry, not by normal compute jitter. Exact HW/SW match is not used as the transport pass criterion for deep scenes because FP64 boundary differences are already documented separately.
+
+### 11.2 Software Reference Matching RTL
 
 The reference model uses the same coordinate convention as the RTL:
 

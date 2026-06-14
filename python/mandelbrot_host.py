@@ -8,7 +8,11 @@ Pixel data format: uint16 little-endian (2 bytes per pixel).
 Protocol (binary, little-endian):
   Command:  0x4D | precision(0=FP64,1=FP128) | rows(u16) | cols(u16) |
             max_iter(u16) | center_re(FP) | center_im(FP) | step(FP) | checksum(XOR)
-  Response: 0x52 0x4B | rows(u16) | cols(u16) | pixel_data(2*rows*cols bytes) | checksum(XOR)
+  Legacy response: 0x52 0x4B | rows(u16) | cols(u16) | pixel_data | checksum(XOR)
+  Tiled response:  0x52 0x54 | rows(u16) | cols(u16) |
+                   repeated tiles: 0x54 0x44 | row(u16) | col(u16) |
+                   tile_rows(u16) | tile_cols(u16) | pixel_data | checksum(XOR) |
+                   end: 0x54 0x45 | rows(u16) | cols(u16)
 """
 
 import serial
@@ -151,8 +155,9 @@ def float_to_fp128(val):
 #  FPGA Communication
 # ============================================================
 class MandelbrotFPGA:
-    def __init__(self, port=PORT, baud=BAUD, timeout=TIMEOUT):
+    def __init__(self, port=PORT, baud=BAUD, timeout=TIMEOUT, verbose=True):
         self.ser = serial.Serial(port, baud, timeout=timeout)
+        self.verbose = verbose
 
     def close(self):
         if self.ser:
@@ -185,36 +190,29 @@ class MandelbrotFPGA:
             checksum ^= b
         payload.append(checksum)
 
-        print(f"Sending: {width}x{height}, max_iter={max_iter}, "
-              f"center=({center_re},{center_im}), step={step}, mode={mode}")
-        print(f"Command: {len(payload)} bytes")
+        if self.verbose:
+            print(f"Sending: {width}x{height}, max_iter={max_iter}, "
+                  f"center=({center_re},{center_im}), step={step}, mode={mode}")
+            print(f"Command: {len(payload)} bytes")
         self.ser.reset_input_buffer()
         self.ser.write(payload)
         self.ser.flush()
 
-    def recv_response(self, width, height):
+    def recv_legacy_response(self, header, width, height):
         total_pixels = width * height
-        header = self.ser.read(6)
-        if len(header) < 6:
-            print(f"ERROR: Incomplete header: {header.hex() if header else 'none'}")
-            return None
-
-        magic_r, magic_k = header[0], header[1]
         resp_rows = struct.unpack('<H', header[2:4])[0]
         resp_cols = struct.unpack('<H', header[4:6])[0]
 
-        if magic_r != 0x52 or magic_k != 0x4B:
-            print(f"ERROR: Bad magic: {hex(magic_r)} {hex(magic_k)}, header={header.hex()}")
-            return None
-
-        print(f"Response header: {resp_rows}x{resp_cols}")
+        if self.verbose:
+            print(f"Response header: {resp_rows}x{resp_cols}")
         if resp_rows != height or resp_cols != width:
             print(f"WARNING: Dims mismatch: {resp_rows}x{resp_cols} vs {height}x{width}")
             total_pixels = resp_rows * resp_cols
 
         # 2 bytes per pixel (uint16 LE)
         total_data_bytes = total_pixels * 2
-        print(f"Receiving {total_data_bytes} data bytes ({total_pixels} pixels)...")
+        if self.verbose:
+            print(f"Receiving {total_data_bytes} data bytes ({total_pixels} pixels)...")
 
         raw = bytearray()
         checksum_calc = 0
@@ -227,7 +225,7 @@ class MandelbrotFPGA:
             raw += chunk
             for b in chunk:
                 checksum_calc ^= b
-            if len(raw) % 20000 == 0:
+            if self.verbose and len(raw) % 20000 == 0:
                 print(f"  Progress: {len(raw)}/{total_data_bytes}")
 
         if len(raw) < total_data_bytes:
@@ -246,8 +244,117 @@ class MandelbrotFPGA:
         for i in range(0, len(raw), 2):
             pixels.append(struct.unpack('<H', raw[i:i+2])[0])
 
-        print(f"Received {len(pixels)} pixels")
+        if self.verbose:
+            print(f"Received {len(pixels)} pixels")
         return pixels
+
+    def recv_tiled_response(self, header, width, height):
+        resp_rows = struct.unpack('<H', header[2:4])[0]
+        resp_cols = struct.unpack('<H', header[4:6])[0]
+
+        if self.verbose:
+            print(f"Tiled response header: {resp_rows}x{resp_cols}")
+        if resp_rows != height or resp_cols != width:
+            print(f"WARNING: Dims mismatch: {resp_rows}x{resp_cols} vs {height}x{width}")
+
+        total_pixels = resp_rows * resp_cols
+        pixels = [0] * total_pixels
+        received_pixels = 0
+        tile_count = 0
+
+        while True:
+            tile_magic = self.ser.read(2)
+            if len(tile_magic) < 2:
+                print(f"ERROR: Incomplete tile magic after {received_pixels}/{total_pixels} pixels")
+                return None
+
+            if tile_magic == b"TE":
+                end_payload = self.ser.read(4)
+                if len(end_payload) < 4:
+                    print(f"ERROR: Incomplete end frame after {received_pixels}/{total_pixels} pixels")
+                    return None
+                end_rows = struct.unpack('<H', end_payload[0:2])[0]
+                end_cols = struct.unpack('<H', end_payload[2:4])[0]
+                if end_rows != resp_rows or end_cols != resp_cols:
+                    print(f"ERROR: Bad end dims: {end_rows}x{end_cols}")
+                    return None
+                if received_pixels != total_pixels:
+                    print(f"ERROR: End frame before full image: {received_pixels}/{total_pixels} pixels")
+                    return None
+                if self.verbose:
+                    print(f"Received {received_pixels} pixels in {tile_count} tiles")
+                return pixels
+
+            if tile_magic != b"TD":
+                print(f"ERROR: Bad tile magic: {tile_magic.hex()}")
+                return None
+
+            tile_rest = self.ser.read(8)
+            if len(tile_rest) < 8:
+                print(f"ERROR: Incomplete tile header after {received_pixels}/{total_pixels} pixels")
+                return None
+
+            tile_header = tile_magic + tile_rest
+
+            row = struct.unpack('<H', tile_header[2:4])[0]
+            col = struct.unpack('<H', tile_header[4:6])[0]
+            tile_rows = struct.unpack('<H', tile_header[6:8])[0]
+            tile_cols = struct.unpack('<H', tile_header[8:10])[0]
+            tile_pixels = tile_rows * tile_cols
+            payload_bytes = tile_pixels * 2
+
+            if tile_rows == 0 or tile_cols == 0:
+                print(f"ERROR: Empty tile at row={row}, col={col}")
+                return None
+            if row + tile_rows > resp_rows or col + tile_cols > resp_cols:
+                print(f"ERROR: Tile out of bounds: row={row}, col={col}, size={tile_rows}x{tile_cols}")
+                return None
+
+            payload = self.ser.read(payload_bytes)
+            if len(payload) < payload_bytes:
+                print(f"ERROR: Incomplete tile payload at row={row}, col={col}: {len(payload)}/{payload_bytes}")
+                return None
+
+            ck_byte = self.ser.read(1)
+            if len(ck_byte) < 1:
+                print(f"ERROR: Missing tile checksum at row={row}, col={col}")
+                return None
+
+            checksum_calc = 0
+            for b in payload:
+                checksum_calc ^= b
+            if checksum_calc != ck_byte[0]:
+                print(f"ERROR: Tile checksum mismatch at row={row}, col={col}: calc=0x{checksum_calc:02X}, recv=0x{ck_byte[0]:02X}")
+                print(f"  tile_header={tile_header.hex()}")
+                print(f"  payload_first32={payload[:32].hex()}")
+                print(f"  payload_last32={payload[-32:].hex() if payload else ''}")
+                return None
+
+            tile_values = struct.unpack(f'<{tile_pixels}H', payload)
+            idx = 0
+            for dy in range(tile_rows):
+                base = (row + dy) * resp_cols + col
+                pixels[base:base + tile_cols] = tile_values[idx:idx + tile_cols]
+                received_pixels += tile_cols
+                idx += tile_cols
+
+            tile_count += 1
+            if self.verbose and (tile_count % 64 == 0 or received_pixels == total_pixels):
+                print(f"  Tile progress: {received_pixels}/{total_pixels} pixels ({tile_count} tiles)")
+
+    def recv_response(self, width, height):
+        header = self.ser.read(6)
+        if len(header) < 6:
+            print(f"ERROR: Incomplete header: {header.hex() if header else 'none'}")
+            return None
+
+        if header[0:2] == b"RK":
+            return self.recv_legacy_response(header, width, height)
+        if header[0:2] == b"RT":
+            return self.recv_tiled_response(header, width, height)
+
+        print(f"ERROR: Bad magic: {header[0]:#x} {header[1]:#x}, header={header.hex()}")
+        return None
 
 
 # ============================================================
@@ -294,6 +401,76 @@ def compare_results(hw, sw, width, height):
     return match == total
 
 
+def request_image(fpga, center_re, center_im, step, max_iter, width, height, mode):
+    fpga.send_command(center_re, center_im, step, max_iter, width, height, mode=mode)
+    return fpga.recv_response(width, height)
+
+
+def drain_serial_until_quiet(fpga, quiet_seconds=0.25, max_seconds=3.0):
+    old_timeout = fpga.ser.timeout
+    fpga.ser.timeout = quiet_seconds
+    drained = 0
+    start = time.perf_counter()
+    try:
+        while time.perf_counter() - start < max_seconds:
+            chunk = fpga.ser.read(4096)
+            if not chunk:
+                break
+            drained += len(chunk)
+    finally:
+        fpga.ser.timeout = old_timeout
+    if drained:
+        print(f"  Drained {drained} stale bytes before retry")
+
+
+def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, height, mode,
+                        tile_width, tile_height, retries):
+    pixels = [0] * (width * height)
+    full_half_w = (width - 1) >> 1
+    full_half_h = (height - 1) >> 1
+    tiles_x = (width + tile_width - 1) // tile_width
+    tiles_y = (height + tile_height - 1) // tile_height
+    tile_total = tiles_x * tiles_y
+    tile_index = 0
+
+    for y0 in range(0, height, tile_height):
+        th = min(tile_height, height - y0)
+        for x0 in range(0, width, tile_width):
+            tw = min(tile_width, width - x0)
+            tile_index += 1
+            tile_half_w = (tw - 1) >> 1
+            tile_half_h = (th - 1) >> 1
+            tile_center_re = center_re + (x0 + tile_half_w - full_half_w) * step
+            tile_center_im = center_im + (full_half_h - (y0 + tile_half_h)) * step
+
+            tile_pixels = None
+            for attempt in range(1, retries + 2):
+                if fpga.verbose or attempt > 1:
+                    print(f"Tile {tile_index}/{tile_total}: x={x0}, y={y0}, size={tw}x{th}, attempt={attempt}")
+                elif tile_index == 1 or tile_index == tile_total or tile_index % 16 == 0:
+                    print(f"Tile progress: {tile_index}/{tile_total}")
+                request_t0 = time.perf_counter()
+                tile_pixels = request_image(fpga, tile_center_re, tile_center_im, step,
+                                            max_iter, tw, th, mode)
+                if tile_pixels is not None:
+                    if fpga.verbose:
+                        print(f"  Tile elapsed: {time.perf_counter() - request_t0:.3f}s")
+                    break
+                print("  Tile receive failed")
+                drain_serial_until_quiet(fpga)
+                fpga.ser.reset_input_buffer()
+
+            if tile_pixels is None:
+                return None
+
+            for dy in range(th):
+                src = dy * tw
+                dst = (y0 + dy) * width + x0
+                pixels[dst:dst + tw] = tile_pixels[src:src + tw]
+
+    return pixels
+
+
 # ============================================================
 #  Main
 # ============================================================
@@ -323,6 +500,14 @@ def main():
                         help=f"Serial timeout in seconds (default: {TIMEOUT})")
     parser.add_argument("--force-large-frame", action="store_true",
                         help="Bypass host-side guards for very large frames; use only with a matching bitstream")
+    parser.add_argument("--tile-width", type=int, default=0,
+                        help="Host-driven request tile width. 0 disables host tiling.")
+    parser.add_argument("--tile-height", type=int, default=0,
+                        help="Host-driven request tile height. 0 disables host tiling.")
+    parser.add_argument("--tile-retries", type=int, default=2,
+                        help="Retries per host-driven tile request")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Reduce per-tile logging during large transfers")
     args = parser.parse_args()
 
     validate_request(args)
@@ -335,15 +520,25 @@ def main():
     print(f" Step: {args.step}")
     print(f" Max iterations: {args.max_iter}")
     print(f" Image: {args.width}x{args.height}")
+    if args.tile_width > 0 or args.tile_height > 0:
+        print(f" Host tiles: {args.tile_width}x{args.tile_height}, retries={args.tile_retries}")
     print("=" * 50)
 
-    fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout)
+    fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
     try:
         total_pixels = args.width * args.height
         t0 = time.perf_counter()
-        fpga.send_command(center_re, center_im, args.step, args.max_iter,
-                          args.width, args.height, mode=args.mode)
-        pixels = fpga.recv_response(args.width, args.height)
+        if args.tile_width > 0 or args.tile_height > 0:
+            if args.tile_width <= 0 or args.tile_height <= 0:
+                print("ERROR: both --tile-width and --tile-height must be positive when host tiling is enabled")
+                sys.exit(1)
+            pixels = request_image_tiled(fpga, center_re, center_im, args.step,
+                                         args.max_iter, args.width, args.height,
+                                         args.mode, args.tile_width, args.tile_height,
+                                         args.tile_retries)
+        else:
+            pixels = request_image(fpga, center_re, center_im, args.step,
+                                   args.max_iter, args.width, args.height, args.mode)
         t_recv = time.perf_counter()
         if pixels is None:
             print("ERROR: Failed to receive response")

@@ -543,13 +543,56 @@ sequenceDiagram
 
 ## Performance Notes
 
+### Current Recommended Mode: Host-Tiled 12 Mbaud
+
+The current reliable high-baud operating mode is host-driven tiling at 12000000 baud. The host splits a 1080p frame into retryable stripes and requests each stripe separately. The recommended 1080p setting is `--tile-width 1920 --tile-height 120 --tile-retries 3 --quiet`, which produces nine 1920x120 compute tiles per frame.
+
+Example:
+
+```bash
+python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
+```
+
+Repeated 1080p host-tiled stability results at 12 Mbaud:
+
+| Scene | Transport pass | Retry events | Mean FPGA Time | Min | Max | Stddev | CV | Mean Throughput | Change vs single-burst 12M |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Fast escape @128 | `5/5` | `0` | `4.844s` | `4.843s` | `4.845s` | `0.001s` | `0.02%` | `428068.64 pps` | `0.966x` |
+| Standard @64 | `5/5` | `0` | `4.450s` | `4.449s` | `4.451s` | `0.001s` | `0.02%` | `466030.04 pps` | `0.944x` |
+| Seahorse zoom @512 | `5/5` | `1` | `17.598s` | `17.081s` | `19.657s` | `1.151s` | `6.54%` | `118207.86 pps` | `0.982x` |
+| Deep tendrils @8192 | `5/5` | `1` | `34.026s` | `33.186s` | `37.377s` | `1.873s` | `5.51%` | `61080.26 pps` | `0.981x` |
+| Deep mini-brot @8192 | `5/5` | `0` | `83.281s` | `83.280s` | `83.282s` | `0.001s` | `0.00%` | `24898.89 pps` | `1.002x` |
+| Deep Seahorse @1024 | `5/5` | `0` | `36.343s` | `36.341s` | `36.345s` | `0.002s` | `0.00%` | `57056.36 pps` | `1.004x` |
+
+`Transport pass` means the host process completed and received a full 1920x1080 frame. Exact HW/SW pixel equality is reported separately in `python/host_tile_stability_bench/host_tile_stability_results.md` because deep zoom scenes have known FP64 boundary differences. The first test pass lost the USB serial device after 23 completed frame runs; after reconnecting `COM6`, the failed/open-port logs were rerun with `--resume`, completing the full 30-run sweep.
+
+The two retry events above were recovered by recomputing the affected 1920x120 host tile. This confirms the practical value of host-driven tiling: an occasional packet checksum mismatch no longer loses the entire 1080p frame. The tradeoff is a small overhead on UART-bound scenes, while compute-bound scenes remain essentially unchanged. Without retry events, measured FPGA-time variation was effectively zero across five runs.
+
+### Host Tile Size Comparison
+
+The current tile design was also benchmarked with several host tile sizes across the same six 1080p scenes. This matrix uses one run per scene/tile-size and disables software verification so it measures FPGA/transport elapsed time. Detailed design notes and logs are in [TILE_DESIGN.md](TILE_DESIGN.md), [TILE_DESIGN_CN.md](TILE_DESIGN_CN.md), and `python/host_tile_size_matrix/`.
+
+| Tile | Host tiles/frame | Passed scenes | Total FPGA Time | Mean Throughput | Retry events |
+|---:|---:|---:|---:|---:|---:|
+| `80x60` | 432 | `6/6` | `227.725s` | `86263.92 pps` | `0` |
+| `320x120` | 54 | `6/6` | `187.504s` | `144807.13 pps` | `3` |
+| `960x120` | 18 | `6/6` | `180.863s` | `180234.74 pps` | `0` |
+| `1920x120` | 9 | `6/6` | `184.524s` | `177844.65 pps` | `2` |
+| `1920x240` | 5 | `6/6` | `178.564s` | `196496.66 pps` | `0` |
+
+`80x60` is reliable but slow because 432 commands per frame expose fixed host/protocol overhead. `960x120` and `1920x120` are the practical high-throughput range. `1920x240` was fastest in the one-run matrix, but it has a larger retry unit and less repeat data than `1920x120`, so `1920x120` remains the recommended default.
+
+### 12 Mbaud Single-Burst Reference
+
 At 12000000 baud, the UART payload ceiling is approximately:
 
 ```text
 12000000 bits/s / 10 bits per UART byte / 2 bytes per pixel = 600000 pixels/s
 ```
 
-Measured default dynamic + 2-context 1080p examples, all using FP64, four workers, `WORKER_CONTEXTS=2`, and 12000000 baud:
+Before host-driven tiling, the full frame was sent as one long response burst. The results below are useful as a performance reference, but long single-burst 1080p transfers at 12 Mbaud can occasionally lose bytes near the tail of the multi-megabyte UART stream.
+
+Measured default dynamic + 2-context 1080p single-burst examples, all using FP64, four workers, `WORKER_CONTEXTS=2`, and 12000000 baud:
 
 | Case | Center | Step | Max Iter | FPGA Time | Throughput |
 |---|---|---:|---:|---:|---:|
@@ -559,6 +602,10 @@ Measured default dynamic + 2-context 1080p examples, all using FP64, four worker
 | `1920x1080`, deep tendrils | `(-0.77568377, 0.13646737)` | `1e-9` | `8192` | `33.393s` | `62096.41 pps` |
 | `1920x1080`, Mini-brot | `(-1.25066, 0.02012)` | `1e-9` | `8192` | `83.428s` | `24854.93 pps` |
 | `1920x1080`, deep Seahorse | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` | `36.480s` | `56842.30 pps` |
+
+At 12 Mbaud, fast escape and standard views are still largely transport-bound, but their ceiling is much higher than the old 576000 baud path. Deep tendrils, deep Seahorse, and especially deep mini-brot expose compute-side limits once UART is no longer the dominant term.
+
+### Historical 576000 Baud Baseline
 
 Comparison against the previous 4-worker, single-context, 576000 baud baseline:
 
@@ -571,11 +618,9 @@ Comparison against the previous 4-worker, single-context, 576000 baud baseline:
 | Deep mini-brot @8192 | `234.231s` | `83.708s` | `24771.84 pps` | `2.798x` |
 | Deep seahorse @1024 | `100.658s` | `72.776s` | `28493.04 pps` | `1.383x` |
 
-At 12 Mbaud, fast escape and standard views are still largely transport-bound, but their ceiling is much higher than the old 576000 baud path. Deep tendrils, deep Seahorse, and especially deep mini-brot expose compute-side limits once UART is no longer the dominant term.
-
 ### Baudrate Investigation
 
-The UART now uses a 32-bit fractional baud accumulator in both RX and TX. `BAUD=12000000` is the experimental source default and has completed the six 1080p scenes after targeted reprobes. `8000000` remains the safer high-baud fallback from the first full six-scene sweep, while `576000` remains the conservative historical baseline. At 12 Mbaud, occasional late-frame byte loss was observed during multi-megabyte bursts; the current protocol has no packet-level retransmission, so long soak tests are still recommended before relying on 12 Mbaud unattended.
+The UART now uses a 32-bit fractional baud accumulator in both RX and TX. `BAUD=12000000` is the experimental source default and has completed the six 1080p scenes after targeted reprobes. `8000000` remains the safer high-baud fallback from the first full six-scene sweep, while `576000` remains the conservative historical baseline. At 12 Mbaud, occasional byte loss was observed during multi-megabyte bursts. Host-driven tiling provides a practical retry boundary today, but long soak tests are still recommended before relying on 12 Mbaud unattended.
 
 Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md), [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md).
 
@@ -649,6 +694,8 @@ For detailed hardware architecture, pipeline scheduling, timing constraints, and
 ```text
 ARCHITECTURE.md
 ARCHITECTURE_EVOLUTION_REPORT.md
+TILE_DESIGN.md
+TILE_DESIGN_CN.md
 PIPELINE_BUBBLE_ANALYSIS.md
 PERFORMANCE_100MHZ.md
 UART_BAUDRATE_BENCHMARK.md

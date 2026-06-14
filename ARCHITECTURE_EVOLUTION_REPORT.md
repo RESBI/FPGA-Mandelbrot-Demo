@@ -377,6 +377,7 @@ The table below summarizes how each stage moved the system bottleneck.
 | Worker-internal 2-context interleaving | Per-worker FP pipelines underfed | Added `mandelbrot_core_worker_2ctx` with tagged FP writeback and ordered commit | Five of six 1080p scenes now hit UART ceiling; deep mini-brot improves `2.80x` vs 4-core 1ctx. |
 | Dynamic backpressure fix | Large UART-bound dynamic frames could deadlock | Gate dynamic row reuse on empty per-core FIFO | 1920-wide and full 1080p frames complete reliably under UART backpressure. |
 | Fractional UART 12 Mbaud | Integer divider precision and 576k output ceiling | Replaced integer CPB timing with 32-bit fractional baud accumulators in RX/TX | Fast 1080p scenes improve from about `28.5k pps` to `443k-493k pps`; compute-heavy scenes expose core limits. |
+| Tiled response and host-driven stripes | 12 Mbaud multi-megabyte bursts can occasionally lose bytes | Added `RT`/`TD`/`TE` response packets and host `1920x120` stripe retries | Six-scene 30-run sweep completed with 30/30 transport pass; two checksum errors recovered at tile granularity. |
 
 ## Final 1080p Performance Comparison
 
@@ -479,6 +480,35 @@ flowchart LR
 
 The 12 Mbaud path is fast but not yet protocol-hardened. The first six-scene sweep had two late-frame receive timeouts near the end of 4.1 MiB payloads; direct reprobes filled both result cells. This points to occasional host/FT232HL/driver long-burst receive instability rather than deterministic RTL pixel-count failure. The current response protocol has one final checksum and no packet sequence numbers, so any dropped byte causes the host to wait for the declared payload length until timeout.
 
+### Tiled Response And Host-Driven Stripe Retry
+
+The next transport hardening step kept the UART physical layer but changed the response contract. The RTL now emits framed tiled responses using `RT` frame headers, repeated `TD` data packets, and `TE` frame-end markers. Each `TD` packet carries row/column coordinates, tile dimensions, payload bytes, and a payload XOR checksum. The host parser accepts both the original `RK` full-frame response and the new tiled response.
+
+Packetizing the response alone detects byte slips earlier, but it does not let the FPGA retransmit a packet because the UART protocol is still unidirectional during response streaming. Reliability therefore moved one level up: host-driven tiling splits a frame into retryable compute commands. A failed packet invalidates only the current host tile; the host drains the serial stream and recomputes that tile.
+
+```mermaid
+flowchart TB
+    FULL["Old full-frame command<br/>one 4 MiB response burst"] --> SLIP["Any byte slip loses frame"]
+    SLIP --> TILE["Host-driven 1920x120 stripes<br/>nine commands per 1080p frame"]
+    TILE --> TD["RTL RT/TD/TE packet stream"]
+    TD --> RETRY["Checksum error retries one stripe"]
+```
+
+The selected operating point is `--tile-width 1920 --tile-height 120 --tile-retries 3 --quiet`. Smaller `80x60` tiles were reliable but slow because 1080p required 432 commands and thousands of small packet reads. Larger horizontal stripes reduce the command count to nine while retaining a recovery boundary much smaller than a full frame.
+
+Repeated 12 Mbaud host-tiled stability results:
+
+| Scene | Completed runs | Tile retries | Mean FPGA s | Stddev s | CV | Mean pps | vs previous 12M single-burst |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Fast escape @128 | `5/5` | `0` | `4.844` | `0.001` | `0.02%` | `428068.64` | `0.966x` |
+| Standard @64 | `5/5` | `0` | `4.450` | `0.001` | `0.02%` | `466030.04` | `0.944x` |
+| Seahorse zoom @512 | `5/5` | `1` | `17.598` | `1.151` | `6.54%` | `118207.86` | `0.982x` |
+| Deep tendrils @8192 | `5/5` | `1` | `34.026` | `1.873` | `5.51%` | `61080.26` | `0.981x` |
+| Deep mini-brot @8192 | `5/5` | `0` | `83.281` | `0.001` | `0.00%` | `24898.89` | `1.002x` |
+| Deep seahorse @1024 | `5/5` | `0` | `36.343` | `0.002` | `0.00%` | `57056.36` | `1.004x` |
+
+The benchmark target was five repeats for each of the six standard 1080p scenes. After 23 completed frame runs, the FT232H disappeared from Windows and subsequent attempts failed before opening `COM6`; after reconnecting the device, the failed/open-port logs were rerun with `--resume`, completing all 30 frame runs. The completed sweep shows that the stripe retry path recovers occasional checksum errors with only a small performance penalty on transport-bound scenes and no meaningful penalty on compute-bound mini-brot or deep Seahorse.
+
 Test parameters for the comparison table:
 
 | Scene | Center | Step | Max Iter |
@@ -558,8 +588,8 @@ Recommended order:
 
 | Priority | Step | Reason |
 |---:|---|---|
-| 1 | Add packet framing, sequence numbers, and retransmission | 12 Mbaud UART is fast but long bursts can still drop bytes without recovery. |
-| 2 | Add row/tile IDs to output packets | Enables resynchronization and out-of-order completion beyond the current raster collector. |
+| 1 | Add sequence numbers and true retransmission | Current `RT`/`TD`/`TE` packets detect errors, and host-driven tiling can recompute a stripe, but the FPGA still cannot retransmit one packet. |
+| 2 | Add request IDs and stronger row/tile IDs | Enables resynchronization, duplicate rejection, and out-of-order completion beyond the current raster collector. |
 | 3 | Add a higher-bandwidth transport | USB FIFO, SPI, Ethernet, or PS memory mapping would remove UART/driver burst limits. |
 | 4 | Scale worker contexts from 2 toward 4/8 | Attacks the remaining compute-bound bottleneck inside each worker without adding DSPs. |
 | 5 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
@@ -581,5 +611,6 @@ The project evolved through a pragmatic sequence:
 9. Add a two-context worker with tagged FP writeback and ordered commit.
 10. Fix dynamic row reuse under UART backpressure by requiring an empty per-core FIFO before assigning another row to a core.
 11. Replace integer UART timing with a fractional baud accumulator and validate 12 Mbaud full-protocol operation.
+12. Add tiled response framing and host-driven 1920x120 stripe retries to make 12 Mbaud operation recoverable at tile granularity.
 
-The current design preserves the original host protocol while raising the default transport to 12 Mbaud. Fast 1080p scenes now reach hundreds of thousands of pixels per second, while deep mini-brot remains compute-bound around `24.9k pixels/s`. The next major architecture step is no longer another integer baud tweak; it is packetized/resynchronizable output or a stronger transport so high-baud long bursts are recoverable.
+The current design preserves the original host command protocol while raising the default transport to 12 Mbaud and adding packetized response parsing. Fast 1080p scenes now reach hundreds of thousands of pixels per second, while deep mini-brot remains compute-bound around `24.9k pixels/s`. The next major architecture step is no longer another integer baud tweak; it is sequence-numbered retransmission or a stronger transport so high-baud long bursts are recoverable without recomputing a whole host tile.
