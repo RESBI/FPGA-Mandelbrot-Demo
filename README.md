@@ -572,15 +572,16 @@ The two retry events above were recovered by recomputing the affected 1920x120 h
 
 The current tile design was also benchmarked with several host tile sizes across the same six 1080p scenes. This matrix uses one run per scene/tile-size and disables software verification so it measures FPGA/transport elapsed time. Detailed design notes and logs are in [TILE_DESIGN.md](TILE_DESIGN.md), [TILE_DESIGN_CN.md](TILE_DESIGN_CN.md), and `python/host_tile_size_matrix/`.
 
-| Tile | Host tiles/frame | Passed scenes | Total FPGA Time | Mean Throughput | Retry events |
-|---:|---:|---:|---:|---:|---:|
-| `80x60` | 432 | `6/6` | `227.725s` | `86263.92 pps` | `0` |
-| `320x120` | 54 | `6/6` | `187.504s` | `144807.13 pps` | `3` |
-| `960x120` | 18 | `6/6` | `180.863s` | `180234.74 pps` | `0` |
-| `1920x120` | 9 | `6/6` | `184.524s` | `177844.65 pps` | `2` |
-| `1920x240` | 5 | `6/6` | `178.564s` | `196496.66 pps` | `0` |
+| Scene | `80x60` | `320x120` | `960x120` | `1920x120` | `1920x240` |
+|---|---:|---:|---:|---:|---:|
+| Fast escape @128 | `13.433s` | `6.992s` | `5.597s` | `4.845s` | `4.759s` |
+| Standard @64 | `12.977s` | `6.491s` | `4.641s` | `5.450s` | `4.355s` |
+| Seahorse zoom @512 | `24.975s` | `18.605s` | `17.231s` | `17.085s` | `16.951s` |
+| Deep tendrils @8192 | `40.828s` | `33.966s` | `33.355s` | `37.524s` | `33.077s` |
+| Deep mini-brot @8192 | `91.297s` | `84.214s` | `83.505s` | `83.280s` | `83.179s` |
+| Deep Seahorse @1024 | `44.215s` | `37.236s` | `36.534s` | `36.340s` | `36.243s` |
 
-`80x60` is reliable but slow because 432 commands per frame expose fixed host/protocol overhead. `960x120` and `1920x120` are the practical high-throughput range. `1920x240` was fastest in the one-run matrix, but it has a larger retry unit and less repeat data than `1920x120`, so `1920x120` remains the recommended default.
+Host tiles per 1080p frame are 432 for `80x60`, 54 for `320x120`, 18 for `960x120`, 9 for `1920x120`, and 5 for `1920x240`. `80x60` is reliable but slow because the command count exposes fixed host/protocol overhead. `960x120` and `1920x120` are the practical high-throughput range. `1920x240` was fastest in the one-run matrix, but it has a larger retry unit and less repeat data than `1920x120`, so `1920x120` remains the recommended default.
 
 ### 12 Mbaud Single-Burst Reference
 
