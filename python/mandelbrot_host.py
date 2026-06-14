@@ -18,9 +18,51 @@ import sys
 import argparse
 import os
 
-PORT = "COM4"
-BAUD = 576000
+PORT = "COM6"
+BAUD = 12000000
 TIMEOUT = 180.0
+DEFAULT_DYNAMIC_OWNER_DEPTH = 4096
+DEFAULT_MAX_HOST_BYTES = 512 * 1024 * 1024
+
+
+def estimate_uart_seconds(width, height):
+    # UART is 8N1, so every payload byte costs 10 serial bits.
+    response_bytes = 6 + width * height * 2 + 1
+    return response_bytes * 10.0 / BAUD
+
+
+def validate_request(args):
+    pixels = args.width * args.height
+    data_bytes = pixels * 2
+    est_seconds = estimate_uart_seconds(args.width, args.height)
+
+    if args.width <= 0 or args.height <= 0:
+        print("ERROR: width and height must be positive")
+        sys.exit(1)
+    if args.width > 65535 or args.height > 65535:
+        print("ERROR: width and height must fit the 16-bit hardware protocol")
+        sys.exit(1)
+    if args.max_iter > 65535:
+        print("ERROR: max_iter must be <= 65535")
+        sys.exit(1)
+
+    if not args.force_large_frame and args.height > DEFAULT_DYNAMIC_OWNER_DEPTH:
+        print("ERROR: requested height exceeds the current default dynamic scheduler limit")
+        print(f"  height={args.height}, dynamic owner table depth={DEFAULT_DYNAMIC_OWNER_DEPTH}")
+        print("  The current default bitstream records dynamic row ownership for 4096 rows.")
+        print("  A taller frame can stall when raster collection reaches an unrecorded row.")
+        print("  Rebuild with a larger DYNAMIC_OWNER_DEPTH or use an appropriate static build.")
+        print("  Pass --force-large-frame only if the programmed bitstream supports this frame.")
+        sys.exit(1)
+
+    if not args.force_large_frame and data_bytes > DEFAULT_MAX_HOST_BYTES:
+        print("ERROR: response is too large for the default host receive path")
+        print(f"  data bytes={data_bytes}, default limit={DEFAULT_MAX_HOST_BYTES}")
+        print("  The host currently buffers the full response before rendering/verifying.")
+        print("  Use a smaller frame, implement streaming output, or pass --force-large-frame knowingly.")
+        sys.exit(1)
+
+    print(f"Estimated UART payload time at {BAUD} baud: {est_seconds:.1f}s")
 
 # ============================================================
 #  Color Palette
@@ -279,11 +321,11 @@ def main():
                         help=f"Serial port (default: {PORT})")
     parser.add_argument("--timeout", type=float, default=TIMEOUT,
                         help=f"Serial timeout in seconds (default: {TIMEOUT})")
+    parser.add_argument("--force-large-frame", action="store_true",
+                        help="Bypass host-side guards for very large frames; use only with a matching bitstream")
     args = parser.parse_args()
 
-    if args.max_iter > 65535:
-        print("ERROR: max_iter must be <= 65535")
-        sys.exit(1)
+    validate_request(args)
 
     center_re, center_im = args.center
     print("=" * 50)

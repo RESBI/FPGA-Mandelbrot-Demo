@@ -63,7 +63,7 @@ def parse_response(data, expected_rows, expected_cols):
             parts.append(f"expected_declared_len={2 + 2 + 2 + expected_rows * expected_cols * 2 + 1}")
             if len(data) >= idx + expected_len and expected_len >= 7:
                 frame = data[idx:idx + expected_len]
-                ck = checksum(frame[:-1])
+                ck = checksum(frame[6:-1])
                 parts.append(f"checksum={'ok' if ck == frame[-1] else 'bad'}")
                 parts.append(f"rx_checksum=0x{frame[-1]:02x}")
                 parts.append(f"calc_checksum=0x{ck:02x}")

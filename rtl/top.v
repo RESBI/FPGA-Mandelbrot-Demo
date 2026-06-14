@@ -1,10 +1,11 @@
 `timescale 1ns / 1ps
+`include "config.vh"
 `include "fp_defines.vh"
 
 module top #(
-    parameter SCHED_MODE = 1,
-    parameter DYNAMIC_OWNER_DEPTH = 4096,
-    parameter WORKER_CONTEXTS = 2
+    parameter SCHED_MODE = `CFG_SCHED_MODE,
+    parameter DYNAMIC_OWNER_DEPTH = `CFG_DYNAMIC_OWNER_DEPTH,
+    parameter WORKER_CONTEXTS = `CFG_WORKER_CONTEXTS
 ) (
     input  wire uart_rx,
     output wire uart_tx,
@@ -100,8 +101,8 @@ module top #(
     );
 
     mandelbrot_multicore #(
-        .CORE_COUNT(4),
-        .CORE_FIFO_DEPTH(4096),
+        .CORE_COUNT(`CFG_CORE_COUNT),
+        .CORE_FIFO_DEPTH(`CFG_CORE_FIFO_DEPTH),
         .SCHED_MODE(SCHED_MODE),
         .DYNAMIC_OWNER_DEPTH(DYNAMIC_OWNER_DEPTH),
         .WORKER_CONTEXTS(WORKER_CONTEXTS)
@@ -126,11 +127,11 @@ module top #(
         .tx_cols        (tx_ctrl_cols)
     );
 
-    // Result FIFO: 1024 entries x 16 bits
+    // Result FIFO: configured depth x 16 bits
     wire fifo_write_avail;
     assign fifo_full = !fifo_write_avail;
 
-    queue #(.DEPTH(1024), .DATA_W(16)) u_fifo (
+    queue #(.DEPTH(`CFG_OUTPUT_FIFO_DEPTH), .DATA_W(16)) u_fifo (
         .clk         (sys_clk),
         .write_avail (fifo_write_avail),
         .read_avail  (fifo_rd_avail),

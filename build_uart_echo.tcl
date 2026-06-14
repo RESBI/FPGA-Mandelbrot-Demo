@@ -1,11 +1,11 @@
 set part_name "xc7z010clg400-1"
-set proj_name "uart_tx_pattern"
-set proj_dir  "./uart_tx_pattern_proj"
+set proj_name "uart_echo"
+set proj_dir  "./uart_echo_proj"
 set rtl_dir   "./rtl"
 set xdc_dir   "./constraints"
 
 puts "========================================"
-puts " UART TX Pattern Build Script"
+puts " UART Echo Build Script"
 puts " Part: $part_name"
 puts "========================================"
 
@@ -13,10 +13,11 @@ create_project -force $proj_name $proj_dir -part $part_name
 set_property target_language Verilog [current_project]
 
 add_files -fileset sources_1 [list \
+    $rtl_dir/uart_rx.v \
     $rtl_dir/uart_tx.v \
-    $rtl_dir/uart_tx_pattern_top.v \
+    $rtl_dir/uart_echo_top.v \
 ]
-set_property top uart_tx_pattern_top [current_fileset]
+set_property top uart_echo_top [current_fileset]
 set_property include_dirs $rtl_dir [current_fileset]
 
 add_files -fileset constrs_1 [glob $xdc_dir/*.xdc]

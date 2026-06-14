@@ -1,7 +1,11 @@
 `timescale 1ns / 1ps
+`include "config.vh"
 
 module uart_rx #(
-    parameter CLOCKS_PER_BIT = 174
+    parameter CLK_HZ = `CFG_CLK_HZ,
+    parameter BAUD = `CFG_UART_BAUD,
+    parameter ACC_WIDTH = `CFG_UART_ACC_WIDTH,
+    parameter CLOCKS_PER_BIT = CLK_HZ / BAUD
 ) (
     input  wire         rx,
     input  wire         clk,
@@ -15,11 +19,16 @@ module uart_rx #(
     localparam STATE_STOP   = 3;
 
     reg [2:0]  state = STATE_IDLE;
-    reg [12:0] clock_counter = 0;
     reg [3:0]  bit_counter = 0;
     reg [7:0]  data_reg = 0;
     reg        rx_sync1 = 1;
     reg        rx_sync2 = 1;
+    reg [ACC_WIDTH-1:0] baud_acc = 0;
+
+    localparam [ACC_WIDTH-1:0] BAUD_INC = ((BAUD * (64'd1 << ACC_WIDTH)) + (CLK_HZ / 2)) / CLK_HZ;
+    localparam [ACC_WIDTH-1:0] HALF_BIT = (64'd1 << (ACC_WIDTH - 1));
+    wire [ACC_WIDTH:0] baud_sum = {1'b0, baud_acc} + {1'b0, BAUD_INC};
+    wire baud_tick = baud_sum[ACC_WIDTH];
 
     always @(posedge clk) begin
         rx_sync1 <= rx;
@@ -33,43 +42,53 @@ module uart_rx #(
             STATE_IDLE: begin
                 data_avail <= 0;
                 if (start_edge) begin
-                    clock_counter <= 0;
+                    baud_acc <= HALF_BIT;
                     bit_counter   <= 0;
                     state <= STATE_START;
                 end
             end
 
             STATE_START: begin
-                if (clock_counter == ((CLOCKS_PER_BIT - 1) / 2)) begin
-                    clock_counter <= 0;
-                    state <= STATE_SAMPLE;
+                if (baud_tick) begin
+                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
+                    if (!rx_sync2) begin
+                        state <= STATE_SAMPLE;
+                    end else begin
+                        state <= STATE_IDLE;
+                    end
                 end else begin
-                    clock_counter <= clock_counter + 1;
+                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
                 end
             end
 
             STATE_SAMPLE: begin
-                if (clock_counter == (CLOCKS_PER_BIT - 1)) begin
-                    clock_counter <= 0;
+                if (baud_tick) begin
+                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
                     if (bit_counter < 8) begin
                         data_reg <= {rx_sync2, data_reg[7:1]};
-                        bit_counter <= bit_counter + 1;
+                        if (bit_counter == 4'd7) begin
+                            state <= STATE_STOP;
+                        end else begin
+                            bit_counter <= bit_counter + 1;
+                        end
                     end else begin
                         state <= STATE_STOP;
                     end
                 end else begin
-                    clock_counter <= clock_counter + 1;
+                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
                 end
             end
 
             STATE_STOP: begin
-                if (clock_counter == ((CLOCKS_PER_BIT - 1) / 2)) begin
-                    clock_counter <= 0;
-                    data <= data_reg;
-                    data_avail <= 1;
+                if (baud_tick) begin
+                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
+                    if (rx_sync2) begin
+                        data <= data_reg;
+                        data_avail <= 1;
+                    end
                     state <= STATE_IDLE;
                 end else begin
-                    clock_counter <= clock_counter + 1;
+                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
                 end
             end
 

@@ -24,8 +24,8 @@ Current validated default configuration:
 | Default scheduler | Dynamic idle-core rows (`SCHED_MODE=1`) |
 | Worker context generic | `WORKER_CONTEXTS=2` |
 | FP datapath effective rate | 100 MHz (`FP_CE_DIV=1`) |
-| UART baudrate | 576000 |
-| Host serial port default | `COM4` |
+| UART baudrate | 12000000 |
+| Host serial port default | `COM6` |
 | Pixel format | `uint16` iteration count, little-endian |
 | Maximum iteration count | 65535 |
 | Largest validated frame | 1920x1080 |
@@ -47,6 +47,7 @@ Mandelbrot/
 │   ├── raster_collect_dynamic_rows.v
 │   ├── fp_add.v                 Parameterized FP adder/subtractor
 │   ├── fp_mul.v                 Parameterized FP multiplier
+│   ├── config.vh                Central RTL configuration defaults
 │   ├── fp_defines.vh            FP64/FP128 parameters and CE divider
 │   ├── uart_rx.v                UART receiver
 │   ├── uart_tx.v                UART transmitter
@@ -124,11 +125,11 @@ flowchart TB
         CLK[sys_clk 100 MHz] --> CE[fp_ce generator<br/>FP_CE_DIV=1]
         RST[reset counter]
 
-        URX[uart_rx<br/>576000 baud]
-        UTX[uart_tx<br/>576000 baud]
+        URX[uart_rx<br/>12 Mbaud fractional NCO]
+        UTX[uart_tx<br/>12 Mbaud fractional NCO]
         CMD[cmd_parser]
-        CORE[mandelbrot_multicore<br/>CORE_COUNT=4<br/>WORKER_CONTEXTS=2]
-        FIFO[queue<br/>1024 x 16-bit]
+        CORE[mandelbrot_multicore<br/>CFG_CORE_COUNT=4<br/>CFG_WORKER_CONTEXTS=2]
+        FIFO[queue<br/>CFG_OUTPUT_FIFO_DEPTH x 16-bit]
         TXC[tx_ctrl]
 
         URX --> CMD
@@ -245,7 +246,7 @@ C:\Xilinx\Vivado\2020.2\bin\vivado.bat
 
 If Vivado is on your PATH, you can use `vivado`. Otherwise, call `vivado.bat` with its full path.
 
-4. Confirm the UART port. The host defaults to `COM4`.
+4. Confirm the UART port. The host defaults to `COM6`.
 
 You can override it on every command:
 
@@ -253,17 +254,55 @@ You can override it on every command:
 python python\mandelbrot_host.py --port COM5
 ```
 
-5. Confirm baudrate. The RTL and Python host currently use `576000` baud.
+5. Confirm baudrate. The RTL and Python host currently use `12000000` baud.
 
 Relevant files:
 
 | File | Setting |
 |---|---|
-| `rtl/uart_rx.v` | `CLOCKS_PER_BIT = 174` |
-| `rtl/uart_tx.v` | `CLOCKS_PER_BIT = 174` |
-| `python/mandelbrot_host.py` | `BAUD = 576000` |
+| `rtl/uart_rx.v` | `BAUD = 12000000` |
+| `rtl/uart_tx.v` | `BAUD = 12000000` |
+| `python/mandelbrot_host.py` | `BAUD = 12000000` |
 
 Do not change only one side. The RTL and host must match.
+
+## Configuration
+
+Most RTL defaults are centralized in `rtl/config.vh`. The file uses `ifndef` guards so values can be overridden by Verilog defines in future scripts, and top-level module parameters can still be overridden by Vivado generics.
+
+Current defaults:
+
+| Macro | Default | Used by | Purpose |
+|---|---:|---|---|
+| `CFG_CLK_HZ` | `100000000` | `uart_rx`, `uart_tx` | System clock used for fractional UART timing. |
+| `CFG_UART_BAUD` | `12000000` | `uart_rx`, `uart_tx` | UART baudrate. Must match `python/mandelbrot_host.py` `BAUD`. |
+| `CFG_UART_ACC_WIDTH` | `32` | `uart_rx`, `uart_tx` | Fractional baud accumulator width. |
+| `CFG_CORE_COUNT` | `4` | `top`, `mandelbrot_multicore` | Number of Mandelbrot workers. |
+| `CFG_CORE_FIFO_DEPTH` | `4096` | `top`, `mandelbrot_multicore` | Per-core result FIFO depth. |
+| `CFG_OUTPUT_FIFO_DEPTH` | `1024` | `top` | Shared output FIFO depth before `tx_ctrl`. |
+| `CFG_SCHED_MODE` | `1` | `top`, `mandelbrot_multicore` | `0` static rows, `1` dynamic idle-core rows. |
+| `CFG_DYNAMIC_OWNER_DEPTH` | `4096` | `top`, `mandelbrot_multicore` | Dynamic row-owner table depth. |
+| `CFG_WORKER_CONTEXTS` | `2` | `top`, `mandelbrot_multicore` | `1` single-context worker, `2` default 2-context worker. |
+
+For the default source build, edit `rtl/config.vh` and keep the Python host in sync when changing UART baud:
+
+```verilog
+`define CFG_UART_BAUD 12000000
+```
+
+```python
+BAUD = 12000000
+```
+
+The existing Vivado build scripts intentionally override some top-level parameters for known build modes:
+
+| Script | Overrides | Purpose |
+|---|---|---|
+| `build_fp64.tcl` | `SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=2` | Default FP64 dynamic 2-context build. |
+| `build_fp64_static.tcl` | `SCHED_MODE=0 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=1` | Static scheduler, single-context regression build. |
+| `build_fp64_dynamic.tcl` | `SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096` | Earlier dynamic scheduler build. |
+
+Those Vivado generics take precedence over the corresponding `CFG_*` defaults for `top` parameters. UART defaults currently come from `config.vh` unless a build script is extended to override them.
 
 ## Build
 
@@ -415,8 +454,9 @@ python python\mandelbrot_host.py --width 1920 --height 1080 --max-iter 1024 --ce
 --format FORMAT      png, bmp, or txt. Default: png
 --mode MODE          fp64 or fp128. Default: fp64
 --verify             Also compute software reference and compare
---port COMx          Serial port. Default: COM4
+--port COMx          Serial port. Default: COM6
 --timeout SEC        Serial timeout. Default: 180.0
+--force-large-frame  Bypass host-side large-frame guards only for matching bitstreams
 ```
 
 ## Useful Test Commands
@@ -503,22 +543,22 @@ sequenceDiagram
 
 ## Performance Notes
 
-At 576000 baud, the UART ceiling is approximately:
+At 12000000 baud, the UART payload ceiling is approximately:
 
 ```text
-576000 bits/s / 10 bits per UART byte / 2 bytes per pixel = 28800 pixels/s
+12000000 bits/s / 10 bits per UART byte / 2 bytes per pixel = 600000 pixels/s
 ```
 
-Measured default dynamic + 2-context 1080p examples, all using FP64, four workers, `WORKER_CONTEXTS=2`, and 576000 baud:
+Measured default dynamic + 2-context 1080p examples, all using FP64, four workers, `WORKER_CONTEXTS=2`, and 12000000 baud:
 
 | Case | Center | Step | Max Iter | FPGA Time | Throughput |
 |---|---|---:|---:|---:|---:|
-| `1920x1080`, fast escape | `(1.0, 1.0)` | `0.002` | `128` | `72.720s` | `28514.74 pps` |
-| `1920x1080`, standard | `(-0.5, 0.0)` | `0.002` | `64` | `72.721s` | `28514.28 pps` |
-| `1920x1080`, Seahorse zoom | `(-0.743643887037151, 0.13182590420533)` | `5e-6` | `512` | `72.790s` | `28487.54 pps` |
-| `1920x1080`, deep tendrils | `(-0.77568377, 0.13646737)` | `1e-9` | `8192` | `72.781s` | `28491.11 pps` |
-| `1920x1080`, Mini-brot | `(-1.25066, 0.02012)` | `1e-9` | `8192` | `83.708s` | `24771.84 pps` |
-| `1920x1080`, deep Seahorse | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` | `72.776s` | `28493.04 pps` |
+| `1920x1080`, fast escape | `(1.0, 1.0)` | `0.002` | `128` | `4.678s` | `443288.08 pps` |
+| `1920x1080`, standard | `(-0.5, 0.0)` | `0.002` | `64` | `4.202s` | `493434.63 pps` |
+| `1920x1080`, Seahorse zoom | `(-0.743643887037151, 0.13182590420533)` | `5e-6` | `512` | `17.280s` | `120003.12 pps` |
+| `1920x1080`, deep tendrils | `(-0.77568377, 0.13646737)` | `1e-9` | `8192` | `33.393s` | `62096.41 pps` |
+| `1920x1080`, Mini-brot | `(-1.25066, 0.02012)` | `1e-9` | `8192` | `83.428s` | `24854.93 pps` |
+| `1920x1080`, deep Seahorse | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` | `36.480s` | `56842.30 pps` |
 
 Comparison against the previous 4-worker, single-context, 576000 baud baseline:
 
@@ -531,11 +571,11 @@ Comparison against the previous 4-worker, single-context, 576000 baud baseline:
 | Deep mini-brot @8192 | `234.231s` | `83.708s` | `24771.84 pps` | `2.798x` |
 | Deep seahorse @1024 | `100.658s` | `72.776s` | `28493.04 pps` | `1.383x` |
 
-Fast escape, standard, Seahorse zoom, deep tendrils, and deep Seahorse are now essentially UART-bound. Deep mini-brot remains compute-bound and therefore shows the largest visible improvement from the two-context worker.
+At 12 Mbaud, fast escape and standard views are still largely transport-bound, but their ceiling is much higher than the old 576000 baud path. Deep tendrils, deep Seahorse, and especially deep mini-brot expose compute-side limits once UART is no longer the dominant term.
 
 ### Baudrate Investigation
 
-Higher baudrates were tested with a 100 MHz integer divider and a TX-only isolation experiment. The failure boundary above 520000 baud is primarily caused by the single-sample UART RX lacking oversampling, combined with CP2102 baud-rate quantisation error at non-standard rates. 576000 baud (a common PC standard rate) works stably and provides a ~15% throughput improvement over 500000 baud.
+The UART now uses a 32-bit fractional baud accumulator in both RX and TX. `BAUD=12000000` is the experimental source default and has completed the six 1080p scenes after targeted reprobes. `8000000` remains the safer high-baud fallback from the first full six-scene sweep, while `576000` remains the conservative historical baseline. At 12 Mbaud, occasional late-frame byte loss was observed during multi-megabyte bursts; the current protocol has no packet-level retransmission, so long soak tests are still recommended before relying on 12 Mbaud unattended.
 
 Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md), [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md).
 
@@ -564,7 +604,7 @@ Latest placed utilization for the default build:
 
 ### Serial Port Access Denied
 
-Only one process can open `COM4` at a time. Close serial terminals and avoid running multiple host scripts concurrently.
+Only one process can open the selected serial port at a time. Close serial terminals and avoid running multiple host scripts concurrently.
 
 ### Timeout With No Header
 
@@ -585,6 +625,18 @@ wire [31:0] total_pixels = {16'd0, rows} * {16'd0, cols};
 ```
 
 Without this fix, frames larger than 65535 pixels can fail.
+
+### Very Large Frames Stop Around 536862720 Bytes
+
+The default bitstream uses dynamic row scheduling with `DYNAMIC_OWNER_DEPTH=4096`. Frames taller than 4096 rows are not supported by that default dynamic collector, because row ownership is only recorded for the first 4096 rows. A `65535x65535` command will therefore receive exactly about:
+
+```text
+4096 rows * 65535 cols * 2 bytes/pixel = 536862720 bytes
+```
+
+and then stall when raster collection reaches an unrecorded row. That frame is also impractical over UART: `65535 * 65535 * 2` pixel bytes takes roughly 2 hours at 12 Mbaud, before rendering or software verification.
+
+Use a smaller frame, rebuild with a larger dynamic owner table, or use a compatible static/streaming design. The host now rejects these requests by default; `--force-large-frame` only bypasses the guard and should be used only when the programmed bitstream actually supports the requested dimensions.
 
 ### Software Verification Is Slow
 

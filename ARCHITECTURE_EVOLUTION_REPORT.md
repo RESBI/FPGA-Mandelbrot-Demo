@@ -28,7 +28,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Worker contexts | 2 per worker |
 | Default scheduler | Dynamic idle-core rows |
 | Effective worker rate | 100 MHz per worker, `FP_CE_DIV=1` |
-| UART | 576000 baud, 8N1 |
+| UART | 12000000 baud, 8N1, fractional-NCO RX/TX |
 | Host protocol | Unchanged raster-order response stream |
 | Pixel format | 16-bit little-endian iteration count |
 | Largest validated frame | 1920x1080 |
@@ -376,6 +376,7 @@ The table below summarizes how each stage moved the system bottleneck.
 | Dynamic scheduler option | Static row modulo can leave row-level tail imbalance | Added `SCHED_MODE=1` idle-core row dispatcher and raster collector | Dynamic mode simulates and builds successfully while preserving the host protocol. |
 | Worker-internal 2-context interleaving | Per-worker FP pipelines underfed | Added `mandelbrot_core_worker_2ctx` with tagged FP writeback and ordered commit | Five of six 1080p scenes now hit UART ceiling; deep mini-brot improves `2.80x` vs 4-core 1ctx. |
 | Dynamic backpressure fix | Large UART-bound dynamic frames could deadlock | Gate dynamic row reuse on empty per-core FIFO | 1920-wide and full 1080p frames complete reliably under UART backpressure. |
+| Fractional UART 12 Mbaud | Integer divider precision and 576k output ceiling | Replaced integer CPB timing with 32-bit fractional baud accumulators in RX/TX | Fast 1080p scenes improve from about `28.5k pps` to `443k-493k pps`; compute-heavy scenes expose core limits. |
 
 ## Final 1080p Performance Comparison
 
@@ -392,7 +393,7 @@ The 4-core design's gains over single-core are architecture-limited, not baudrat
 | Deep mini-brot @8192 | `850.720s` | `234.261s` | `3.63x` | compute |
 | Deep seahorse @1024 | `363.253s` | `103.032s` | `3.53x` | mixed, near UART |
 
-### At 576000 Baud (Current Default)
+### At 576000 Baud (Historical Default)
 
 | Scene | 4-Core 500k | 4-Core 576k | Throughput | vs 4-Core 500k |
 |---|---:|---:|---:|---:|
@@ -422,7 +423,7 @@ This confirms the scheduling model: the current real scenes have little row-leve
 
 The important lesson is that dynamic row assignment targeted the wrong dominant term for these measured scenes. Fast scenes are already limited by UART output time. Compute-heavy scenes are dominated by worker-internal FP latency rather than row ownership imbalance. The existing static scheduler already interleaves adjacent rows, so it was much closer to balanced than a contiguous-band split would have been.
 
-### Default Dynamic + Two-Context Worker At 576000 Baud
+### Default Dynamic + Two-Context Worker At 576000 Baud Historical Baseline
 
 The current default combines dynamic row scheduling with two pixel contexts inside each of the four workers. Each worker still shares one FP64 multiplier and one FP64 adder; the improvement comes from tagged FP writeback and context interleaving, not from adding more FP units.
 
@@ -446,6 +447,37 @@ The implemented 2-context worker required three correctness details:
 | Ordered commit | Contexts can finish out of order, but the per-core FIFO must remain worker-local column order. |
 
 The dynamic scheduler also needed a backpressure rule: only assign a new row to a core when that core's FIFO is empty. Without this, a fast compute scene could fill a core FIFO with future rows while the raster collector waited for an earlier row from that same core, deadlocking under UART backpressure.
+
+### Fractional UART At 12 Mbaud
+
+The final transport step replaced integer `CLOCKS_PER_BIT` timing with a fractional baud accumulator shared by the UART RX and TX designs. The compatibility parameter remains, but bit ticks now come from:
+
+```text
+BAUD_INC = round(BAUD * 2^ACC_WIDTH / CLK_HZ)
+```
+
+At the current default `BAUD=12000000`, one bit is `8.333...` system clocks at 100 MHz, so an integer divider cannot represent it accurately. The accumulator emits a repeating mix of 8- and 9-cycle intervals, preserving the average baudrate while keeping all logic in the single 100 MHz clock domain.
+
+```mermaid
+flowchart LR
+    OLD["Integer CPB UART<br/>576000 stable baseline"] --> NCO["Fractional NCO UART<br/>BAUD_INC accumulator"]
+    NCO --> GATE["160x120 --verify gate<br/>all tested bauds pass"]
+    GATE --> FULL["Six 1080p scenes<br/>12 Mbaud default"]
+    FULL --> LIMIT["New visible limits<br/>host burst reliability + compute"]
+```
+
+12 Mbaud six-scene results after targeted reprobes:
+
+| Scene | 576k 2ctx | 12M 2ctx | 12M Throughput | Main limiter at 12M |
+|---|---:|---:|---:|---|
+| Fast escape @128 | `72.720s` | `4.678s` | `443288.08 pps` | UART/host burst overhead |
+| Standard @64 | `72.721s` | `4.202s` | `493434.63 pps` | UART/host burst overhead |
+| Seahorse zoom @512 | `72.790s` | `17.280s` | `120003.12 pps` | Mixed compute/output |
+| Deep tendrils @8192 | `72.781s` | `33.393s` | `62096.41 pps` | Compute/raster ordering |
+| Deep mini-brot @8192 | `83.708s` | `83.428s` | `24854.93 pps` | Compute-bound |
+| Deep seahorse @1024 | `72.776s` | `36.480s` | `56842.30 pps` | Compute/raster ordering |
+
+The 12 Mbaud path is fast but not yet protocol-hardened. The first six-scene sweep had two late-frame receive timeouts near the end of 4.1 MiB payloads; direct reprobes filled both result cells. This points to occasional host/FT232HL/driver long-burst receive instability rather than deterministic RTL pixel-count failure. The current response protocol has one final checksum and no packet sequence numbers, so any dropped byte causes the host to wait for the declared payload length until timeout.
 
 Test parameters for the comparison table:
 
@@ -472,9 +504,11 @@ The raster-order protocol made validation simple and backward-compatible. It als
 
 The true 100 MHz stage succeeded because long FP logic cones were pipelined. Removing multicycle constraints simplified STA and made multi-core replication safer.
 
-### 4 Cores Are A Good Match For 576000 Baud
+### 4 Cores Were A Good Match For The 576000 Baud Stage
 
-Four workers are enough to push many compute-heavy scenes near the UART ceiling (~28800 pps). More workers would consume resources but often wait on UART unless the scene is extremely compute-bound.
+At the 576000 baud stage, four workers were enough to push many compute-heavy scenes near the UART ceiling (~28800 pps). More workers would have consumed resources while often waiting on UART unless the scene was extremely compute-bound.
+
+At 12 Mbaud, that conclusion changes. Fast scenes are still transport-sensitive, but several deep scenes now expose compute/raster-order limits. More worker contexts, protocolized output, and recoverable packet framing become more valuable than simply adding more identical cores behind the same strict raster stream.
 
 ### Dynamic Row Scheduling Is Now The Default Scheduling Layer
 
@@ -491,7 +525,7 @@ Why the measured speedup is effectively zero:
 
 | Cause | Effect |
 |---|---|
-| UART-bound views already run at about 99% of the 576000 baud pixel ceiling | A better scheduler cannot send pixels faster than UART. |
+| UART-bound views already ran at about 99% of the 576000 baud pixel ceiling | A better scheduler could not send pixels faster than the old UART. |
 | Static interleaved rows already spread smooth Mandelbrot row costs across all four cores | Dynamic assignment has little tail imbalance to recover. |
 | Dynamic mode uses one-row jobs to reuse the existing worker safely | Each row repeats worker startup work, which consumes part of any balancing gain. |
 | The collector still emits strict raster order | A slow earlier row can still hold the output stream even if later rows completed. |
@@ -524,12 +558,13 @@ Recommended order:
 
 | Priority | Step | Reason |
 |---:|---|---|
-| 1 | Add a higher-bandwidth transport | Current UART caps fast scenes at about `28800 pps`. |
-| 2 | Add row/tile IDs to output packets | Enables out-of-order completion beyond the current raster collector. |
-| 3 | Scale worker contexts from 2 toward 4/8 | Attacks the remaining compute-bound bottleneck inside each worker without adding DSPs. |
-| 4 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
-| 5 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
-| 6 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
+| 1 | Add packet framing, sequence numbers, and retransmission | 12 Mbaud UART is fast but long bursts can still drop bytes without recovery. |
+| 2 | Add row/tile IDs to output packets | Enables resynchronization and out-of-order completion beyond the current raster collector. |
+| 3 | Add a higher-bandwidth transport | USB FIFO, SPI, Ethernet, or PS memory mapping would remove UART/driver burst limits. |
+| 4 | Scale worker contexts from 2 toward 4/8 | Attacks the remaining compute-bound bottleneck inside each worker without adding DSPs. |
+| 5 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
+| 6 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
+| 7 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
 
 ## Summary
 
@@ -538,12 +573,13 @@ The project evolved through a pragmatic sequence:
 1. Build a correct single-core streaming renderer.
 2. Close true 100 MHz FP64 timing.
 3. Raise UART bandwidth safely to 576000 baud via systematic integer-divider sweep, raw-probe, and TX-only isolation experiments.
-4. Perform UART timing analysis proving FPGA RX is the high-baud failure root.
+4. Perform UART timing analysis proving FPGA RX was the old high-baud failure root.
 5. Study multi-core scaling under the unchanged raster protocol.
 6. Implement 4-core interleaved-row workers with a modular scheduler and raster merger.
 7. Analyze and document FP64 boundary differences (truncation vs RNE rounding, chaotic amplification).
 8. Add a dynamic idle-core row scheduler and matching raster collector, now used by default.
 9. Add a two-context worker with tagged FP writeback and ordered commit.
 10. Fix dynamic row reuse under UART backpressure by requiring an empty per-core FIFO before assigning another row to a core.
+11. Replace integer UART timing with a fractional baud accumulator and validate 12 Mbaud full-protocol operation.
 
-The current design is stable, validated, and substantially faster for compute-bound 1080p deep zooms while preserving the original host protocol. Five of the six measured 1080p scenes are now essentially UART-bound at about `28.5k pixels/s`; deep mini-brot remains compute-bound at `24.8k pixels/s` and is the best current target for deeper worker-context scaling.
+The current design preserves the original host protocol while raising the default transport to 12 Mbaud. Fast 1080p scenes now reach hundreds of thousands of pixels per second, while deep mini-brot remains compute-bound around `24.9k pixels/s`. The next major architecture step is no longer another integer baud tweak; it is packetized/resynchronizable output or a stronger transport so high-baud long bursts are recoverable.

@@ -1,12 +1,13 @@
 `timescale 1ns / 1ps
+`include "config.vh"
 `include "fp_defines.vh"
 
 module mandelbrot_multicore #(
-    parameter CORE_COUNT = 4,
-    parameter CORE_FIFO_DEPTH = 4096,
-    parameter SCHED_MODE = 1,
-    parameter DYNAMIC_OWNER_DEPTH = 4096,
-    parameter WORKER_CONTEXTS = 2
+    parameter CORE_COUNT = `CFG_CORE_COUNT,
+    parameter CORE_FIFO_DEPTH = `CFG_CORE_FIFO_DEPTH,
+    parameter SCHED_MODE = `CFG_SCHED_MODE,
+    parameter DYNAMIC_OWNER_DEPTH = `CFG_DYNAMIC_OWNER_DEPTH,
+    parameter WORKER_CONTEXTS = `CFG_WORKER_CONTEXTS
 ) (
     input  wire                     clk,
     input  wire                     rst,

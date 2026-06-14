@@ -22,8 +22,7 @@ VIVADO = r"Z:\Softwares\Xilinx\Vivado\2020.2\bin\vivado.bat"
 
 
 FILES = [
-    ROOT / "rtl" / "uart_rx.v",
-    ROOT / "rtl" / "uart_tx.v",
+    ROOT / "rtl" / "config.vh",
     ROOT / "python" / "mandelbrot_host.py",
     ROOT / "python" / "test_esc.py",
     ROOT / "python" / "test_points.py",
@@ -31,10 +30,10 @@ FILES = [
 ]
 
 
-def patch_file(path, baud, clocks_per_bit):
+def patch_file(path, baud):
     text = path.read_text()
-    if path.name in ("uart_rx.v", "uart_tx.v"):
-        text = re.sub(r"parameter CLOCKS_PER_BIT = \d+", f"parameter CLOCKS_PER_BIT = {clocks_per_bit}", text)
+    if path.name == "config.vh":
+        text = re.sub(r"`define CFG_UART_BAUD \d+", f"`define CFG_UART_BAUD {baud}", text)
     elif path.name == "mandelbrot_host.py":
         text = re.sub(r"BAUD = \d+", f"BAUD = {baud}", text)
     else:
@@ -43,12 +42,8 @@ def patch_file(path, baud, clocks_per_bit):
 
 
 def set_baud(baud):
-    clocks_per_bit = round(100_000_000 / baud)
-    actual = 100_000_000 / clocks_per_bit
-    error = (actual - baud) / baud * 100.0
     for path in FILES:
-        patch_file(path, baud, clocks_per_bit)
-    return clocks_per_bit, actual, error
+        patch_file(path, baud)
 
 
 def run(cmd, timeout):
@@ -127,8 +122,8 @@ def main():
     ap.add_argument("--small-frame", action="store_true")
     args = ap.parse_args()
 
-    cpb, actual, error = set_baud(args.baud)
-    print(f"baud={args.baud} CLOCKS_PER_BIT={cpb} actual={actual:.3f} error={error:+.4f}%")
+    set_baud(args.baud)
+    print(f"baud={args.baud} fractional_nco=rtl/config.vh CFG_UART_BAUD")
 
     if not args.no_build and build().returncode != 0:
         return 2
