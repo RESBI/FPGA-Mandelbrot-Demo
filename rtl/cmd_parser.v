@@ -14,7 +14,8 @@ module cmd_parser (
     output reg  [15:0]              max_iter,
     output reg  [15:0]              rows,
     output reg  [15:0]              cols,
-    output reg                      precision_mode
+    output reg                      precision_mode,
+    output reg                      soft_reset
 );
 
     localparam FP_BYTES = `FP_WIDTH / 8;
@@ -25,10 +26,13 @@ module cmd_parser (
     localparam S_CHECK = 2;
     localparam S_EXEC  = 3;
     localparam S_WAIT  = 4;
+    localparam [63:0] SOFT_RESET_MAGIC = 64'h5253542152535421; // "RST!RST!"
 
     reg [2:0]  state = S_IDLE;
     reg [8:0]  byte_idx;        // up to 256 for FP128
     reg [7:0]  checksum_calc;
+    reg [63:0] reset_shift;
+    wire       reset_magic_seen = rx_avail && ({reset_shift[55:0], rx_data} == SOFT_RESET_MAGIC);
 
     // Shift registers for FP values (little-endian assembly)
     reg [`FP_WIDTH-1:0] cre_shift, cim_shift, step_shift;
@@ -44,8 +48,19 @@ module cmd_parser (
             max_iter      <= 0;
             precision_mode <= 0;
             byte_idx      <= 0;
+            soft_reset    <= 0;
+            reset_shift   <= 0;
         end else begin
-            case (state)
+            soft_reset <= 0;
+            if (rx_avail)
+                reset_shift <= {reset_shift[55:0], rx_data};
+
+            if (reset_magic_seen) begin
+                state <= S_IDLE;
+                compute_start <= 0;
+                byte_idx <= 0;
+                soft_reset <= 1;
+            end else case (state)
                 S_IDLE: begin
                     compute_start <= 0;
                     byte_idx <= 0;

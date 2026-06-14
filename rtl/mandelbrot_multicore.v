@@ -154,6 +154,7 @@ module mandelbrot_multicore #(
 
             queue #(.DEPTH(CORE_FIFO_DEPTH), .DATA_W(16)) u_fifo (
                 .clk         (clk),
+                .rst         (rst),
                 .write_avail (core_fifo_write_avail[i]),
                 .read_avail  (core_fifo_avail[i]),
                 .write_en    (core_fifo_wr[i]),

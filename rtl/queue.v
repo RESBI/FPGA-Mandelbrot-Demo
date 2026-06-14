@@ -5,6 +5,7 @@ module queue #(
     parameter DATA_W = 8
 ) (
     input  wire                 clk,
+    input  wire                 rst,
     output wire                 write_avail,
     output wire                 read_avail,
     input  wire                 write_en,
@@ -27,6 +28,12 @@ module queue #(
     assign write_avail = (count != DEPTH);
 
     always @(posedge clk) begin
+        if (rst) begin
+            write_ptr <= 0;
+            read_ptr  <= 0;
+            count     <= 0;
+            data_out  <= 0;
+        end else begin
         if (write_fire) begin
             mem[write_ptr[ADDR_W-1:0]] <= data_in;
             write_ptr <= write_ptr + 1'b1;
@@ -42,6 +49,7 @@ module queue #(
             2'b01: count <= count - 1'b1;
             default: count <= count;
         endcase
+        end
     end
 
     initial begin

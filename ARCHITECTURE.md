@@ -767,9 +767,10 @@ The current design keeps the same compute command format and raster-ordered pixe
 | Layer | Implemented In | Function |
 |---|---|---|
 | RTL response tiling | `rtl/tx_ctrl.v` | Splits the response stream into framed `TD` packets with coordinates and per-packet checksums. |
-| Host-driven compute tiling | `python/mandelbrot_host.py` | Splits a large image into retryable compute requests and stitches returned subframes. |
+| Host-driven display tiling | `python/mandelbrot_host.py` | Splits a large image into host-visible stripes and stitches returned subframes. |
+| Hardware compute sub-tiling | `python/mandelbrot_host.py` | Splits each host tile into smaller retryable hardware commands. |
 
-The RTL layer detects and localizes byte slips. The host-driven layer provides recovery by recomputing only the failed host tile.
+The RTL layer detects and localizes byte slips. The host-driven layer provides recovery by recomputing only the failed hardware compute tile inside the host tile.
 
 Tile design goals:
 
@@ -779,7 +780,7 @@ Tile design goals:
 | Preserve old host compatibility | The Python receiver accepts both legacy `RK` responses and current `RT`/`TD`/`TE` responses. |
 | Keep RTL small | `tx_ctrl` packetizes the existing raster stream; it does not buffer a full frame or implement retransmission. |
 | Add resynchronization points | Each `TD` packet has magic bytes, coordinates, dimensions, a bounded payload length, and a payload checksum. |
-| Make failures recoverable | The host retries a compute tile rather than losing the entire 1080p frame. |
+| Make failures recoverable | The host retries a compute subtile rather than losing the entire 1080p frame or a full host stripe. |
 | Keep throughput close to single burst | Recommended host tiles are large horizontal stripes, not tiny rectangles. |
 
 The architecture intentionally separates detection from recovery. The FPGA detects packet boundaries and supplies enough metadata for the host to validate each packet, but it does not participate in a bidirectional ACK/retry protocol during response streaming. This keeps the UART path simple and avoids buffering old packets in FPGA memory.
@@ -849,9 +850,12 @@ The RTL response tile is not the same thing as a host compute tile:
 | Concept | Controlled By | Example | Purpose |
 |---|---|---|---|
 | RTL response tile | `CFG_RESPONSE_TILE_COLS` in `rtl/config.vh` | `64` columns | Adds packet boundaries and checksums inside one FPGA response. |
-| Host compute tile | `--tile-width`, `--tile-height` | `1920x120` | Creates retryable compute requests for a large image. |
+| Host tile | `--tile-width`, `--tile-height` | full width x 120 rows | Defines the display/logging stripe and final image copy region. |
+| Hardware compute tile | `--compute-tile-width`, `--compute-tile-height` | `512x120` | Creates retryable hardware commands inside each host tile. |
 
-A single host compute tile can therefore produce many RTL `TD` packets. For example, a `1920x120` host tile with `CFG_RESPONSE_TILE_COLS=64` produces many 64-column response packets inside one response frame.
+A single hardware compute tile can therefore produce many RTL `TD` packets. For example, a `512x120` compute tile with `CFG_RESPONSE_TILE_COLS=64` produces 960 64-column response packets inside one response frame. A `1920x120` host tile is assembled from four such compute commands by default.
+
+Host-driven tiling is now the default behavior in `python/mandelbrot_host.py`. If the user does not pass `--tile-width` or `--tile-height`, the host selects a full-width stripe with a default height of 120 rows. If the user does not pass `--compute-tile-width` or `--compute-tile-height`, each host stripe is split into `512x120` hardware compute tiles. Tile receive uses a shorter per-read timeout, `--tile-read-timeout 30`, so a byte slip can fail and retry a compute subtile without waiting for the global serial timeout. The old single-command path is still available through `--full-frame` for regression and controlled experiments.
 
 `CFG_RESPONSE_TILE_GAP_CYCLES` inserts a small idle gap between response packets. This gives the host/USB serial stack short scheduling windows without adding a large throughput penalty. The current default of `1000` cycles is about 10 us at 100 MHz.
 
@@ -861,18 +865,18 @@ For a response frame with `rows` and `cols`, the approximate packet count is:
 td_packets = rows * ceil(cols / CFG_RESPONSE_TILE_COLS)
 ```
 
-With the current `CFG_RESPONSE_TILE_COLS=64`, a `1920x120` host tile produces:
+With the current `CFG_RESPONSE_TILE_COLS=64`, one default `512x120` hardware compute tile produces:
 
 ```text
-120 * ceil(1920 / 64) = 120 * 30 = 360 TD packets
+120 * ceil(512 / 64) = 120 * 8 = 960 TD packets
 ```
 
-The payload size is unchanged at two bytes per pixel. The framing overhead for each `TD` packet is 2 magic bytes, 8 header bytes, and 1 checksum byte, so `11` bytes per packet. The same `1920x120` host tile therefore has:
+A `1920x120` host stripe is assembled from four `512x120` compute responses by default, so the host stripe aggregate is 3840 `TD` packets. The payload size is unchanged at two bytes per pixel. The framing overhead for each `TD` packet is 2 magic bytes, 8 header bytes, and 1 checksum byte, so `11` bytes per packet. One default `512x120` compute response therefore has:
 
 ```text
-payload_bytes = 1920 * 120 * 2 = 460800
-td_overhead   = 360 * 11 = 3960
-gap_time      = 360 * 1000 / 100 MHz = 3.6 ms
+payload_bytes = 512 * 120 * 2 = 122880
+td_overhead   = 960 * 11 = 10560
+gap_time      = 960 * 1000 / 100 MHz = 9.6 ms
 ```
 
 This overhead is small compared with the payload time at 12 Mbaud, but it is not zero. Increasing `CFG_RESPONSE_TILE_COLS` would reduce packet count and host parsing overhead, at the cost of larger corruption windows and possibly different timing/resource behavior in `tx_ctrl`.
@@ -881,7 +885,9 @@ This overhead is small compared with the payload time at 12 Mbaud, but it is not
 
 Packetized response framing by itself detects checksum errors earlier, but it does not let the FPGA retransmit one packet. During response streaming the protocol is still effectively one-way: the host is receiving and the FPGA is transmitting. If a `TD` packet checksum fails, the host cannot ask the current `tx_ctrl` instance to resend only that packet.
 
-Recovery therefore happens at the host compute-tile boundary. The host discards the failed subframe, drains stale serial bytes until the link is quiet, resets the input buffer, and sends the same compute tile command again. This recovers from byte slips while keeping RTL complexity low.
+Recovery therefore happens at the hardware compute-tile boundary. The host records the failed compute-tile coordinates, discards that subframe, drains stale serial bytes until the link is quiet, resets the input buffer, sends the soft reset command, and sends the same compute tile command again. This recovers from byte slips while keeping RTL retransmission complexity out of the FPGA.
+
+The soft reset command is the eight-byte UART sequence `RST!RST!`. `cmd_parser` recognizes it in any parser state and pulses a system reset long enough to clear the command parser, compute engine, per-core FIFOs, output FIFO, and `tx_ctrl`. The host sends it automatically after a failed compute tile attempt unless `--no-soft-reset-on-retry` is used. It can also be sent manually with `python python\mandelbrot_host.py --port COM6 --soft-reset`.
 
 Host retry sequence:
 
@@ -891,13 +897,15 @@ flowchart TB
     RX --> CHECK{"Frame complete<br/>and checks pass?"}
     CHECK -->|yes| COPY["Copy tile pixels<br/>into full-frame buffer"]
     CHECK -->|no| DRAIN["Drain serial until quiet"]
-    DRAIN --> RESET["Reset input buffer<br/>increment retry count"]
+    DRAIN --> RESET["Soft reset FPGA<br/>reset input buffer<br/>increment retry count"]
     RESET --> RETRY{"Retries left?"}
     RETRY -->|yes| CMD
     RETRY -->|no| FAIL["Fail frame"]
 ```
 
-The retry is intentionally coarse. A bad `TD` packet causes the whole host compute tile to be recomputed, because the FPGA has already streamed past the failed packet and has no retained copy to resend. For the recommended `1920x120` shape, one retry recomputes 120 rows rather than the entire 1080p frame.
+The retry is still coarser than one `TD` packet. A bad `TD` packet causes the current hardware compute tile to be recomputed, because the FPGA has already streamed past the failed packet and has no retained copy to resend. With the default `1920x120` host stripe and `512x120` compute tile, one retry recomputes one quarter of the host stripe rather than the whole stripe or the entire 1080p frame.
+
+If bytes stop arriving in the middle of a `TD` payload, the receiver cannot know the packet is incomplete until the serial read returns short. The tiled path therefore overrides the serial timeout during each tile request with `--tile-read-timeout`, currently 30 seconds by default. This turns the apparent hang into a bounded wait followed by drain and retry.
 
 Current limitations:
 
@@ -905,7 +913,7 @@ Current limitations:
 |---|---|
 | No packet sequence ID | The host detects bad framing/checksum but cannot explicitly report missing packet numbers. |
 | No request ID | Late bytes from an old failed request are handled by drain/quiet timing, not by an explicit ID check. |
-| No FPGA-side retransmission | A failed packet requires recomputing the whole host tile. |
+| No FPGA-side retransmission | A failed packet requires recomputing the current hardware compute tile. |
 | Payload-only checksum | Header corruption is caught by semantic checks, not by a header CRC. |
 
 These are deliberate tradeoffs for the current UART implementation. The design gives practical recovery at 12 Mbaud without converting the FPGA UART path into a full reliable transport stack.
@@ -914,50 +922,50 @@ Important reliability boundaries:
 
 | Boundary | Current Behavior |
 |---|---|
-| Packet corruption inside one `TD` | Detected by payload checksum; host retries the host tile. |
-| Header corruption | Detected by magic/dimension/bounds/length checks; host retries the host tile. |
-| Lost packet | Detected by missing filled pixels or unexpected `TE`; host retries the host tile. |
-| Late bytes after a failed tile | Mitigated by drain-until-quiet and input-buffer reset. |
+| Packet corruption inside one `TD` | Detected by payload checksum; host retries the compute tile. |
+| Header corruption | Detected by magic/dimension/bounds/length checks; host retries the compute tile. |
+| Lost packet | Detected by missing filled pixels or unexpected `TE`; host retries the compute tile. |
+| Late bytes after a failed tile | Mitigated by drain-until-quiet, soft reset, and input-buffer reset. |
 | Duplicate or stale valid-looking tile | Not explicitly protected without request IDs; currently mitigated by serial drain and strict command sequencing. |
 | FPGA compute error with valid transport | Not corrected by the tile protocol; use `--verify` or targeted simulation for numerical validation. |
 
 ### 10.4 Host-Driven Tile Geometry
 
-Host-driven tiling builds reliability above this packetized response format. Instead of requesting a full 1920x1080 frame in one command, the host sends multiple smaller compute commands and stitches the returned subframes into the final image. If a subframe fails checksum or framing, the host drains the serial stream and retries that compute tile. The recommended 1080p shape is `1920x120`, producing nine retryable stripes per frame.
+Host-driven tiling builds reliability above this packetized response format. Instead of requesting a full 1920x1080 frame in one command, the host builds large host-visible stripes and then sends smaller hardware compute commands inside each stripe. If a compute response fails checksum or framing, the host drains the serial stream, sends soft reset, and retries that compute tile. The recommended 1080p host stripe is `1920x120`, producing nine host stripes per frame; with the default `512x120` compute tile, this becomes 36 hardware compute requests per frame.
 
-Tile center calculation preserves the same integer-center coordinate convention as the full-frame renderer. For a full image with center `(center_re, center_im)`, pixel step `step`, full dimensions `width x height`, and a host tile at `(x0, y0)` with dimensions `tw x th`, the host computes:
+Tile center calculation preserves the same integer-center coordinate convention as the full-frame renderer. For a full image with center `(center_re, center_im)`, pixel step `step`, full dimensions `width x height`, and a compute tile at `(cx0, cy0)` with dimensions `cw x ch`, the host computes:
 
 ```python
 full_half_w = (width - 1) >> 1
 full_half_h = (height - 1) >> 1
-tile_half_w = (tw - 1) >> 1
-tile_half_h = (th - 1) >> 1
-tile_center_re = center_re + (x0 + tile_half_w - full_half_w) * step
-tile_center_im = center_im + (full_half_h - (y0 + tile_half_h)) * step
+subtile_half_w = (cw - 1) >> 1
+subtile_half_h = (ch - 1) >> 1
+subtile_center_re = center_re + (cx0 + subtile_half_w - full_half_w) * step
+subtile_center_im = center_im + (full_half_h - (cy0 + subtile_half_h)) * step
 ```
 
-This makes each tile command generate exactly the same pixel coordinates as the corresponding rectangle in a monolithic full-frame command. After receiving a tile response, the host copies each returned row into the final image buffer:
+This makes each compute command generate exactly the same pixel coordinates as the corresponding rectangle in a monolithic full-frame command. After receiving a compute response, the host copies each returned row into the final image buffer:
 
 ```python
-dst = (y0 + dy) * width + x0
-pixels[dst:dst + tw] = tile_pixels[src:src + tw]
+dst = (cy0 + dy) * width + cx0
+pixels[dst:dst + cw] = subtile_pixels[src:src + cw]
 ```
 
 The FPGA is intentionally unaware of the full-frame assembly. It only receives ordinary Mandelbrot commands for smaller rectangles.
 
 This choice has an important consequence: all full-frame coordinate logic remains in software. The FPGA only sees a tile-local frame with its own `rows`, `cols`, `center`, and `step`. That is why `TD` coordinates are relative to the tile response and why the host copy step applies `(x0, y0)` when writing into the final image buffer.
 
-The geometry formula preserves the RTL integer-center convention for both odd and even dimensions. It uses truncated half dimensions, matching RTL expressions such as:
+The geometry formula preserves the RTL integer-center convention for both odd and even compute-tile dimensions. It uses truncated half dimensions, matching RTL expressions such as:
 
 ```verilog
 half_w = (cols - 1) >> 1;
 ```
 
-This avoids off-by-one seams between adjacent host tiles.
+This avoids off-by-one seams between adjacent compute tiles.
 
 ### 10.5 Tile Size Tradeoffs
 
-Tile size is a tradeoff between recovery granularity and fixed overhead:
+Tile size is a tradeoff between recovery granularity and fixed overhead. The historical measurements below vary host tile size with one hardware command per host tile; the current host keeps the same host-tile concept but adds a smaller compute-tile retry unit inside each host tile.
 
 | Tile Shape | Host Tiles Per 1080p Frame | Behavior |
 |---:|---:|---|
@@ -990,7 +998,25 @@ frame_time ~= compute_time(tile_shape)
            + retry_cost
 ```
 
-The UART payload term is nearly constant for a fixed full-frame size. Small tiles increase `host_tile_count` and therefore command/serial overhead. Larger tiles reduce fixed overhead but increase `retry_cost` because more pixels must be recomputed after one checksum failure. The recommended `1920x120` point is a conservative middle ground: nine host commands per 1080p frame and a 120-row retry unit with 30/30 transport pass in the stability run.
+The UART payload term is nearly constant for a fixed full-frame size. Small tiles increase command/serial overhead. Larger tiles reduce fixed overhead but increase `retry_cost` because more pixels must be recomputed after one checksum failure. The recommended current split keeps a large `1920x120` host stripe for simple image assembly and progress reporting, but uses `512x120` compute tiles so a retry recomputes about one quarter of the stripe.
+
+### 10.6 Large Logical Images Above 4096 Rows
+
+The default dynamic scheduler records row ownership for `DYNAMIC_OWNER_DEPTH=4096` rows per hardware command. A single full-frame command taller than 4096 rows can therefore stall when the raster collector reaches an unrecorded row. Default host tiling changes the practical limit: each compute tile is a separate hardware command with its own local `rows` field, so the owner-depth limit applies to `compute_tile_height`, not to the logical full-frame height.
+
+Examples:
+
+| Logical image | Default host tile behavior | Owner-depth status |
+|---|---|---|
+| `4096x4096` | 35 host stripes of up to 120 rows, each split into compute tiles | Safe; each hardware command is 120 rows except the tail. |
+| `16384x16384` | Full-width stripes if width fits one hardware command | Safe for row ownership; very large host memory and runtime. |
+| `65536x65536` | Cannot use one full-width tile because hardware `cols` is 16-bit | Must use both horizontal and vertical tiling, and host memory becomes impractical. |
+
+The hardware command format uses 16-bit `rows` and `cols`, so each individual hardware request must have `tile_width <= 65535` and `tile_height <= 65535`; the current default bitstream further constrains practical `tile_height <= 4096` unless rebuilt. Logical full images larger than 65535 in width or height can be represented by host tiling only if the host splits them so every hardware command stays inside those per-command limits.
+
+The current Python host still assembles the complete final image in memory before rendering. Very large logical frames therefore hit host RAM, PNG rendering time, and optional software verification time long before they become comfortable workflows. For example, a `16384x16384` final pixel buffer contains 268435456 iteration values; as a Python list this is far larger than the raw 512 MiB `uint16` payload. A `65536x65536` frame is about 8 GiB even as raw `uint16`, and much larger as Python objects, so it requires a streaming/tiled image writer rather than the current full-buffer renderer.
+
+Use `--full-frame` only to test the older monolithic path. In that mode, images taller than 4096 rows still require a larger `DYNAMIC_OWNER_DEPTH` bitstream or a compatible static/streaming design.
 
 The response size is based on:
 
@@ -1047,12 +1073,14 @@ Responsibilities:
 
 | Component | Responsibility |
 |---|---|
-| CLI parser | Accept center, step, max iteration, dimensions, output, mode, port, timeout, verify flag. |
+| CLI parser | Accept center, step, max iteration, dimensions, output, mode, port, timeout, verify flag, tiling, soft reset, and quiet progress options. |
 | FP encoding | Pack FP64 with Python `struct.pack('<d')`; pack FP128 manually for experimental mode. |
 | Command builder | Build little-endian command packet and XOR checksum. |
 | Serial transport | Open `COM6` by default at 12000000 baud. |
 | Response receiver | Read legacy `RK` or tiled `RT`/`TD`/`TE` responses, validate checksums, and convert to uint16 pixels. |
-| Host-driven tiling | Optional `--tile-width`, `--tile-height`, and `--tile-retries` split a frame into retryable compute tiles. |
+| Host-driven tiling | Default host stripes plus `--compute-tile-width`, `--compute-tile-height`, and `--tile-retries` split a frame into retryable hardware compute tiles. |
+| Soft reset | `--soft-reset` sends `RST!RST!`; failed compute-tile attempts send it automatically unless disabled. |
+| Quiet progress | `--quiet` shows a single-line progress bar: `(n / total compute tile)` and `(m / total host tile)`. |
 | Renderer | Convert iteration counts to PNG or text output. |
 | Software reference | Optional `--verify` computes a Python Mandelbrot image matching RTL coordinate rules. |
 | Timing | Print FPGA elapsed, pixels/s, render elapsed, software elapsed, and total elapsed. |
@@ -1066,8 +1094,10 @@ python python\mandelbrot_host.py --width 1920 --height 1080 --max-iter 512 --cen
 Recommended high-baud 1080p host-tiled command:
 
 ```bash
-python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
+python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --compute-tile-width 512 --compute-tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
 ```
+
+The tile arguments are optional because the host now enables stripe tiling and compute sub-tiling by default. Use `--full-frame` to disable host tiling for regression tests or controlled single-burst experiments.
 
 ### 11.1 Host-Tiled 12 Mbaud Stability
 
@@ -1082,7 +1112,7 @@ The host-tiled mode was stress-tested with the six standard 1080p scenes, five r
 | Deep mini-brot @8192 | `5/5` | `0` | `83.281` | `83.280` | `83.282` | `0.001` | `0.00%` | `24898.89` |
 | Deep Seahorse @1024 | `5/5` | `0` | `36.343` | `36.341` | `36.345` | `0.002` | `0.00%` | `57056.36` |
 
-The two retry events were recovered by recomputing one 1920x120 host tile. Without host-driven tiling, an equivalent byte slip in a monolithic 4 MiB response would normally invalidate the entire frame. The variability in Seahorse zoom and deep tendrils is therefore dominated by the occasional tile retry, not by normal compute jitter. Exact HW/SW match is not used as the transport pass criterion for deep scenes because FP64 boundary differences are already documented separately.
+The two retry events were recovered by recomputing one 1920x120 host tile in the earlier host-tile-only implementation. The current host reduces this retry unit further by splitting each host tile into smaller compute tiles, defaulting to `512x120`. Without host-driven tiling, an equivalent byte slip in a monolithic 4 MiB response would normally invalidate the entire frame. Exact HW/SW match is not used as the transport pass criterion for deep scenes because FP64 boundary differences are already documented separately.
 
 ### 11.2 Software Reference Matching RTL
 
@@ -1153,7 +1183,27 @@ Expected pass marker:
 === DYNAMIC MULTICORE TEST PASS: 192 pixels ===
 ```
 
-### 12.4 Host-Side Random Reference Testing
+### 12.4 Response Packetizer And Soft Reset Simulation
+
+Focused response simulations validate tiled response framing independent of the full compute pipeline:
+
+```bash
+vivado -mode batch -source sim_tx_ctrl_tiled.tcl
+vivado -mode batch -source sim_tx_ctrl_host_tiled_4096.tcl
+vivado -mode batch -source sim_cmd_parser_soft_reset.tcl
+```
+
+Expected pass markers:
+
+```text
+=== TX CTRL TILED TEST PASS: td=7680 pixels=491520 bytes=1067532 ===
+=== HOST-TILED 4096 TEST PASS: frames=35 td=262144 pixels=16777216 bytes=36438436 ===
+=== CMD PARSER SOFT RESET TEST PASS ===
+```
+
+The 4096x4096 test follows the host default geometry: 34 responses of `4096x120` and one tail response of `4096x16`. It checks `RT/TD/TE` framing, per-packet checksum, total packet count, total pixel count, and tail handling.
+
+### 12.5 Host-Side Random Reference Testing
 
 `python/test_random_compare.py` compares host/software reference conventions across randomized cases. This catches coordinate convention errors, checksum assumptions, and corner cases in command construction.
 
@@ -1163,7 +1213,7 @@ Example validated command:
 python python/test_random_compare.py --cases 300 --seed 20260608
 ```
 
-### 12.5 Hardware Smoke Tests
+### 12.6 Hardware Smoke Tests
 
 `python/test_esc.py` sends 1x1-like commands for obvious escape points. It verifies UART RX, command parsing, core start, escape logic, FIFO/TX, and host parsing.
 
@@ -1176,7 +1226,7 @@ c=(3.0,0) -> iter=1
 c=(4.1,0) -> iter=1
 ```
 
-### 12.6 Hardware Image Verification
+### 12.7 Hardware Image Verification
 
 For moderate images, the host can run software verification:
 
@@ -1188,7 +1238,7 @@ Many tested cases reached `100.00%` match.
 
 For large 1080p or very high iteration tests, `--verify` is normally skipped because Python software rendering becomes slow.
 
-### 12.7 Large-Frame Verification
+### 12.8 Large-Frame Verification
 
 The 32-bit pixel-count fix was validated with:
 

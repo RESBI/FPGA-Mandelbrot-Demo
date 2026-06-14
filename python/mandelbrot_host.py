@@ -27,12 +27,35 @@ BAUD = 12000000
 TIMEOUT = 180.0
 DEFAULT_DYNAMIC_OWNER_DEPTH = 4096
 DEFAULT_MAX_HOST_BYTES = 512 * 1024 * 1024
+DEFAULT_HOST_TILE_HEIGHT = 120
+DEFAULT_COMPUTE_TILE_WIDTH = 512
+DEFAULT_COMPUTE_TILE_HEIGHT = 120
+DEFAULT_TILE_READ_TIMEOUT = 30.0
+TILE_PROGRESS_PACKET_INTERVAL = 1024
+SOFT_RESET_COMMAND = b"RST!RST!"
+QUIET_PROGRESS_BAR_WIDTH = 28
 
 
 def estimate_uart_seconds(width, height):
     # UART is 8N1, so every payload byte costs 10 serial bits.
     response_bytes = 6 + width * height * 2 + 1
     return response_bytes * 10.0 / BAUD
+
+
+def configure_host_tiling(args):
+    if args.full_frame:
+        args.host_tiling = False
+        return
+
+    args.host_tiling = True
+    if args.tile_width <= 0:
+        args.tile_width = min(args.width, 65535)
+    if args.tile_height <= 0:
+        args.tile_height = min(args.height, DEFAULT_HOST_TILE_HEIGHT)
+    if args.compute_tile_width <= 0:
+        args.compute_tile_width = min(args.tile_width, DEFAULT_COMPUTE_TILE_WIDTH)
+    if args.compute_tile_height <= 0:
+        args.compute_tile_height = min(args.tile_height, DEFAULT_COMPUTE_TILE_HEIGHT)
 
 
 def validate_request(args):
@@ -43,30 +66,65 @@ def validate_request(args):
     if args.width <= 0 or args.height <= 0:
         print("ERROR: width and height must be positive")
         sys.exit(1)
-    if args.width > 65535 or args.height > 65535:
-        print("ERROR: width and height must fit the 16-bit hardware protocol")
+    if args.host_tiling:
+        if args.tile_width <= 0 or args.tile_height <= 0:
+            print("ERROR: host tile width and height must be positive")
+            sys.exit(1)
+        if args.tile_width > 65535 or args.tile_height > 65535:
+            print("ERROR: host tile width and height must fit the 16-bit hardware protocol")
+            print(f"  tile={args.tile_width}x{args.tile_height}")
+            sys.exit(1)
+        if args.compute_tile_width <= 0 or args.compute_tile_height <= 0:
+            print("ERROR: compute tile width and height must be positive")
+            sys.exit(1)
+        if args.compute_tile_width > args.tile_width or args.compute_tile_height > args.tile_height:
+            print("ERROR: compute tile must not exceed the host tile")
+            print(f"  host tile={args.tile_width}x{args.tile_height}, compute tile={args.compute_tile_width}x{args.compute_tile_height}")
+            sys.exit(1)
+        if args.compute_tile_width > 65535 or args.compute_tile_height > 65535:
+            print("ERROR: compute tile width and height must fit the 16-bit hardware protocol")
+            print(f"  compute tile={args.compute_tile_width}x{args.compute_tile_height}")
+            sys.exit(1)
+    elif args.width > 65535 or args.height > 65535:
+        print("ERROR: full-frame width and height must fit the 16-bit hardware protocol")
+        print("  Use host tiling instead of --full-frame for larger logical images.")
         sys.exit(1)
     if args.max_iter > 65535:
         print("ERROR: max_iter must be <= 65535")
         sys.exit(1)
 
-    if not args.force_large_frame and args.height > DEFAULT_DYNAMIC_OWNER_DEPTH:
+    hardware_request_height = args.compute_tile_height if args.host_tiling else args.height
+    if not args.force_large_frame and hardware_request_height > DEFAULT_DYNAMIC_OWNER_DEPTH:
         print("ERROR: requested height exceeds the current default dynamic scheduler limit")
-        print(f"  height={args.height}, dynamic owner table depth={DEFAULT_DYNAMIC_OWNER_DEPTH}")
-        print("  The current default bitstream records dynamic row ownership for 4096 rows.")
-        print("  A taller frame can stall when raster collection reaches an unrecorded row.")
+        print(f"  hardware request height={hardware_request_height}, dynamic owner table depth={DEFAULT_DYNAMIC_OWNER_DEPTH}")
+        print("  The current default bitstream records dynamic row ownership for 4096 rows per command.")
+        print("  A taller single hardware request can stall when raster collection reaches an unrecorded row.")
         print("  Rebuild with a larger DYNAMIC_OWNER_DEPTH or use an appropriate static build.")
-        print("  Pass --force-large-frame only if the programmed bitstream supports this frame.")
+        print("  Use host tiling with a smaller --tile-height, or pass --force-large-frame only if the programmed bitstream supports this request.")
         sys.exit(1)
 
     if not args.force_large_frame and data_bytes > DEFAULT_MAX_HOST_BYTES:
         print("ERROR: response is too large for the default host receive path")
         print(f"  data bytes={data_bytes}, default limit={DEFAULT_MAX_HOST_BYTES}")
         print("  The host currently buffers the full response before rendering/verifying.")
+        print("  Host tiling protects the FPGA transport, but this script still buffers the final image in memory.")
         print("  Use a smaller frame, implement streaming output, or pass --force-large-frame knowingly.")
         sys.exit(1)
 
     print(f"Estimated UART payload time at {BAUD} baud: {est_seconds:.1f}s")
+
+
+def print_quiet_progress(done_compute, total_compute, host_index, host_total, current_task, final=False):
+    total_compute = max(total_compute, 1)
+    done_compute = min(done_compute, total_compute)
+    filled = int(QUIET_PROGRESS_BAR_WIDTH * done_compute / total_compute)
+    bar = "#" * filled + "-" * (QUIET_PROGRESS_BAR_WIDTH - filled)
+    line = (f"\r[{bar}] ({done_compute} / {total_compute} compute tile) "
+            f"({host_index} / {host_total} host tile) {current_task}")
+    sys.stdout.write(line + " " * 8)
+    if final:
+        sys.stdout.write("\n")
+    sys.stdout.flush()
 
 # ============================================================
 #  Color Palette
@@ -197,6 +255,18 @@ class MandelbrotFPGA:
         self.ser.reset_input_buffer()
         self.ser.write(payload)
         self.ser.flush()
+
+    def soft_reset(self, drain_before=True, drain_after=True):
+        if drain_before:
+            drain_serial_until_quiet(self, quiet_seconds=0.05, max_seconds=0.5)
+        if self.verbose:
+            print("Sending soft reset")
+        self.ser.write(SOFT_RESET_COMMAND)
+        self.ser.flush()
+        time.sleep(0.02)
+        self.ser.reset_input_buffer()
+        if drain_after:
+            drain_serial_until_quiet(self, quiet_seconds=0.05, max_seconds=0.5)
 
     def recv_legacy_response(self, header, width, height):
         total_pixels = width * height
@@ -339,7 +409,7 @@ class MandelbrotFPGA:
                 idx += tile_cols
 
             tile_count += 1
-            if self.verbose and (tile_count % 64 == 0 or received_pixels == total_pixels):
+            if self.verbose and (tile_count % TILE_PROGRESS_PACKET_INTERVAL == 0 or received_pixels == total_pixels):
                 print(f"  Tile progress: {received_pixels}/{total_pixels} pixels ({tile_count} tiles)")
 
     def recv_response(self, width, height):
@@ -424,7 +494,8 @@ def drain_serial_until_quiet(fpga, quiet_seconds=0.25, max_seconds=3.0):
 
 
 def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, height, mode,
-                        tile_width, tile_height, retries):
+                        tile_width, tile_height, compute_tile_width, compute_tile_height,
+                        retries, tile_read_timeout, soft_reset_on_retry):
     pixels = [0] * (width * height)
     full_half_w = (width - 1) >> 1
     full_half_h = (height - 1) >> 1
@@ -432,41 +503,111 @@ def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, heigh
     tiles_y = (height + tile_height - 1) // tile_height
     tile_total = tiles_x * tiles_y
     tile_index = 0
+    failed_compute_tiles = []
+    total_compute_tiles = 0
+    for y_base in range(0, height, tile_height):
+        host_h = min(tile_height, height - y_base)
+        compute_tiles_y = (host_h + compute_tile_height - 1) // compute_tile_height
+        for x_base in range(0, width, tile_width):
+            host_w = min(tile_width, width - x_base)
+            compute_tiles_x = (host_w + compute_tile_width - 1) // compute_tile_width
+            total_compute_tiles += compute_tiles_x * compute_tiles_y
+    completed_compute_tiles = 0
 
     for y0 in range(0, height, tile_height):
         th = min(tile_height, height - y0)
         for x0 in range(0, width, tile_width):
             tw = min(tile_width, width - x0)
             tile_index += 1
-            tile_half_w = (tw - 1) >> 1
-            tile_half_h = (th - 1) >> 1
-            tile_center_re = center_re + (x0 + tile_half_w - full_half_w) * step
-            tile_center_im = center_im + (full_half_h - (y0 + tile_half_h)) * step
+            compute_tiles_x = (tw + compute_tile_width - 1) // compute_tile_width
+            compute_tiles_y = (th + compute_tile_height - 1) // compute_tile_height
+            compute_total = compute_tiles_x * compute_tiles_y
+            compute_index = 0
 
-            tile_pixels = None
-            for attempt in range(1, retries + 2):
-                if fpga.verbose or attempt > 1:
-                    print(f"Tile {tile_index}/{tile_total}: x={x0}, y={y0}, size={tw}x{th}, attempt={attempt}")
-                elif tile_index == 1 or tile_index == tile_total or tile_index % 16 == 0:
-                    print(f"Tile progress: {tile_index}/{tile_total}")
-                request_t0 = time.perf_counter()
-                tile_pixels = request_image(fpga, tile_center_re, tile_center_im, step,
-                                            max_iter, tw, th, mode)
-                if tile_pixels is not None:
-                    if fpga.verbose:
-                        print(f"  Tile elapsed: {time.perf_counter() - request_t0:.3f}s")
-                    break
-                print("  Tile receive failed")
-                drain_serial_until_quiet(fpga)
-                fpga.ser.reset_input_buffer()
+            if fpga.verbose:
+                print(f"Tile {tile_index}/{tile_total}: x={x0}, y={y0}, size={tw}x{th}, compute_tiles={compute_total}")
+            else:
+                print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_index, tile_total,
+                                     f"host x={x0}, y={y0}, size={tw}x{th}")
 
-            if tile_pixels is None:
-                return None
+            for cy0 in range(y0, y0 + th, compute_tile_height):
+                ch = min(compute_tile_height, y0 + th - cy0)
+                for cx0 in range(x0, x0 + tw, compute_tile_width):
+                    cw = min(compute_tile_width, x0 + tw - cx0)
+                    compute_index += 1
+                    subtile_half_w = (cw - 1) >> 1
+                    subtile_half_h = (ch - 1) >> 1
+                    subtile_center_re = center_re + (cx0 + subtile_half_w - full_half_w) * step
+                    subtile_center_im = center_im + (full_half_h - (cy0 + subtile_half_h)) * step
 
-            for dy in range(th):
-                src = dy * tw
-                dst = (y0 + dy) * width + x0
-                pixels[dst:dst + tw] = tile_pixels[src:src + tw]
+                    subtile_pixels = None
+                    for attempt in range(1, retries + 2):
+                        if fpga.verbose or attempt > 1:
+                            if not fpga.verbose:
+                                sys.stdout.write("\n")
+                                sys.stdout.flush()
+                            print(f"  Compute tile {compute_index}/{compute_total}: x={cx0}, y={cy0}, size={cw}x{ch}, attempt={attempt}")
+                        elif not fpga.verbose:
+                            print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_index, tile_total,
+                                                 f"compute x={cx0}, y={cy0}, size={cw}x{ch}")
+                        request_t0 = time.perf_counter()
+                        old_timeout = fpga.ser.timeout
+                        fpga.ser.timeout = tile_read_timeout
+                        try:
+                            subtile_pixels = request_image(fpga, subtile_center_re, subtile_center_im, step,
+                                                           max_iter, cw, ch, mode)
+                        finally:
+                            fpga.ser.timeout = old_timeout
+                        if subtile_pixels is not None:
+                            if fpga.verbose:
+                                print(f"    Compute tile elapsed: {time.perf_counter() - request_t0:.3f}s")
+                            break
+
+                        failure = {
+                            "host_tile": tile_index,
+                            "compute_tile": compute_index,
+                            "x": cx0,
+                            "y": cy0,
+                            "width": cw,
+                            "height": ch,
+                            "attempt": attempt,
+                        }
+                        failed_compute_tiles.append(failure)
+                        if not fpga.verbose:
+                            sys.stdout.write("\n")
+                            sys.stdout.flush()
+                        print(f"    Compute tile receive failed: host_tile={tile_index}, compute_tile={compute_index}, x={cx0}, y={cy0}, size={cw}x{ch}, attempt={attempt}")
+                        drain_serial_until_quiet(fpga)
+                        fpga.ser.reset_input_buffer()
+                        if soft_reset_on_retry:
+                            fpga.soft_reset(drain_before=False)
+
+                    if subtile_pixels is None:
+                        print("ERROR: Failed compute tiles:")
+                        for failure in failed_compute_tiles[-10:]:
+                            print(f"  host_tile={failure['host_tile']}, compute_tile={failure['compute_tile']}, x={failure['x']}, y={failure['y']}, size={failure['width']}x{failure['height']}, attempt={failure['attempt']}")
+                        return None
+
+                    for dy in range(ch):
+                        src = dy * cw
+                        dst = (cy0 + dy) * width + cx0
+                        pixels[dst:dst + cw] = subtile_pixels[src:src + cw]
+                    completed_compute_tiles += 1
+                    if not fpga.verbose:
+                        print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_index, tile_total,
+                                             f"done x={cx0}, y={cy0}, size={cw}x{ch}")
+
+            if fpga.verbose:
+                print("  Host tile complete")
+
+    if failed_compute_tiles:
+        if not fpga.verbose:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        print(f"Recovered {len(failed_compute_tiles)} failed compute tile attempts")
+    elif not fpga.verbose:
+        print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_total, tile_total,
+                             "complete", final=True)
 
     return pixels
 
@@ -500,15 +641,38 @@ def main():
                         help=f"Serial timeout in seconds (default: {TIMEOUT})")
     parser.add_argument("--force-large-frame", action="store_true",
                         help="Bypass host-side guards for very large frames; use only with a matching bitstream")
+    parser.add_argument("--full-frame", action="store_true",
+                        help="Disable default host-driven tiling and request one full frame in a single hardware command")
     parser.add_argument("--tile-width", type=int, default=0,
-                        help="Host-driven request tile width. 0 disables host tiling.")
+                        help="Host-driven request tile width. Default: full image width capped to 65535.")
     parser.add_argument("--tile-height", type=int, default=0,
-                        help="Host-driven request tile height. 0 disables host tiling.")
-    parser.add_argument("--tile-retries", type=int, default=2,
-                        help="Retries per host-driven tile request")
+                        help=f"Host-driven request tile height. Default: min(height, {DEFAULT_HOST_TILE_HEIGHT}).")
+    parser.add_argument("--compute-tile-width", type=int, default=0,
+                        help=f"Hardware compute tile width inside each host tile. Default: min(host tile width, {DEFAULT_COMPUTE_TILE_WIDTH}).")
+    parser.add_argument("--compute-tile-height", type=int, default=0,
+                        help=f"Hardware compute tile height inside each host tile. Default: min(host tile height, {DEFAULT_COMPUTE_TILE_HEIGHT}).")
+    parser.add_argument("--tile-retries", type=int, default=3,
+                        help="Retries per hardware compute tile request")
+    parser.add_argument("--tile-read-timeout", type=float, default=DEFAULT_TILE_READ_TIMEOUT,
+                        help=f"Per-read serial timeout while receiving one host tile (default: {DEFAULT_TILE_READ_TIMEOUT}s)")
+    parser.add_argument("--no-soft-reset-on-retry", action="store_true",
+                        help="Do not send the UART soft reset command after a failed compute tile attempt")
+    parser.add_argument("--soft-reset", action="store_true",
+                        help="Send only the UART soft reset command, then exit")
     parser.add_argument("--quiet", action="store_true",
                         help="Reduce per-tile logging during large transfers")
     args = parser.parse_args()
+
+    configure_host_tiling(args)
+
+    if args.soft_reset:
+        fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
+        try:
+            fpga.soft_reset()
+        finally:
+            fpga.close()
+        print("Soft reset sent")
+        return
 
     validate_request(args)
 
@@ -520,22 +684,25 @@ def main():
     print(f" Step: {args.step}")
     print(f" Max iterations: {args.max_iter}")
     print(f" Image: {args.width}x{args.height}")
-    if args.tile_width > 0 or args.tile_height > 0:
-        print(f" Host tiles: {args.tile_width}x{args.tile_height}, retries={args.tile_retries}")
+    if args.host_tiling:
+        print(f" Host tiles: {args.tile_width}x{args.tile_height}")
+        print(f" Compute tiles: {args.compute_tile_width}x{args.compute_tile_height}, retries={args.tile_retries}, read_timeout={args.tile_read_timeout}s")
+        print(f" Soft reset on retry: {not args.no_soft_reset_on_retry}")
+    else:
+        print(" Host tiles: disabled (--full-frame)")
     print("=" * 50)
 
     fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
     try:
         total_pixels = args.width * args.height
         t0 = time.perf_counter()
-        if args.tile_width > 0 or args.tile_height > 0:
-            if args.tile_width <= 0 or args.tile_height <= 0:
-                print("ERROR: both --tile-width and --tile-height must be positive when host tiling is enabled")
-                sys.exit(1)
+        if args.host_tiling:
             pixels = request_image_tiled(fpga, center_re, center_im, args.step,
                                          args.max_iter, args.width, args.height,
                                          args.mode, args.tile_width, args.tile_height,
-                                         args.tile_retries)
+                                         args.compute_tile_width, args.compute_tile_height,
+                                         args.tile_retries, args.tile_read_timeout,
+                                         not args.no_soft_reset_on_retry)
         else:
             pixels = request_image(fpga, center_re, center_im, args.step,
                                    args.max_iter, args.width, args.height, args.mode)

@@ -28,12 +28,25 @@ module top #(
 
     // Reset generation
     reg [3:0] rst_cnt = 0;
+    wire power_on_rst;
     wire rst;
-    assign rst = (rst_cnt < 15);
+    wire soft_reset;
+    reg [7:0] soft_rst_cnt = 0;
+    assign power_on_rst = (rst_cnt < 15);
+    assign rst = power_on_rst || (soft_rst_cnt != 0);
 
     always @(posedge sys_clk) begin
         if (rst_cnt < 15)
             rst_cnt <= rst_cnt + 1;
+    end
+
+    always @(posedge sys_clk) begin
+        if (power_on_rst)
+            soft_rst_cnt <= 0;
+        else if (soft_reset)
+            soft_rst_cnt <= 8'd32;
+        else if (soft_rst_cnt != 0)
+            soft_rst_cnt <= soft_rst_cnt - 1'b1;
     end
 
     // UART signals
@@ -97,7 +110,8 @@ module top #(
         .max_iter       (cmd_max_iter),
         .rows           (cmd_rows),
         .cols           (cmd_cols),
-        .precision_mode (cmd_precision)
+        .precision_mode (cmd_precision),
+        .soft_reset     (soft_reset)
     );
 
     mandelbrot_multicore #(
@@ -133,6 +147,7 @@ module top #(
 
     queue #(.DEPTH(`CFG_OUTPUT_FIFO_DEPTH), .DATA_W(16)) u_fifo (
         .clk         (sys_clk),
+        .rst         (rst),
         .write_avail (fifo_write_avail),
         .read_avail  (fifo_rd_avail),
         .write_en    (fifo_wr_en),

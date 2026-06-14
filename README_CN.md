@@ -48,13 +48,31 @@ vivado -mode batch -source program.tcl
 
 ## 推荐 1080p 高波特率运行方式
 
-当前推荐使用 host-driven tile，将 1080p 切成 9 个 `1920x120` stripe：
+当前默认启用 host-driven tile。如果不传 `--tile-width/--tile-height`，host 自动使用全宽、120 行高的 host stripe，并默认 `--tile-retries 3`、单次 tile 接收 read timeout 为 30 秒。每个 host stripe 内部会再拆成更小的硬件 compute tile；默认 compute tile 为 `512x120`。因此某个 packet 坏掉时，重试粒度是受影响的 compute tile，而不是整个 host stripe。1080p 推荐默认形状为 `1920x120` host stripe 加 `512x120` compute tile：
 
 ```bash
-python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
+python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --compute-tile-width 512 --compute-tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
 ```
 
+`--quiet` 下现在使用单行进度条，不再刷屏。格式为：
+
+```text
+[progress] (n / total compute tile) (m / total host tile) current task
+```
+
+失败的 compute tile 会被记录坐标、drain stale UART bytes，并默认发送 soft reset 命令 `RST!RST!`，然后只重算该 compute tile。可用 `--no-soft-reset-on-retry` 关闭自动软复位，也可以手动发送：
+
+```powershell
+python python\mandelbrot_host.py --port COM6 --soft-reset
+```
+
+如需旧的单命令整帧 response，显式传 `--full-frame`。不建议在 12 Mbaud 大帧下使用该模式。
+
+如果高波特率 tile 中途丢字节，host 可能看起来暂时不动，直到当前串口 read timeout 后才进入 retry。默认 `--tile-read-timeout 30`；可以调低以更快触发 retry，也可以对特别慢的 tile 调高。
+
 原因：12 Mbaud 单个 4.15 MiB 长 burst 偶发 byte slip；host tile 给失败提供重试边界，`1920x120` 已完成六场景 30-run 稳定性测试。
+
+`4096x4096` 默认 host-tiled 路径也已做 RTL packetizer 级验证：逻辑图像拆成 35 个硬件 response，检查 262144 个 `TD` packet 和 16777216 个像素，checksum、frame boundary、tail tile 均通过。该验证覆盖当前 host tiling geometry 的 packet/count/tail 行为，但不能替代板级 USB-UART 长时间 soak。
 
 ## 当前资源和时序
 
@@ -80,6 +98,8 @@ python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-it
 | FP64 边界差异 | RTL truncation 与 Python RNE 在边界点可能不同，视觉上可接受。 |
 | 4/8ctx generic worker | 行为仿真通过，但 LUT 超量，不能在 xc7z010 部署。 |
 | 动态 owner 表 | 默认 `DYNAMIC_OWNER_DEPTH=4096`，超高帧需要重新配置。 |
+
+默认 host tile 会把逻辑大图拆成多个硬件命令，因此 4096 行限制作用于每个 tile 的高度，而不是逻辑整图高度。`--full-frame` 会恢复旧行为，此时超过 4096 行的单硬件请求仍可能 stall。
 
 ## 更多中文文档
 

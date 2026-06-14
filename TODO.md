@@ -1,235 +1,238 @@
 # TODO - Mandelbrot FPGA Accelerator
 
-This file tracks the current project status and remaining work. Historical timing, arithmetic, UART, FIFO, and large-frame bugs have been fixed; see `ARCHITECTURE.md` for implementation details.
+This file tracks current work after the default FP64, 4-worker, dynamic-row, 12 Mbaud, tiled-response design. Historical single-core, 460800/576000 baud, and large-frame bring-up work is documented in `ARCHITECTURE_EVOLUTION_REPORT.md` and related reports.
 
-## Current Stable Configuration
+## Current Default Configuration
 
-| Item | Value |
+| Item | Current Value |
 |---|---:|
-| Mode | FP64 |
+| Precision | FP64 |
 | System clock | 100 MHz |
-| Core/FP effective rate | 100 MHz (`FP_CE_DIV=1`) |
-| UART baudrate | 460800 |
-| Pixel format | `uint16` iteration count, little-endian |
-| Max iteration | 65535 |
-| Largest validated frame | 1920x1080 |
-| Default host port | `COM4` |
+| Worker count | 4 |
+| Worker contexts | 2 per worker |
+| Scheduler | Dynamic idle-core row scheduler |
+| Dynamic owner depth | 4096 rows per hardware command |
+| UART baudrate | 12000000 |
+| Response protocol | `RT` / `TD` / `TE` tiled response |
+| RTL response tile width | 64 columns |
+| Host tiling | Enabled by default |
+| Default host tile | full width, up to 120 rows |
+| Default compute tile | `512x120` inside each host tile |
+| Retry unit | One hardware compute tile |
+| Soft reset command | `RST!RST!` |
+| Default serial port | `COM6` |
 
-Latest representative timing after true-100 MHz FP pipeline cuts:
+Current default routed timing/resource snapshot:
 
 | Metric | Value |
 |---|---:|
-| WNS | 0.258 ns |
+| WNS | 0.285 ns |
 | TNS | 0.000 ns |
-| WHS | 0.015 ns |
+| WHS | 0.021 ns |
 | THS | 0.000 ns |
+| Slice LUTs | 13917 / 17600, 79.07% |
+| Slice Registers | 14458 / 35200, 41.07% |
+| DSP48E1 | 37 / 80, 46.25% |
+| Block RAM Tile | 9.5 / 60, 15.83% |
 
-## Completed
+## Completed Recently
 
-- Fixed FP64 hardware correctness issues in `fp_mul.v`, `fp_add.v`, and `mandelbrot_core.v`.
-- Added input/output/pipeline registers to improve timing closure.
-- Closed true 100 MHz FP64 core timing with `FP_CE_DIV=1` and no multicycle exceptions.
-- Added FP adder and multiplier pipeline cuts for 100 MHz operation.
-- Validated true 100 MHz core operation on board.
-- Converted UART TX to single `sys_clk` domain.
-- Updated UART baudrate to stable `460800`.
-- Tested `921600`; it builds but is not board-stable with the current UART RX.
-- Fixed FIFO read latency in `tx_ctrl.v` with `S_READ_WAIT`.
-- Fixed large-frame pixel count by explicitly widening `rows * cols` to 32-bit.
-- Validated frames larger than 65535 pixels, including 1920x1080.
-- Added software reference matching RTL integer-centered coordinate convention.
-- Added host timing output and `pixels/s` reporting.
-- Added `--timeout` host option for long 1080p/high-iteration runs.
-- Added random host/reference tests and expanded FP/core simulation coverage.
-- Added `README.md` with setup, build, usage, and diagrams.
-- Added `ARCHITECTURE.md` with detailed hardware/software architecture.
-- Created and pushed initial GitHub repository.
+- Centralized RTL defaults in `rtl/config.vh`.
+- Switched UART RX/TX to a 32-bit fractional-NCO baud generator.
+- Set current default host/RTL baudrate to 12 Mbaud.
+- Added `RT` / `TD` / `TE` tiled response framing in `rtl/tx_ctrl.v`.
+- Added host parser support for both legacy `RK` and tiled response protocols.
+- Made host-driven tiling the default and kept `--full-frame` for the old single-command path.
+- Added `--tile-read-timeout` so a byte slip fails a tile read promptly instead of waiting for the global timeout.
+- Added compute sub-tiling inside host tiles with default `512x120` retry units.
+- Added failed compute-tile coordinate logging and per-compute-tile retry.
+- Added UART soft reset command `RST!RST!` and automatic soft reset after failed compute tile attempts.
+- Added `--soft-reset` and `--no-soft-reset-on-retry` host options.
+- Added `--quiet` single-line progress display with compute-tile and host-tile counters.
+- Added synchronous reset to `queue.v` so soft reset clears output and per-core FIFOs.
+- Added `tx_ctrl` tiled response simulations for `4096x120` and host-tiled `4096x4096` behavior.
+- Added `cmd_parser` soft reset simulation.
+- Validated dynamic multicore simulation after reset changes.
+- Documented current resource/timing, 4/8-context experiments, pipeline-bubble analysis, and Chinese documentation mirrors.
 
-## P0 - Correctness And Reproducibility
+## P0 - Reliability And Correctness
 
-### Add Automated TX Controller Large-Frame Simulation
+### Board-Level Soak For Compute Sub-Tile Retry
 
-The 32-bit pixel-count fix is hardware-validated, but there is no focused simulation that proves `tx_ctrl` sends exactly `rows * cols` pixels for frames above 65535 pixels.
-
-Tasks:
-
-- Add a `tb_tx_ctrl.v` or extend `tb_core_count.v`.
-- Test at least `320x240`, `640x360`, and a small sanity case.
-- Check header, byte count, checksum, and final done pulse.
-
-### Add Repository CI-Friendly Tests
-
-Vivado may not be available in generic CI, but lightweight Python checks can still run.
+The previous 30-run 1080p stability data used host-tile retry. The current host uses `512x120` compute subtiles and automatic soft reset, so it needs fresh board-level soak data.
 
 Tasks:
 
-- Add a small Python smoke test for command packet construction/checksum.
-- Add a host/reference coordinate convention test.
-- Consider a `requirements.txt` with `pyserial` and `pillow`.
+- Re-run the six-scene 1080p stability benchmark with default compute sub-tiling.
+- Record retry count, recovered compute tile coordinates, elapsed time, and whether soft reset was used.
+- Include at least one long `4096x4096` run without `--verify`.
+- Keep failed cases in the log; do not shrink or bisect the requested image when recording failures.
 
-### Document Board Pin Assumptions More Clearly
+### Add Request IDs And Packet Sequence IDs
 
-Current `constraint.xdc` is board-specific.
-
-Tasks:
-
-- Identify the exact tested board name/model.
-- Add a short pin-mapping section in `README.md` or a `boards/` directory.
-- Optionally split constraints by board if multiple boards are used.
-
-## P1 - Performance
-
-### Improve UART Beyond 460800 Baud
-
-`921600` baud was attempted with integer bit periods 108 and 109. Both met timing but timed out on board. Current hypothesis is UART RX sampling robustness rather than core logic.
+Current recovery relies on drain-until-quiet and strict command sequencing. A valid-looking stale packet could still be accepted if it survives drain and matches dimensions.
 
 Tasks:
 
-- Implement oversampling UART RX, e.g. 8x or 16x sampling.
-- Consider a fractional baud generator for lower accumulated bit error.
-- Re-test `921600`, then try `1M` or higher if hardware allows.
-- Keep `460800` as fallback until higher baud is board-stable.
+- Add a host-generated request ID to the command and response header.
+- Add a monotonically increasing `TD` sequence number inside each response frame.
+- Include request ID and sequence ID in checksum or CRC coverage.
+- Reject stale, duplicate, skipped, or reordered packets explicitly in the host parser.
 
-### Add Multi-Core Mandelbrot Compute
+### Strengthen Checksums
 
-The FPGA has resource headroom. Current design is a single serial pixel engine.
-
-Tasks:
-
-- Prototype 2-core raster partitioning.
-- Decide row-striping versus pixel interleaving.
-- Add arbitration into the output FIFO or a per-core FIFO merge stage.
-- Re-evaluate UART bottleneck; multi-core only helps compute-bound scenes unless output bandwidth also improves.
-
-### Add Interior Rejection Fast Paths
-
-Many high-iteration images spend most time on points inside the main cardioid or period-2 bulb.
+`TD` currently has a payload-only XOR checksum. Header corruption is caught by semantic checks, but XOR is weak for multi-byte corruption.
 
 Tasks:
 
-- Add optional cardioid check.
-- Add optional period-2 bulb check.
-- Compare cost in FP hardware versus saved iterations.
-- Ensure results remain compatible with the selected reference semantics.
+- Evaluate CRC-8 or CRC-16 over `TD` header plus payload.
+- Keep RTL cost low enough for xc7z010 timing/resource headroom.
+- Preserve legacy `RK` parsing unless intentionally removed.
 
-### Explore `PIPE_WAIT` Optimization
+### Add Host Transport Unit Tests
 
-Current `PIPE_WAIT=9` is conservative and stable for the pipelined true-100 MHz datapath.
-
-Tasks:
-
-- Sweep smaller `PIPE_WAIT` values in simulation.
-- Add targeted tests around previously failing pixels.
-- Only reduce if all simulation and board verification still pass.
-
-## P2 - Precision And Deep Zoom
-
-### Validate FP128 Mode End-To-End
-
-FP128 mode exists structurally but has not received the same level of board validation as FP64.
+The host parser is now more complex and should have tests that do not require a board.
 
 Tasks:
 
+- Add tests for command packet construction and checksum.
+- Add tests for `RT` / `TD` / `TE` parsing with good packets.
+- Add tests for bad magic, short payload, bad checksum, out-of-bounds tile, stale dimensions, and retry bookkeeping.
+- Add tests for host/compute tile coordinate calculations and seam-free assembly.
+- Add tests for quiet progress formatting.
+
+## P1 - Architecture Evolution
+
+### Move From Recompute Retry To Packet Retransmission
+
+Current retry granularity is one hardware compute tile. A dropped byte in one `TD` packet recomputes the entire compute tile because the FPGA does not retain streamed packets.
+
+Tasks:
+
+- Define a bidirectional ACK/NACK response protocol.
+- Decide how many recent packets, rows, or compute tiles the FPGA can buffer.
+- Evaluate BRAM cost for packet replay versus recompute cost.
+- Keep the current simple one-way protocol as a fallback build mode.
+
+### Streaming/Tiled Image Writer For Huge Frames
+
+Host tiling protects FPGA command limits, but the Python host still stores the full final image as a Python list.
+
+Tasks:
+
+- Replace the full-frame Python list with a compact `array('H')`, `numpy`, or streaming row buffer.
+- Add tiled PNG/BMP writing or a raw `uint16` output mode.
+- Make `16384x16384` practical without requiring a giant Python-object list.
+- Treat `65536x65536` as a streaming-only target; raw pixels alone are about 8 GiB.
+
+### Better Transport Than UART
+
+12 Mbaud UART works but still has USB/driver byte-slip risk during long transfers.
+
+Tasks:
+
+- Evaluate FT245-style FIFO, SPI, Ethernet, or Zynq PS memory-mapped transport.
+- Define a transport-neutral frame layer so host parser logic can be reused.
+- Keep UART as the simplest baseline path.
+
+### Low-LUT Higher-Context Worker
+
+Generic 4/8-context workers pass behavioral simulation but exceed xc7z010 LUT capacity.
+
+Tasks:
+
+- Design a specialized 4-context worker with lower control/register overhead than the generic K-context prototype.
+- Reuse one multiplier and one adder first; do not add FP units until context count is high enough.
+- Re-run pipeline simulator and RTL simulation for 4ctx/8ctx candidates.
+- Only evaluate `1M+2A` after a high-context `1M+1A` worker is viable; avoid `2M+1A` unless the ADD bottleneck is solved.
+
+### FP128 Conservative Path
+
+FP128 exists structurally but is not the current high-performance path.
+
+Tasks:
+
+- Make FP128 builds explicitly conservative, for example static scheduling or lower context count if needed.
 - Build FP128 and record resource/timing reports.
-- Run `tb_fp.v` and `tb_core.v` under FP128 configuration.
-- Run small hardware smoke tests if timing closes.
-- Add FP128 host rendering examples.
+- Run FP128 unit/core simulations and small hardware smoke tests if timing closes.
+- Keep FP64 default performance unaffected.
 
-### Evaluate Fixed-Point Deep-Zoom Core
+## P2 - Performance And UX
 
-FP64 becomes precision-sensitive at very deep zooms. For Mandelbrot-only workloads, fixed-point may be faster and easier to scale to deep zooms.
+### Re-Tune Tile Sizes After Compute Sub-Tiling
 
-Tasks:
-
-- Pick target fractional width, e.g. Q4.60, Q4.80, or wider.
-- Estimate DSP cost and iteration latency.
-- Compare image correctness against Python high-precision reference.
-
-### Add High-Precision Software Reference
-
-Python `float` is not enough for very deep zoom verification.
+The existing tile-size matrix predates default compute sub-tiling.
 
 Tasks:
 
-- Add optional `decimal` or `mpmath` reference for selected points.
-- Keep default reference fast for normal tests.
-- Use high precision only for deep-zoom validation cases.
+- Sweep `--compute-tile-width 256/512/1024/2048` with `--tile-height 120`.
+- Compare retry cost, command overhead, and total frame time across the six standard scenes.
+- Keep `512x120` if it is the best reliability/throughput compromise; otherwise update defaults and docs.
 
-## P3 - Usability
+### Reduce Python Host Overhead
 
-### Improve Host UX
-
-Tasks:
-
-- Add preset names for known zoom points.
-- Add progress reporting based on elapsed time and received bytes.
-- Add output metadata sidecar JSON with parameters and timing.
-- Add graceful serial retry/resync after timeout.
-
-### Add Image Palette Options
-
-Current palette is simple periodic coloring.
+The parser already uses bulk `struct.unpack`, but host overhead matters more as compute tiles get smaller.
 
 Tasks:
 
-- Add smooth coloring option if fractional escape estimates are implemented.
-- Add multiple named palettes.
-- Save parameters into PNG metadata if practical.
+- Profile receive, unpack, slice assignment, and PNG rendering paths.
+- Consider `array('H')`, `memoryview`, or `numpy` for the final buffer.
+- Avoid restoring duplicate bitmap checks on the hot path unless debugging.
 
-### Add GUI Or Notebook Demo
+### Improve Render Output Options
 
 Tasks:
 
-- Simple GUI for center/step/max_iter selection.
-- Notebook showing benchmark commands and resulting images.
-- Optional click-to-zoom workflow.
+- Add named palettes.
+- Add metadata sidecar JSON with command parameters, timing, retry counts, and bitstream defaults.
+- Add optional raw `uint16` output for later post-processing.
+- Add preset scenes for common zoom points.
 
-## Known Limits
+## Verification Commands To Run After Major Changes
 
-| Limitation | Impact |
-|---|---|
-| Single compute core | High-iteration 1080p renders can take minutes to hours. |
-| UART transport | Fast scenes are capped near 23000 pixels/s at 460800 baud. |
-| FP64 precision | Very deep zooms below roughly `1e-12` to `1e-14` step become precision-sensitive. |
-| Max iteration is 16-bit | Maximum `max_iter` is 65535. |
-| Full IEEE-754 not implemented | NaN/Inf/denormal/full rounding behavior is not supported. |
-| FP128 not fully validated | FP64 is the current stable target. |
-
-## Useful Benchmarks To Re-Run After Major Changes
-
-Small correctness:
+Host syntax and parser smoke:
 
 ```bash
-python python\test_esc.py
+python -m py_compile python\mandelbrot_host.py
+python python\mandelbrot_host.py --help
+```
+
+Core RTL regressions:
+
+```bash
+vivado -mode batch -source sim_multicore_dynamic.tcl
+vivado -mode batch -source sim_tx_ctrl_tiled.tcl
+vivado -mode batch -source sim_tx_ctrl_host_tiled_4096.tcl
+vivado -mode batch -source sim_cmd_parser_soft_reset.tcl
+```
+
+Small board smoke:
+
+```bash
 python python\mandelbrot_host.py --verify --width 160 --height 120 --max-iter 256 --output python\verify_160x120.png
 ```
 
-Large-frame path:
+Recommended 1080p transport smoke:
 
 ```bash
-python python\mandelbrot_host.py --verify --width 320 --height 240 --max-iter 128 --center 1.0 1.0 --step 0.005 --timeout 300 --output python\verify_320x240_fast.png
+python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --tile-width 1920 --tile-height 120 --compute-tile-width 512 --compute-tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_transport_smoke.png
 ```
 
-UART-limited 1080p:
+Large logical image smoke, no software verification:
 
 ```bash
-python python\mandelbrot_host.py --width 1920 --height 1080 --max-iter 64 --center -0.5 0.0 --step 0.002 --timeout 1200 --output python\hw_1080p_standard.png
-```
-
-Compute-heavy deep zoom:
-
-```bash
-python python\mandelbrot_host.py --width 160 --height 90 --max-iter 16384 --center -0.743643887037151 0.13182590420533 --step 0.00000001 --timeout 2400 --output python\deep_seahorse_160x90.png
+python python\mandelbrot_host.py --port COM6 --width 4096 --height 4096 --max-iter 8192 --center -0.743643887037151 0.13182590420533 --step 1.2e-09 --timeout 3600 --quiet --output python\hw_4096x4096_smoke.png
 ```
 
 ## Release Checklist
 
-- Run `sim_fp.tcl`.
-- Run `sim_core.tcl`.
+- Run host syntax and `--help` checks.
+- Run dynamic multicore simulation.
+- Run `tx_ctrl` tiled simulations, including host-tiled `4096x4096`.
+- Run soft reset parser simulation.
 - Build FP64 bitstream.
 - Confirm routed timing has no setup/hold violations.
-- Program board.
-- Run `python/test_esc.py`.
+- Program the board.
 - Run one verified small image.
-- Run one large-frame smoke test.
-- Update README/ARCHITECTURE if interfaces, baudrate, pins, or timing assumptions changed.
+- Run one 1080p quiet transport smoke.
+- If transport/tile defaults changed, update `README.md`, `README_CN.md`, `ARCHITECTURE.md`, `ARCHITECTURE_CN.md`, `TODO.md`, and `TODO_CN.md` together.

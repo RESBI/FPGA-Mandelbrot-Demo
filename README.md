@@ -548,12 +548,28 @@ sequenceDiagram
 
 ### Current Recommended Mode: Host-Tiled 12 Mbaud
 
-The current reliable high-baud operating mode is host-driven tiling at 12000000 baud. The host splits a 1080p frame into retryable stripes and requests each stripe separately. The recommended 1080p setting is `--tile-width 1920 --tile-height 120 --tile-retries 3 --quiet`, which produces nine 1920x120 compute tiles per frame.
+The current reliable high-baud operating mode is host-driven tiling at 12000000 baud, and the host now enables it by default. If no tile arguments are supplied, the host selects full-width host stripes with a default height of 120 rows, `--tile-retries 3`, and a per-read tile receive timeout of 30 seconds. Each host stripe is internally split into smaller hardware compute tiles; the default compute tile is `512x120`. A bad packet therefore retries only the affected compute tile instead of the whole host stripe. The recommended 1080p setting is automatic for a 1920-wide image: `--tile-width 1920 --tile-height 120 --compute-tile-width 512 --compute-tile-height 120 --tile-retries 3 --quiet`.
 
 Example:
 
 ```bash
-python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
+python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --compute-tile-width 512 --compute-tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
+```
+
+Use `--full-frame` only when you intentionally want the older single-command full-frame response path for regression or controlled single-burst experiments.
+
+If a high-baud tile loses bytes, the host may appear idle until the current serial read times out. The default tiled path uses `--tile-read-timeout 30`; lower it for faster retry detection or raise it for very slow/deep tiles.
+
+With `--quiet`, the host now keeps a single-line progress display instead of printing every tile. The format is:
+
+```text
+[progress] (n / total compute tile) (m / total host tile) current task
+```
+
+On each failed compute tile attempt, the host drains stale UART bytes and sends a soft reset command (`RST!RST!`) unless `--no-soft-reset-on-retry` is set. The reset clears the FPGA command parser, compute engine, output FIFOs, and transmit controller, then the host recomputes only the failed compute tile. You can also issue a reset manually:
+
+```powershell
+python python\mandelbrot_host.py --port COM6 --soft-reset
 ```
 
 Repeated 1080p host-tiled stability results at 12 Mbaud:
@@ -569,7 +585,9 @@ Repeated 1080p host-tiled stability results at 12 Mbaud:
 
 `Transport pass` means the host process completed and received a full 1920x1080 frame. Exact HW/SW pixel equality is reported separately in `python/host_tile_stability_bench/host_tile_stability_results.md` because deep zoom scenes have known FP64 boundary differences. The first test pass lost the USB serial device after 23 completed frame runs; after reconnecting `COM6`, the failed/open-port logs were rerun with `--resume`, completing the full 30-run sweep.
 
-The two retry events above were recovered by recomputing the affected 1920x120 host tile. This confirms the practical value of host-driven tiling: an occasional packet checksum mismatch no longer loses the entire 1080p frame. The tradeoff is a small overhead on UART-bound scenes, while compute-bound scenes remain essentially unchanged. Without retry events, measured FPGA-time variation was effectively zero across five runs.
+The two retry events above were recovered by recomputing the affected 1920x120 host tile in the earlier host-tile-only flow. The current host further splits host tiles into smaller compute tiles, so a checksum mismatch typically recomputes only one compute subtile such as `512x120`. The tradeoff is more commands per frame, while compute-bound scenes remain essentially unchanged. Without retry events, measured FPGA-time variation was effectively zero across five runs.
+
+The 4096x4096 default host-tiled path was also checked at RTL packetizer level. The simulation splits the logical image into 35 hardware responses, verifies 262144 `TD` packets and 16777216 pixels, and passes checksum and frame-boundary checks. This validates packet/count/tail behavior for the current host tiling geometry; it does not replace board-level USB-UART soak testing.
 
 ### Host Tile Size Comparison
 
@@ -689,7 +707,7 @@ The default bitstream uses dynamic row scheduling with `DYNAMIC_OWNER_DEPTH=4096
 
 and then stall when raster collection reaches an unrecorded row. That frame is also impractical over UART: `65535 * 65535 * 2` pixel bytes takes roughly 2 hours at 12 Mbaud, before rendering or software verification.
 
-Use a smaller frame, rebuild with a larger dynamic owner table, or use a compatible static/streaming design. The host now rejects these requests by default; `--force-large-frame` only bypasses the guard and should be used only when the programmed bitstream actually supports the requested dimensions.
+Use host tiling, a smaller frame, rebuild with a larger dynamic owner table, or use a compatible static/streaming design. The host now uses tiled requests by default, so the 4096-row owner-depth limit applies to each hardware tile command rather than the logical full image. `--full-frame` restores the older single-command path, where a frame taller than 4096 rows can still stall unless the bitstream is rebuilt. `--force-large-frame` only bypasses host-side guards and should be used only when the programmed bitstream and host memory can support the request.
 
 ### Software Verification Is Slow
 

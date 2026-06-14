@@ -1,7 +1,10 @@
 `timescale 1ns / 1ps
 `include "config.vh"
 
-module tx_ctrl (
+module tx_ctrl #(
+    parameter RESPONSE_TILE_COLS = `CFG_RESPONSE_TILE_COLS,
+    parameter RESPONSE_TILE_GAP_CYCLES = `CFG_RESPONSE_TILE_GAP_CYCLES
+) (
     input  wire         clk,
     input  wire         rst,
     input  wire         start,
@@ -34,8 +37,6 @@ module tx_ctrl (
     localparam S_TILE_GAP       = 5'd13;
     localparam S_END_BYTE       = 5'd14;
     localparam S_END_ACK        = 5'd15;
-    localparam [15:0] RESPONSE_TILE_COLS = `CFG_RESPONSE_TILE_COLS;
-
     reg [4:0]  state = S_IDLE;
     reg [2:0]  frame_hdr_idx;
     reg [3:0]  tile_hdr_idx;
@@ -222,7 +223,7 @@ module tx_ctrl (
                 end
 
                 S_TILE_GAP: begin
-                    if (gap_count < `CFG_RESPONSE_TILE_GAP_CYCLES) begin
+                    if (gap_count < RESPONSE_TILE_GAP_CYCLES) begin
                         gap_count <= gap_count + 1;
                     end else if (tile_col_start + tile_cols >= cols) begin
                         if (row_idx + 1 >= rows) begin
