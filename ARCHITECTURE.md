@@ -757,7 +757,18 @@ Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.m
 
 ## 10. TX Controller And Large-Frame Support
 
-`tx_ctrl.v` drains pixels from the FIFO and serializes the response. The host still supports the original monolithic response format, but the current RTL response path is packetized into tiles so that the host can detect byte slips earlier and resynchronize between packets.
+`tx_ctrl.v` drains pixels from the output FIFO and serializes the host response. The original design emitted one monolithic `RK` frame per command. That was simple and efficient at lower baudrates, but at 12 Mbaud a full `1920x1080` frame is about `4.15 MiB` of uninterrupted UART payload. Early 12 Mbaud testing showed that such long bursts can occasionally lose bytes near the tail of the transfer. With only one final checksum, a single dropped byte invalidates the entire frame and leaves the host waiting for the declared payload length until timeout.
+
+The current design keeps the same compute command format and raster-ordered pixel stream, but wraps the response in a lightweight tile protocol. The protocol has two layers:
+
+| Layer | Implemented In | Function |
+|---|---|---|
+| RTL response tiling | `rtl/tx_ctrl.v` | Splits the response stream into framed `TD` packets with coordinates and per-packet checksums. |
+| Host-driven compute tiling | `python/mandelbrot_host.py` | Splits a large image into retryable compute requests and stitches returned subframes. |
+
+The RTL layer detects and localizes byte slips. The host-driven layer provides recovery by recomputing only the failed host tile.
+
+### 10.1 Response Formats
 
 Supported response formats:
 
@@ -768,11 +779,32 @@ Supported response formats:
 | Tiled data packet | `TD` | Carries one rectangular pixel tile with row/column coordinates. | One XOR byte over the tile payload. |
 | Tiled frame end | `TE` | Marks completion of the frame dimensions. | Magic/dimensions checked by host. |
 
+Legacy response layout:
+
+```text
+RK rows(u16) cols(u16) payload checksum
+```
+
+Tiled response frame layout:
+
+```text
+RT rows(u16) cols(u16)
+TD row(u16) col(u16) tile_rows(u16) tile_cols(u16) payload checksum
+TD ...
+TE rows(u16) cols(u16)
+```
+
+All multi-byte fields are little-endian. `row` and `col` in a `TD` packet are relative to the current response frame, not the original full image when host-driven tiling is active. For a host tile request of `1920x120`, the response frame dimensions are `1920x120`, and packet coordinates range inside that tile response.
+
 Tiled data packet layout:
 
 ```text
 TD row_lo row_hi col_lo col_hi tile_rows_lo tile_rows_hi tile_cols_lo tile_cols_hi payload checksum
 ```
+
+The `TD` checksum is payload-only. Header fields are protected by semantic checks on the host side: magic bytes, frame dimensions, row/column bounds, expected payload length, and final frame completion. This keeps the RTL packetizer small and avoids a full bidirectional transport protocol in the FPGA.
+
+### 10.2 RTL Tile Generation
 
 The current source defaults are:
 
@@ -781,9 +813,84 @@ The current source defaults are:
 | `CFG_RESPONSE_TILE_COLS` | `64` | Maximum RTL response packet width. |
 | `CFG_RESPONSE_TILE_GAP_CYCLES` | `1000` | Inter-packet idle gap at 100 MHz, about 10 us. |
 
-The packet checksum is payload-only; the host validates packet magic, frame dimensions, row/column bounds, payload length, and checksum. This is intentionally minimal and keeps the RTL small. It does not yet provide sequence IDs or packet-level retransmission from the FPGA.
+`CFG_RESPONSE_TILE_COLS` controls the width of each RTL `TD` packet. The packet height is determined by the stream position and remaining pixels; in the current implementation packets advance through the response in raster order and do not reorder pixels. The output FIFO still supplies one 16-bit pixel at a time, so the packetizer is a wrapper around the same low-byte/high-byte UART serialization used by the legacy response.
+
+The RTL response tile is not the same thing as a host compute tile:
+
+| Concept | Controlled By | Example | Purpose |
+|---|---|---|---|
+| RTL response tile | `CFG_RESPONSE_TILE_COLS` in `rtl/config.vh` | `64` columns | Adds packet boundaries and checksums inside one FPGA response. |
+| Host compute tile | `--tile-width`, `--tile-height` | `1920x120` | Creates retryable compute requests for a large image. |
+
+A single host compute tile can therefore produce many RTL `TD` packets. For example, a `1920x120` host tile with `CFG_RESPONSE_TILE_COLS=64` produces many 64-column response packets inside one response frame.
+
+`CFG_RESPONSE_TILE_GAP_CYCLES` inserts a small idle gap between response packets. This gives the host/USB serial stack short scheduling windows without adding a large throughput penalty. The current default of `1000` cycles is about 10 us at 100 MHz.
+
+### 10.3 Reliability Boundary
+
+Packetized response framing by itself detects checksum errors earlier, but it does not let the FPGA retransmit one packet. During response streaming the protocol is still effectively one-way: the host is receiving and the FPGA is transmitting. If a `TD` packet checksum fails, the host cannot ask the current `tx_ctrl` instance to resend only that packet.
+
+Recovery therefore happens at the host compute-tile boundary. The host discards the failed subframe, drains stale serial bytes until the link is quiet, resets the input buffer, and sends the same compute tile command again. This recovers from byte slips while keeping RTL complexity low.
+
+Current limitations:
+
+| Missing Feature | Effect |
+|---|---|
+| No packet sequence ID | The host detects bad framing/checksum but cannot explicitly report missing packet numbers. |
+| No request ID | Late bytes from an old failed request are handled by drain/quiet timing, not by an explicit ID check. |
+| No FPGA-side retransmission | A failed packet requires recomputing the whole host tile. |
+| Payload-only checksum | Header corruption is caught by semantic checks, not by a header CRC. |
+
+These are deliberate tradeoffs for the current UART implementation. The design gives practical recovery at 12 Mbaud without converting the FPGA UART path into a full reliable transport stack.
+
+### 10.4 Host-Driven Tile Geometry
 
 Host-driven tiling builds reliability above this packetized response format. Instead of requesting a full 1920x1080 frame in one command, the host sends multiple smaller compute commands and stitches the returned subframes into the final image. If a subframe fails checksum or framing, the host drains the serial stream and retries that compute tile. The recommended 1080p shape is `1920x120`, producing nine retryable stripes per frame.
+
+Tile center calculation preserves the same integer-center coordinate convention as the full-frame renderer. For a full image with center `(center_re, center_im)`, pixel step `step`, full dimensions `width x height`, and a host tile at `(x0, y0)` with dimensions `tw x th`, the host computes:
+
+```python
+full_half_w = (width - 1) >> 1
+full_half_h = (height - 1) >> 1
+tile_half_w = (tw - 1) >> 1
+tile_half_h = (th - 1) >> 1
+tile_center_re = center_re + (x0 + tile_half_w - full_half_w) * step
+tile_center_im = center_im + (full_half_h - (y0 + tile_half_h)) * step
+```
+
+This makes each tile command generate exactly the same pixel coordinates as the corresponding rectangle in a monolithic full-frame command. After receiving a tile response, the host copies each returned row into the final image buffer:
+
+```python
+dst = (y0 + dy) * width + x0
+pixels[dst:dst + tw] = tile_pixels[src:src + tw]
+```
+
+The FPGA is intentionally unaware of the full-frame assembly. It only receives ordinary Mandelbrot commands for smaller rectangles.
+
+### 10.5 Tile Size Tradeoffs
+
+Tile size is a tradeoff between recovery granularity and fixed overhead:
+
+| Tile Shape | Host Tiles Per 1080p Frame | Behavior |
+|---:|---:|---|
+| `80x60` | 432 | Fine retry granularity, but Python/serial/protocol overhead dominates. |
+| `320x120` | 54 | Much lower overhead, but still many commands; useful as a recovery stress point. |
+| `960x120` | 18 | High-throughput range with moderate retry unit. |
+| `1920x120` | 9 | Current recommended default; strong 30-run stability data. |
+| `1920x240` | 5 | Fastest one-run matrix result, but larger retry unit and less repeat data. |
+
+The one-run tile-size matrix across the six standard 1080p scenes produced:
+
+| Scene | `80x60` | `320x120` | `960x120` | `1920x120` | `1920x240` |
+|---|---:|---:|---:|---:|---:|
+| Fast escape @128 | `13.433s` | `6.992s` | `5.597s` | `4.845s` | `4.759s` |
+| Standard @64 | `12.977s` | `6.491s` | `4.641s` | `5.450s` | `4.355s` |
+| Seahorse zoom @512 | `24.975s` | `18.605s` | `17.231s` | `17.085s` | `16.951s` |
+| Deep tendrils @8192 | `40.828s` | `33.966s` | `33.355s` | `37.524s` | `33.077s` |
+| Deep mini-brot @8192 | `91.297s` | `84.214s` | `83.505s` | `83.280s` | `83.179s` |
+| Deep Seahorse @1024 | `44.215s` | `37.236s` | `36.534s` | `36.340s` | `36.243s` |
+
+The matrix confirms the expected regimes. Small tiles are dominated by command count and host overhead. Large horizontal stripes approach single-burst performance while preserving a retry boundary. Compute-bound scenes are less sensitive to tile size because worker latency dominates; UART-bound scenes benefit most from larger tiles.
 
 The response size is based on:
 
