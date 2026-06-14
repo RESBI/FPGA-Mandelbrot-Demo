@@ -22,6 +22,8 @@ Current validated capabilities:
 | Pixel count path | 32-bit, validated above 65535 pixels |
 | Largest validated image | 1920x1080 |
 | Stable mode used in testing | FP64 |
+| Current routed timing | `WNS=0.285ns`, `TNS=0.000ns`, `WHS=0.021ns`, `THS=0.000ns` |
+| Current placed utilization | `13917` LUTs, `14458` registers, `37` DSP48E1, `9.5` BRAM tiles |
 
 ## 2. Top-Level Architecture
 
@@ -60,6 +62,7 @@ The main modules are:
 | `work_dispatch_static_rows` | `rtl/work_dispatch_static_rows.v` | Static regression scheduler. Assigns interleaved rows to workers. |
 | `work_dispatch_dynamic_rows` | `rtl/work_dispatch_dynamic_rows.v` | Default scheduler. Assigns one full row at a time to an available worker and records row ownership. |
 | `mandelbrot_core_worker_2ctx` | `rtl/mandelbrot_core_worker_2ctx.v` | Default two-context row worker. Interleaves two pixel contexts over one FP64 multiplier and one FP64 adder. |
+| `mandelbrot_core_worker_kctx` | `rtl/mandelbrot_core_worker_kctx.v` | Experimental parameterized 4/8-context worker used for feasibility synthesis only; not a deployable xc7z010 default. |
 | `mandelbrot_core_worker` | `rtl/mandelbrot_core_worker.v` | Stable single-context row worker used by static regression builds. |
 | `raster_merge_static_rows` | `rtl/raster_merge_static_rows.v` | Static-mode merger. Restores per-worker row streams to strict row-major output order. |
 | `raster_collect_dynamic_rows` | `rtl/raster_collect_dynamic_rows.v` | Default dynamic result collector. Uses the row-owner table to drain dynamically assigned rows in raster order. |
@@ -147,9 +150,9 @@ Current routed timing after dynamic scheduling and 2-context worker integration:
 
 | Metric | Value |
 |---|---:|
-| WNS | 0.091 ns |
+| WNS | 0.285 ns |
 | TNS | 0.000 ns |
-| WHS | 0.011 ns |
+| WHS | 0.021 ns |
 | THS | 0.000 ns |
 
 ## 5. Floating-Point Format
@@ -1140,22 +1143,24 @@ The higher UART rate changes which subsystem is visible. Fast escape and standar
 
 ## 14. Resource Use
 
-Latest representative default dynamic + 2-context FP64 placed utilization:
+Latest representative default dynamic + 2-context FP64 placed utilization for the current 12 Mbaud tiled-response build:
 
 | Resource | Used | Device | Utilization |
 |---|---:|---:|---:|
-| Slice LUTs | 13630 | 17600 | 77.44% |
-| Slice Registers | 14391 | 35200 | 40.88% |
-| DSP48E1 | 38 | 80 | 47.50% |
+| Slice LUTs | 13917 | 17600 | 79.07% |
+| LUT as Logic | 13641 | 17600 | 77.51% |
+| LUT as Memory | 276 | 6000 | 4.60% |
+| Slice Registers | 14458 | 35200 | 41.07% |
+| DSP48E1 | 37 | 80 | 46.25% |
 | Block RAM Tile | 9.5 | 60 | 15.83% |
 
-Latest routed timing after dynamic + 2-context integration:
+Latest routed timing for the current default build:
 
 | Build | Scheduler | Worker contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|
-| `build_fp64.tcl` | Dynamic idle-core rows | 2 | 0.091 ns | 0.000 ns | 0.011 ns | 0.000 ns |
+| `build_fp64.tcl` | Dynamic idle-core rows + tiled response | 2 | 0.285 ns | 0.000 ns | 0.021 ns | 0.000 ns |
 
-The design is now LUT-dense but still has DSP headroom. Many practical scenes are limited by UART bandwidth. More worker contexts or more FP units only help the most compute-bound views unless the output link improves.
+The design is now LUT-dense but still has DSP headroom. Historical resource and timing points are kept in `ARCHITECTURE_EVOLUTION_REPORT.md`; this section is reserved for the current default bitstream. Many practical scenes are limited by UART bandwidth or host/protocol overhead. More worker contexts or more FP units only help the most compute-bound views unless the output path also improves.
 
 ## 15. Known Limitations
 
@@ -1164,6 +1169,7 @@ The design is now LUT-dense but still has DSP headroom. Many practical scenes ar
 | Static 4-core scheduler | Regression mode. Interleaved rows balance many views, but strict raster ordering can still wait on a slower row. |
 | Dynamic row scheduler | Default mode. Reclaims row-level tail imbalance while preserving strict raster output. It gates row reuse on an empty per-core FIFO to avoid UART-backpressure deadlock. |
 | Two-context worker | Hides only part of FP latency. More contexts are needed to approach full `1M+1A` issue saturation. |
+| Generic 4/8-context worker experiment | Behavioral simulation passes, but the generic context-array implementation overuses LUTs on xc7z010 and is not a deployable bitstream. See `PIPELINE_BUBBLE_ANALYSIS.md`. |
 | UART output | 12 Mbaud raises the payload ceiling to about 600000 pixels/s, but long multi-megabyte bursts can still show occasional host/FT232HL receive instability without packet-level retransmission. |
 | FP64 precision | Very deep zooms below approximately `1e-12` to `1e-14` pixel step become precision-sensitive. |
 | FP units are IEEE-like, not full IEEE-754 | No full NaN/Inf/denormal/rounding support. |

@@ -1,7 +1,9 @@
 `timescale 1ns / 1ps
 `include "fp_defines.vh"
 
-module tb_multicore_dynamic();
+module tb_multicore_dynamic #(
+    parameter WORKER_CONTEXTS = 2
+) ();
 
     reg clk = 0;
     reg rst = 1;
@@ -29,7 +31,8 @@ module tb_multicore_dynamic();
         .CORE_COUNT(4),
         .CORE_FIFO_DEPTH(128),
         .SCHED_MODE(1),
-        .DYNAMIC_OWNER_DEPTH(64)
+        .DYNAMIC_OWNER_DEPTH(64),
+        .WORKER_CONTEXTS(WORKER_CONTEXTS)
     ) u_dut (
         .clk(clk),
         .rst(rst),
@@ -143,6 +146,12 @@ module tb_multicore_dynamic();
         end
 
         $display("=== DYNAMIC MULTICORE TEST PASS: %0d pixels ===", pix);
+        $finish;
+    end
+
+    initial begin
+        repeat (2000000) @(posedge clk);
+        $display("=== DYNAMIC MULTICORE TEST TIMEOUT: pix=%0d expected=%0d ===", pix, rows * cols);
         $finish;
     end
 

@@ -32,8 +32,8 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Host protocol | Unchanged raster-order response stream |
 | Pixel format | 16-bit little-endian iteration count |
 | Largest validated frame | 1920x1080 |
-| Final routed timing | `WNS=0.091ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
-| Final placed DSP use | 38 / 80 DSP48E1, 47.50% |
+| Current routed timing | `WNS=0.285ns`, `TNS=0.000ns`, `WHS=0.021ns`, `THS=0.000ns` |
+| Current placed utilization | 13917 / 17600 Slice LUTs, 14458 / 35200 registers, 37 / 80 DSP48E1, 9.5 / 60 BRAM tiles |
 
 ## Initial Architecture Design Thinking
 
@@ -449,6 +449,19 @@ The implemented 2-context worker required three correctness details:
 
 The dynamic scheduler also needed a backpressure rule: only assign a new row to a core when that core's FIFO is empty. Without this, a fast compute scene could fill a core FIFO with future rows while the raster collector waited for an earlier row from that same core, deadlocking under UART backpressure.
 
+Historical routed timing and placed utilization for this integration point, before the later 12 Mbaud tiled-response controller changes:
+
+| Metric | Value |
+|---|---:|
+| WNS | `0.091ns` |
+| TNS | `0.000ns` |
+| WHS | `0.011ns` |
+| THS | `0.000ns` |
+| Slice LUTs | `13630 / 17600` (`77.44%`) |
+| Slice Registers | `14391 / 35200` (`40.88%`) |
+| DSP48E1 | `38 / 80` (`47.50%`) |
+| Block RAM Tile | `9.5 / 60` (`15.83%`) |
+
 ### Fractional UART At 12 Mbaud
 
 The final transport step replaced integer `CLOCKS_PER_BIT` timing with a fractional baud accumulator shared by the UART RX and TX designs. The compatibility parameter remains, but bit ticks now come from:
@@ -495,6 +508,21 @@ flowchart TB
 ```
 
 The selected operating point is `--tile-width 1920 --tile-height 120 --tile-retries 3 --quiet`. Smaller `80x60` tiles were reliable but slow because 1080p required 432 commands and thousands of small packet reads. Larger horizontal stripes reduce the command count to nine while retaining a recovery boundary much smaller than a full frame.
+
+Current routed timing and placed utilization after the 12 Mbaud tiled-response build:
+
+| Metric | Value |
+|---|---:|
+| WNS | `0.285ns` |
+| TNS | `0.000ns` |
+| WHS | `0.021ns` |
+| THS | `0.000ns` |
+| Slice LUTs | `13917 / 17600` (`79.07%`) |
+| LUT as Logic | `13641 / 17600` (`77.51%`) |
+| LUT as Memory | `276 / 6000` (`4.60%`) |
+| Slice Registers | `14458 / 35200` (`41.07%`) |
+| DSP48E1 | `37 / 80` (`46.25%`) |
+| Block RAM Tile | `9.5 / 60` (`15.83%`) |
 
 Repeated 12 Mbaud host-tiled stability results:
 

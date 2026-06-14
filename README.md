@@ -29,6 +29,8 @@ Current validated default configuration:
 | Pixel format | `uint16` iteration count, little-endian |
 | Maximum iteration count | 65535 |
 | Largest validated frame | 1920x1080 |
+| Current routed timing | `WNS=0.285ns`, `TNS=0.000ns`, `WHS=0.021ns`, `THS=0.000ns` |
+| Current placed utilization | `13917` LUTs, `14458` registers, `37` DSP48E1, `9.5` BRAM tiles |
 
 ## Repository Layout
 
@@ -168,6 +170,7 @@ Worker implementation is selected by the `WORKER_CONTEXTS` generic:
 |---:|---|---|
 | `1` | `mandelbrot_core_worker` | Single-context regression worker. |
 | `2` | `mandelbrot_core_worker_2ctx` | Default worker. Interleaves two pixels over one shared multiplier and one shared adder. |
+| `4` or `8` | `mandelbrot_core_worker_kctx` | Experimental simulation/synthesis path only. Behavioral simulation passes, but the generic implementation exceeds xc7z010 LUT capacity and does not produce a deployable bitstream. |
 
 ## Mandelbrot Core Pipeline
 
@@ -635,16 +638,20 @@ Current default 100 MHz FP64 routed timing is signed off with no core multicycle
 
 | Build | Scheduler | Worker contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|
-| `build_fp64.tcl` | Dynamic idle-core rows | 2 | `0.091ns` | `0.000ns` | `0.011ns` | `0.000ns` |
+| `build_fp64.tcl` | Dynamic idle-core rows + tiled response | 2 | `0.285ns` | `0.000ns` | `0.021ns` | `0.000ns` |
 
 Latest placed utilization for the default build:
 
 | Resource | Used | Device | Utilization |
 |---|---:|---:|---:|
-| Slice LUTs | 13630 | 17600 | 77.44% |
-| Slice Registers | 14391 | 35200 | 40.88% |
-| DSP48E1 | 38 | 80 | 47.50% |
+| Slice LUTs | 13917 | 17600 | 79.07% |
+| LUT as Logic | 13641 | 17600 | 77.51% |
+| LUT as Memory | 276 | 6000 | 4.60% |
+| Slice Registers | 14458 | 35200 | 41.07% |
+| DSP48E1 | 37 | 80 | 46.25% |
 | Block RAM Tile | 9.5 | 60 | 15.83% |
+
+Historical resource/timing points from earlier architecture stages are tracked in [ARCHITECTURE_EVOLUTION_REPORT.md](ARCHITECTURE_EVOLUTION_REPORT.md); this table is reserved for the current default bitstream.
 
 ## Troubleshooting
 

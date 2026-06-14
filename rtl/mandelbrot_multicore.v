@@ -110,6 +110,26 @@ module mandelbrot_multicore #(
                     .fifo_wr      (core_fifo_wr[i]),
                     .fifo_full    (core_fifo_full[i])
                 );
+            end else if (WORKER_CONTEXTS == 4 || WORKER_CONTEXTS == 8) begin : g_worker_kctx
+                mandelbrot_core_worker_kctx #(.CONTEXTS(WORKER_CONTEXTS)) u_worker (
+                    .clk          (clk),
+                    .rst          (rst),
+                    .ce           (ce),
+                    .start        (core_start[i]),
+                    .busy         (core_busy[i]),
+                    .done         (core_done[i]),
+                    .center_re_in (center_re_in),
+                    .center_im_in (center_im_in),
+                    .step_in      (step_in),
+                    .max_iter_in  (max_iter_in),
+                    .rows_in      (rows_in),
+                    .cols_in      (cols_in),
+                    .row_start_in (row_start_bus[i*16 +: 16]),
+                    .row_stride_in(row_stride_bus[i*16 +: 16]),
+                    .fifo_data    (core_fifo_wdata[i*16 +: 16]),
+                    .fifo_wr      (core_fifo_wr[i]),
+                    .fifo_full    (core_fifo_full[i])
+                );
             end else begin : g_worker_1ctx
                 mandelbrot_core_worker u_worker (
                     .clk          (clk),

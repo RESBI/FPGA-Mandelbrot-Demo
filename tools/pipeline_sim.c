@@ -487,10 +487,22 @@ static uint64_t estimate_row_cycles_fast(const options_t *opt, const int *iters,
         if (iters[i] < opt->max_iter) escape_pixels++;
     }
 
+    // Each launched pixel also consumes one add issue to advance c_re_next in
+    // the current RTL worker. For deep scenes this is negligible, but for
+    // fast-escape scenes it is part of the real adder pressure.
+    uint64_t coord_add_issues = (uint64_t)pixels;
+
     uint64_t mul_issues = full_iters * 3u + escape_pixels * 3u;
-    uint64_t add_issues = full_iters * 5u + escape_pixels;
-    uint64_t latency_sum = full_iters * (uint64_t)(3 * opt->mul_lat + 4 * opt->add_lat) +
-                           escape_pixels * (uint64_t)(opt->mul_lat * 3 > opt->add_lat ? opt->mul_lat * 3 : opt->add_lat);
+    uint64_t add_issues = full_iters * 5u + escape_pixels + coord_add_issues;
+
+    // Current tagged worker stage latency with MUL_LAT/ADD_LAT:
+    // full iteration: zrsq M, zisq M, mag A parallel with zrzi M, then
+    // sub_re A, next_re A, 2x A, next_im A.
+    // escape iteration: zrsq M, zisq M, mag A parallel with zrzi M.
+    int parallel_mag_zrzi = opt->mul_lat > opt->add_lat ? opt->mul_lat : opt->add_lat;
+    uint64_t full_iter_latency = (uint64_t)(2 * opt->mul_lat + parallel_mag_zrzi + 4 * opt->add_lat);
+    uint64_t escape_iter_latency = (uint64_t)(2 * opt->mul_lat + parallel_mag_zrzi);
+    uint64_t latency_sum = full_iters * full_iter_latency + escape_pixels * escape_iter_latency;
 
     double by_context = (double)latency_sum / (double)opt->contexts;
     double by_mul = (double)mul_issues / (double)opt->multipliers;
@@ -568,10 +580,18 @@ static void run_sweep(const options_t *base, const int *frame_iters, uint64_t it
     static const sweep_case_t cases[] = {
         {1, 1, 1, "1ctx 1M+1A"},
         {2, 1, 1, "2ctx 1M+1A"},
+        {2, 2, 1, "2ctx 1M+2A"},
+        {2, 1, 2, "2ctx 2M+1A"},
         {4, 1, 1, "4ctx 1M+1A"},
+        {4, 2, 1, "4ctx 1M+2A"},
+        {4, 1, 2, "4ctx 2M+1A"},
         {8, 1, 1, "8ctx 1M+1A"},
+        {8, 2, 1, "8ctx 1M+2A"},
+        {8, 2, 2, "8ctx 2M+2A"},
         {16, 1, 1, "16ctx 1M+1A"},
         {16, 2, 1, "16ctx 1M+2A"},
+        {16, 1, 2, "16ctx 2M+1A"},
+        {16, 2, 2, "16ctx 2M+2A"},
         {24, 2, 2, "24ctx 2M+2A"},
         {32, 3, 2, "32ctx 2M+3A"},
         {48, 5, 3, "48ctx 3M+5A"},

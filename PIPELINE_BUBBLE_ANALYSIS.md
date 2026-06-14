@@ -2,7 +2,7 @@
 
 This report analyzes the bubble situation in the current Mandelbrot compute worker, explores multi-context in-worker scheduling, discusses tagged out-of-order pixel completion and reorder before commit, compares different `fp_mul`/`fp_add` allocations per worker, and estimates theoretical compute and whole-system performance benefits.
 
-The short version: the current worker leaves most FP pipeline issue slots empty. The most efficient way to recover those bubbles is not simply adding more top-level workers. It is to keep several pixel contexts active inside each worker, tag FP results by context, allow pixel contexts to complete out of order, and reorder them before committing to the existing row/raster stream. However, with the current 576000 baud UART output path, most visible whole-system gains are capped unless transport/protocol bandwidth is also improved.
+The short version: the current two-context worker already proves the tagged multi-context architecture, but it still leaves most FP pipeline issue slots empty. Re-running the model with the current RTL latencies, `MUL_LAT=6` and `ADD_LAT=7`, shows that adding more ADD or MUL units is not useful at low context counts. The next compute gain should come from increasing contexts first. A second ADD becomes useful around 16 contexts, while a second MUL without more ADD capacity still gives essentially no gain. With the current 12 Mbaud UART path, fast scenes are output-bound; deeper compute-bound scenes would benefit most from more contexts and later from a second ADD.
 
 ## Current Context
 
@@ -14,16 +14,20 @@ Current implemented accelerator:
 | System clock | 100 MHz |
 | Worker count | 4 |
 | FP clock enable | `FP_CE_DIV=1` |
-| Worker FP wait | `PIPE_WAIT=10` |
-| Effective result latency used by FSM | `PIPE_WAIT + 1 ~= 11 cycles` |
+| Default worker | `mandelbrot_core_worker_2ctx` |
+| Worker contexts | 2 |
+| Tagged multiplier latency | `MUL_LAT=6` |
+| Tagged adder latency | `ADD_LAT=7` |
+| Legacy single-context wait | `PIPE_WAIT=10` |
 | Per worker FP units | 1 multiplier + 1 adder |
-| UART | 576000 baud |
-| UART pixel ceiling | `28800 pixels/s` |
-| Output protocol | strict raster-order 16-bit pixels |
+| UART | 12000000 baud fractional NCO |
+| UART payload ceiling | about `600000 pixels/s` |
+| Reliable output mode | host-driven `1920x120` tiled stripes |
+| Output protocol | raster-order pixels inside retryable tiled responses |
 
-The current design is latency scheduled, not throughput scheduled. Each worker issues an FP operation, waits `PIPE_WAIT` cycles, consumes the result, and then issues the next dependent operation. The FP units are internally pipelined, but the worker FSM normally feeds a given unit only once every 11 cycles.
+The legacy single-context worker is latency scheduled: it issues an FP operation, waits `PIPE_WAIT` cycles, consumes the result, and then issues the next dependent operation. The current default two-context worker is tagged and can issue back-to-back FP operations when another context is ready. It no longer uses `PIPE_WAIT=10` for result routing; it uses the actual tagged latencies `MUL_LAT=6` and `ADD_LAT=7`.
 
-## Current Per-Iteration Schedule
+## Legacy Single-Context Per-Iteration Schedule
 
 For a non-escaping Mandelbrot iteration, one worker performs these FP operations:
 
@@ -37,7 +41,7 @@ For a non-escaping Mandelbrot iteration, one worker performs these FP operations
 | 6 | none | `z_re_z_im + z_re_z_im` | 10 | Double cross product. |
 | 7 | none | `2*z_re*z_im + c_im` | 10 | Next imaginary part. |
 
-Useful first-order estimate:
+Useful first-order estimate for the legacy single-context path:
 
 ```text
 cycles_per_non_escape_iteration ~= 7 * (PIPE_WAIT + 1)
@@ -67,9 +71,9 @@ Adder:       ........... ........... A.......... A.......... A.......... A......
 
 The core bubble problem is therefore not that the FP pipelines are too slow to accept work. It is that a single pixel context does not have enough independent work to feed them while waiting for dependent results.
 
-## Current FP Issue Utilization
+## Legacy Single-Context FP Issue Utilization
 
-Assuming 77 cycles per non-escaping iteration:
+Assuming the legacy 77-cycle wait-scheduled non-escaping iteration:
 
 | Unit | Useful issues per iteration | Available issue cycles | Approximate issue utilization |
 |---|---:|---:|---:|
@@ -77,7 +81,31 @@ Assuming 77 cycles per non-escaping iteration:
 | Adder | 5 | 77 | `6.5%` |
 | Combined FP issue slots | 8 | 154 | `5.2%` |
 
-This is why adding pipeline stages to close timing was still beneficial, but the resulting FP pipelines remain heavily underfed.
+This is why adding pipeline stages to close timing was still beneficial, but a latency-scheduled single-context worker leaves the resulting FP pipelines heavily underfed.
+
+## Current Tagged Worker Timing Model
+
+The implemented two-context worker changes the timing model. It keeps one multiplier and one adder per worker, but it does not wait `PIPE_WAIT + 1` cycles before issuing work from another context. Instead, every issued FP operation carries a destination tag through a real latency-matched delay line:
+
+| Unit | Current tag latency | Notes |
+|---|---:|---|
+| `fp_mul` | `MUL_LAT=6` | Back-to-back multiplier issue latency observed from the worker issue point. |
+| `fp_add` | `ADD_LAT=7` | Back-to-back adder issue latency observed from the worker issue point. |
+
+The current per-iteration dependency chain is therefore better represented as:
+
+```text
+full iteration latency ~= 2*MUL_LAT + max(MUL_LAT, ADD_LAT) + 4*ADD_LAT
+                       ~= 2*6 + max(6, 7) + 4*7
+                       ~= 47 cycles per context without interleaving
+
+escape iteration latency ~= 2*MUL_LAT + max(MUL_LAT, ADD_LAT)
+                         ~= 19 cycles per context without interleaving
+```
+
+The `max(MUL_LAT, ADD_LAT)` term is the current `mag` adder and `zrzi` multiplier overlap after `z_re_sq` and `z_im_sq` are available. The model also accounts for one coordinate adder issue per launched pixel to advance `c_re_next`; this matters most in fast-escape scenes where per-pixel iteration work is small.
+
+This current model replaces the old all-stages-use-11-cycles approximation for forward-looking context and FP-unit planning. The old approximation remains useful only for explaining the original single-context FSM and the legacy Python 2-context prototype.
 
 ## Dependency Graph And Lower Bounds
 
@@ -94,11 +122,11 @@ z_re,z_im
                        +--> z_re_sq - z_im_sq --> next_re
 ```
 
-With enough FP units for one pixel, the minimum latency for one iteration is roughly three FP result latencies:
+With enough FP units for one pixel, the dependency graph is shorter than the legacy seven-wait FSM. In the current tagged latency model, the relevant dependency chain is:
 
 ```text
-single-context dependency latency ~= 3 * (PIPE_WAIT + 1)
-                                  ~= 33 cycles
+single-context full-iteration dependency latency ~= 47 cycles
+single-context escape-check dependency latency   ~= 19 cycles
 ```
 
 That is still latency, not throughput. Throughput is limited by how many FP operations can be issued per cycle across many independent pixel contexts.
@@ -109,50 +137,79 @@ For a worker with `M` multipliers and `A` adders, the ideal issue-limited cycles
 T_issue = max(3 / M, 5 / A) cycles/iteration
 ```
 
-This assumes enough independent pixel contexts exist to hide the roughly 33-cycle dependency latency.
+This assumes enough independent pixel contexts exist to hide the current dependency latency and enough ready work exists to feed each FP unit.
 
 ## How Many Pixels Can Be In Flight Inside One Worker?
 
 ### Rule Of Thumb
 
-With `PIPE_WAIT=10`, one result stream needs about 11 independent contexts to hide one operation latency. More generally, for a fully scheduled multi-context worker:
+With the current tagged RTL latencies, the longest single-context full-iteration dependency chain is about 47 cycles, while the ideal issue limit for one multiplier and one adder remains 5 cycles per non-escaping iteration because the adder must accept 5 operations. More generally, for a fully scheduled multi-context worker:
 
 ```text
-minimum_contexts ~= ceil(single_context_dependency_latency / T_issue)
-                 ~= ceil(33 / T_issue)
+minimum_contexts ~= ceil(current_full_iteration_latency / T_issue)
+                 ~= ceil(47 / T_issue)
 ```
 
 Practical designs need extra contexts for branch divergence, context refill/drain, output backpressure, row transitions, and phase conflicts.
 
 | Worker FP units | Ideal `T_issue` | Mathematical minimum contexts | Practical context range |
 |---|---:|---:|---:|
-| 1 mul + 1 add | 5.00 cycles/iter | 7 | 8 to 16 |
-| 1 mul + 2 add | 3.00 cycles/iter | 11 | 12 to 20 |
-| 2 mul + 1 add | 5.00 cycles/iter | 7 | 8 to 16 |
-| 2 mul + 2 add | 2.50 cycles/iter | 14 | 16 to 24 |
-| 2 mul + 3 add | 1.67 cycles/iter | 20 | 24 to 32 |
-| 3 mul + 5 add | 1.00 cycles/iter | 33 | 40+ |
+| 1 mul + 1 add | 5.00 cycles/iter | 10 | 12 to 16 |
+| 1 mul + 2 add | 3.00 cycles/iter | 16 | 16 to 24 |
+| 2 mul + 1 add | 5.00 cycles/iter | 10 | 12 to 16 |
+| 2 mul + 2 add | 2.50 cycles/iter | 19 | 20 to 32 |
+| 2 mul + 3 add | 1.67 cycles/iter | 29 | 32+ |
+| 3 mul + 5 add | 1.00 cycles/iter | 47 | 48+ |
 
 ### Context Count Versus Throughput For 1 Mul + 1 Add
 
-For the existing one-multiplier/one-adder worker, a simple utilization model is:
+For the existing one-multiplier/one-adder worker, a simple non-escaping iteration model is:
 
 ```text
-cycles_per_iteration ~= max(77 / contexts, 5)
+cycles_per_iteration ~= max(47 / contexts, 5)
 ```
 
 The `5` comes from the adder bottleneck: one adder must issue 5 operations per iteration.
 
 | Contexts per worker | Approx cycles/iter | Ideal speedup vs current worker | Assessment |
 |---:|---:|---:|---|
-| 1 | 77.0 | 1.0x | Current design. |
-| 2 | 38.5 | 2.0x | Good simulation milestone. |
-| 4 | 19.3 | 4.0x | Significant, still simple enough to debug. |
-| 8 | 9.6 | 8.0x | Starts hiding most latency. |
-| 12 | 6.4 | 12.0x | Near useful saturation. |
-| 16 | 5.0 | 15.4x | Near ideal for 1 mul + 1 add. |
+| 1 | 47.0 | 1.0x | Current dependency chain without interleaving; legacy FSM is slower because it uses conservative waits. |
+| 2 | 23.5 | 2.0x | Implemented proof point; still far below issue saturation. |
+| 4 | 11.8 | 4.0x | Significant, still mostly context-limited. |
+| 8 | 5.9 | 8.0x | Starts approaching the 1M+1A issue limit. |
+| 12 | 5.0 | 9.4x | Near useful saturation. |
+| 16 | 5.0 | 9.4x | Extra contexts mainly absorb divergence, refill/drain, and ordered-commit stalls. |
 
-In practice, 8 to 16 contexts is the likely useful range for the current FP-unit allocation. Below 8 contexts, many pipeline bubbles remain. Above 16 contexts, the one-adder issue limit dominates and extra contexts mostly add control complexity.
+In practice, 8 to 16 contexts is still the useful range for the current FP-unit allocation. Below 8 contexts, many pipeline bubbles remain. Above 16 contexts, the one-adder issue limit dominates and extra contexts mostly add control complexity unless they are needed to tolerate divergence and ordered-commit stalls.
+
+## 4/8-Context RTL Deployment Attempt
+
+After the model indicated that more contexts should be tried before adding more FP units, an experimental parameterized `1M+1A` worker was implemented as `mandelbrot_core_worker_kctx` and selected from `mandelbrot_multicore` when `WORKER_CONTEXTS` is explicitly set to 4 or 8. The existing 2-context worker remains the default deployable path.
+
+The experiment result is important: the generic K-context RTL is functionally plausible but not deployable on the current xc7z010 target. The behavioral simulation passes, but the synthesized design is far over the available LUT budget before placement.
+
+| Configuration | Behavioral dynamic multicore sim | Synthesized Slice LUTs | LUT-as-logic | Slice registers | DSPs | Placement result |
+|---|---:|---:|---:|---:|---:|---|
+| 2ctx current deployed worker | Existing board baseline | `13917 / 17600` (`79.07%`) | `13641 / 17600` (`77.51%`) | `14458 / 35200` (`41.07%`) | `37 / 80` (`46.25%`) | Bitstream available, timing clean |
+| 4ctx generic K-context worker | PASS, 192 pixels, `445045 ns` sim time | `37350 / 17600` (`212.22%`) | `36562 / 17600` (`207.74%`) | `19046 / 35200` (`54.11%`) | `37 / 80` (`46.25%`) | FAIL, LUT over-utilized |
+| 8ctx generic K-context worker | PASS, 192 pixels, `364705 ns` sim time | `71462 / 17600` (`406.03%`) | `70674 / 17600` (`401.56%`) | `29378 / 35200` (`83.46%`) | `37 / 80` (`46.25%`) | FAIL, LUT over-utilized |
+
+Because neither 4ctx nor 8ctx generated a placeable bitstream, no small-image board gate or 1080p five-run scene benchmark could be run for these configurations. The correct comparison table is therefore not a performance table; it is a feasibility table. The 2ctx data remains the only valid measured board baseline.
+
+The failure is not caused by DSP or BRAM pressure. DSP usage remains about the same because the experiment still uses one multiplier per worker. The blocker is control and routing logic: generic arrays of FP64 context state create wide operand muxes, result writeback muxes, inflight scans, and modulo context arbitration. Vivado maps those structures into a very large amount of LUT logic, and the xc7z010 has only 17600 Slice LUTs.
+
+The practical conclusion is that simply parameterizing the 2ctx scoreboard style into arbitrary `CONTEXTS=N` is the wrong deployable RTL shape for this small device. More contexts are still the right compute direction according to the model, but the implementation must be much more area-conscious.
+
+Recommended next RTL direction:
+
+| Direction | Reason |
+|---|---|
+| Keep `2ctx 1M+1A` as the deployable default | It is the only currently placeable and board-tested high-baud configuration. |
+| Do not deploy the generic K-context worker on xc7z010 | 4ctx already requires over 2x available LUTs; 8ctx requires over 4x. |
+| Redesign 4ctx as an explicit low-LUT worker if more hardware testing is desired | Avoid generic variable indexing on FP64 arrays, wide muxes, and modulo arbitration. |
+| Prefer a ring/slot pipeline over full scoreboard scans | A fixed issue order can trade some scheduling freedom for much lower mux and comparator cost. |
+| Consider reducing `CORE_COUNT` while testing high-context workers | A single-core or two-core high-context build can validate compute scheduling before committing four copies. |
+| Do not add `1M+2A` until a high-context low-LUT worker exists | Extra ADD capacity is modeled as useful only after much higher context occupancy. |
 
 ## Required Context State
 
@@ -251,21 +308,38 @@ The current worker has 1 multiplier and 1 adder. A non-escaping iteration needs 
 ideal_cycles_per_iteration = max(3 / mul_count, 5 / add_count)
 ```
 
-Theoretical per-worker compute speedup versus the current 77-cycle latency-scheduled worker:
+Theoretical per-worker compute speedup versus the current tagged 47-cycle dependency chain, assuming enough contexts to reach the issue limit:
 
 | Per-worker units | Ideal cycles/iter | Ideal worker speedup | Bottleneck | Notes |
 |---|---:|---:|---|---|
-| 1 mul + 1 add | 5.00 | 15.4x | adder | Best first de-bubbling target. No extra DSPs. |
-| 1 mul + 2 add | 3.00 | 25.7x | multiplier | Good if adders are cheap enough and contexts >= 12. |
-| 1 mul + 3 add | 3.00 | 25.7x | multiplier | No gain over 2 adders with one multiplier. |
-| 2 mul + 1 add | 5.00 | 15.4x | adder | Extra multiplier gives no ideal throughput gain. |
-| 2 mul + 2 add | 2.50 | 30.8x | adder | Strong but DSP-heavy. |
-| 2 mul + 3 add | 1.67 | 46.2x | mixed | Very aggressive; needs many contexts. |
-| 3 mul + 5 add | 1.00 | 77.0x | balanced issue | Theoretical limit, impractical on this device. |
+| 1 mul + 1 add | 5.00 | 9.4x | adder | Best first de-bubbling target. No extra DSPs. |
+| 1 mul + 2 add | 3.00 | 15.7x | multiplier | Useful only after enough contexts exist. |
+| 1 mul + 3 add | 3.00 | 15.7x | multiplier | No gain over 2 adders with one multiplier. |
+| 2 mul + 1 add | 5.00 | 9.4x | adder | Extra multiplier gives no ideal throughput gain. |
+| 2 mul + 2 add | 2.50 | 18.8x | adder | Strong but DSP-heavy and context-hungry. |
+| 2 mul + 3 add | 1.67 | 28.2x | mixed | Very aggressive; needs many contexts. |
+| 3 mul + 5 add | 1.00 | 47.0x | balanced issue | Theoretical limit, impractical on this device. |
 
 ### Resource Consequences
 
-The current 4-worker FP64 design uses 38 DSP48E1 blocks. The practical planning model is still about 9 DSPs per FP64 multiplier-heavy worker plus shared overhead.
+The current 4-worker FP64 design uses 37 DSP48E1 blocks in the latest 12 Mbaud tiled-response build. The practical planning model is still about 9 DSPs per FP64 multiplier-heavy worker plus shared overhead.
+
+Current deployable placed utilization:
+
+| Resource | Used | Device | Utilization |
+|---|---:|---:|---:|
+| Slice LUTs | 13917 | 17600 | 79.07% |
+| LUT as Logic | 13641 | 17600 | 77.51% |
+| LUT as Memory | 276 | 6000 | 4.60% |
+| Slice Registers | 14458 | 35200 | 41.07% |
+| DSP48E1 | 37 | 80 | 46.25% |
+| Block RAM Tile | 9.5 | 60 | 15.83% |
+
+Current deployable routed timing:
+
+| WNS | TNS | WHS | THS |
+|---:|---:|---:|---:|
+| `0.285ns` | `0.000ns` | `0.021ns` | `0.000ns` |
 
 Additional FP64 multipliers are expensive. Additional FP64 adders mainly consume LUTs/registers and routing.
 
@@ -273,28 +347,28 @@ Approximate DSP scaling for four workers:
 
 | Per-worker multipliers | Estimated DSP48E1 use | Feasibility on 80 DSP device |
 |---:|---:|---|
-| 1 | 38 | Current, comfortable. |
-| 2 | about 74 | Possible but high routing/timing risk. |
+| 1 | 37 | Current, comfortable on DSPs but LUT-dense overall. |
+| 2 | about 73 | Possible by DSP count but high routing/timing risk. |
 | 3 | about 110 | Not feasible on Zynq-7010. |
 
-This makes `1 mul + 1 add` multi-context interleaving the most attractive first architecture. `1 mul + 2 add` may be a second step because it avoids extra DSP pressure. `2 mul + 2 add` is only attractive after transport bandwidth is improved and if timing still closes.
+This makes deeper `1 mul + 1 add` multi-context interleaving the most attractive first architecture. `1 mul + 2 add` may be a second step because it avoids extra DSP pressure, but the updated model shows it does not help at 2, 4, or 8 contexts because context latency is still the limiter. `2 mul + 1 add` is especially unattractive because the adder remains the issue bottleneck. `2 mul + 2 add` is only attractive after enough contexts exist, transport bandwidth is improved, and timing still closes.
 
 ## Architecture Options Compared
 
 | Option | Contexts | FP units per worker | Ideal compute gain per worker | Resource risk | Verification risk | Current UART-visible gain |
 |---|---:|---|---:|---|---|---|
-| Current worker | 1 | 1M + 1A | 1.0x | low | low | current |
-| 2-context prototype | 2 | 1M + 1A | 2.0x | low | medium | limited |
-| 4-context prototype | 4 | 1M + 1A | 4.0x | low-medium | medium | limited except mini-brot |
-| 8-context worker | 8 | 1M + 1A | about 8.0x | medium | high | capped by UART for most scenes |
-| 16-context worker | 16 | 1M + 1A | up to 15.4x | medium-high | high | capped by UART except very compute-heavy scenes |
-| 12 to 20 contexts | 1M + 2A | up to 25.7x | high LUT/routing | very high | mostly capped by UART |
-| 16 to 24 contexts | 2M + 2A | up to 30.8x | high DSP/routing | very high | mostly capped by UART |
-| 24+ contexts | 2M + 3A | up to 46.2x | very high | very high | not useful before transport upgrade |
+| Legacy single-context worker | 1 | 1M + 1A | 1.0x | low | low | historical regression path |
+| Current 2-context worker | 2 | 1M + 1A | 2.0x model, already implemented | low | proven | visible mostly on compute-heavy scenes |
+| 4-context worker | 4 | 1M + 1A | 4.0x model | low-medium | medium | useful next compute step |
+| 8-context worker | 8 | 1M + 1A | about 8.0x model | medium | high | near 1M+1A saturation start |
+| 16-context worker | 16 | 1M + 1A | about 9.4x model | medium-high | high | saturates one adder; extra contexts absorb stalls |
+| 16 contexts | 1M + 2A | about 15.6x model | high LUT/routing | very high | first point where second ADD pays off clearly |
+| 16 contexts | 2M + 1A | same as 16ctx 1M+1A | high DSP/routing | high | not useful; adder bottleneck remains |
+| 24+ contexts | 2M + 2A | about 18.8x+ model | high DSP/routing | very high | only after bandwidth and timing headroom are proven |
 
-## Whole-System Performance Model At 576000 Baud
+## Historical Whole-System Model At 576000 Baud
 
-With current UART:
+With the historical 576000 baud UART:
 
 ```text
 new_pps = min(current_pps * compute_speedup, 28800)
@@ -311,7 +385,24 @@ This cap dominates many scenes. Even an ideal de-bubbled worker cannot exceed th
 | Deep mini-brot @8192 | 8852.78 pps | 28800 pps | 3.25x |
 | Deep seahorse @1024 | 20600.46 pps | 28800 pps | 1.40x |
 
-This is why current UART suppresses most benefits from compute de-bubbling. Deep mini-brot remains the one measured scene with large visible headroom.
+This is why the old UART path suppressed most benefits from compute de-bubbling. Deep mini-brot was the one measured scene with large visible headroom at that stage.
+
+## Whole-System Performance Model At 12 Mbaud
+
+The current default transport is no longer 576000 baud. The 12 Mbaud fractional-NCO UART has a raw payload ceiling around `600000 pixels/s`, and the reliable host-tiled mode uses `1920x120` stripes. That changes which scenes can expose compute improvements:
+
+| Scene | 12M host-tiled measured pps | Current 2ctx compute model pps | Board / compute model | Current main limiter |
+|---|---:|---:|---:|---|
+| Fast escape @128 | `428068.64` | `1142933` | `37.5%` | Output/host protocol overhead. |
+| Standard @64 | `466030.04` | `1061531` | `43.9%` | Output/host protocol overhead. |
+| Seahorse zoom @512 | `118207.86` | `152317` | `77.6%` | Mixed compute and output. |
+| Deep tendrils @8192 | `61080.26` | `73858` | `82.7%` | Mostly compute. |
+| Deep mini-brot @8192 | `24898.89` | `29476` | `84.5%` | Compute-bound. |
+| Deep Seahorse @1024 | `57056.36` | `69102` | `82.6%` | Mostly compute. |
+
+At 12 Mbaud, compute work is visible again for the deep scenes. The model is intentionally compute-only and therefore should sit above board measurements, which still include row scheduling, FIFO/raster ordering, UART output, host parsing, and tile retry overhead. The 80-85% board/model ratio on deep scenes is a useful calibration point for future context-count projections.
+
+For fast escape and standard views, the board is still output/host limited even at 12 Mbaud. More contexts or more FP units will not move those scenes much unless the transport/protocol path also improves.
 
 ## Implemented 2-Context RTL Results
 
@@ -344,14 +435,16 @@ Using `11/11` tag delays allowed simulations to finish but produced repeatable b
 | 32x24 dynamic 2ctx simulation, `step=0.02`, `max_iter=64` | `768/768` matched. |
 | 64x48 dynamic 2ctx stress simulation | `3072` pixels, `1317934` cycles. |
 | Static 1ctx regression simulation | Passed. |
-| Routed timing | `WNS=0.091ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns`. |
-| Placed utilization | 13630 LUTs, 14391 registers, 38 DSP48E1, 9.5 BRAM tiles. |
+| Historical routed timing after initial 2ctx integration | `WNS=0.091ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns`. |
+| Historical placed utilization after initial 2ctx integration | 13630 LUTs, 14391 registers, 38 DSP48E1, 9.5 BRAM tiles. |
+| Current routed timing after 12M tiled-response build | `WNS=0.285ns`, `TNS=0.000ns`, `WHS=0.021ns`, `THS=0.000ns`. |
+| Current placed utilization after 12M tiled-response build | 13917 LUTs, 14458 registers, 37 DSP48E1, 9.5 BRAM tiles. |
 | Board 32x24 verify | `768/768` matched. |
 | Board 160x120 verify | `19200/19200` matched. |
 
-### Measured 1080p Performance
+### Historical 576k 1080p Performance
 
-All measurements use 576000 baud UART, 1920x1080 frames, FP64, four workers, dynamic rows, and two contexts per worker.
+These measurements use the earlier 576000 baud UART path, 1920x1080 frames, FP64, four workers, dynamic rows, and two contexts per worker. They remain useful for showing the original 2-context board impact, but they are no longer the current transport configuration.
 
 | Scene | 4-core 1ctx 576k | 4-core 2ctx 576k | 2ctx throughput | Measured speedup | UART ceiling use |
 |---|---:|---:|---:|---:|---:|
@@ -362,7 +455,7 @@ All measurements use 576000 baud UART, 1920x1080 frames, FP64, four workers, dyn
 | Deep mini-brot @8192 | `234.231s` | `83.708s` | `24771.84 pps` | `2.798x` | `86.0%` |
 | Deep seahorse @1024 | `100.658s` | `72.776s` | `28493.04 pps` | `1.383x` | `98.9%` |
 
-### Theory Versus Measurement
+### Historical 576k Theory Versus Measurement
 
 The local 2-context model predicted up to `2x` worker-level speedup for balanced adjacent-pixel traces and much less for pathological ordered-commit traces. The full-system measurement must additionally pass through the UART cap:
 
@@ -379,7 +472,7 @@ That explains the measured table:
 | Deep tendrils and deep seahorse | Had 30-40% visible UART headroom; 2ctx fills it and reaches the UART ceiling. |
 | Deep mini-brot | Still compute-bound after 2ctx, so it shows the largest speedup, `2.80x`. |
 
-The `2.80x` whole-system speedup on mini-brot is larger than the simple 2-context local model's balanced `2x` because the implemented worker is not just alternating two complete old FSMs. It also issues independent multiplier and adder operations through tagged pipelines with shorter true FPU latencies (`6/7`) than the old conservative single-context wait model (`11`). It still does not approach the ideal `15.4x` for a fully saturated `1M+1A` worker because two contexts are far below the 8-16 contexts needed to hide most dependency latency.
+The `2.80x` whole-system speedup on mini-brot is larger than the simple legacy 2-context local model's balanced `2x` because the implemented worker is not just alternating two complete old FSMs. It also issues independent multiplier and adder operations through tagged pipelines with shorter true FPU latencies (`6/7`) than the old conservative single-context wait model (`11`). It still does not approach the updated `1M+1A` saturation target because two contexts are far below the 8-16 contexts needed to hide most dependency latency.
 
 ## Generic C Pipeline Simulator
 
@@ -426,29 +519,32 @@ Validation checks already run:
 |---|---|
 | Built with `gcc -O3 -std=c11 -Wall -Wextra` | Clean after removing the local binary from version control. |
 | `tools\pipeline_sim.exe --self-test` | Passed known point checks such as `(2.5,0) -> 1` and `(0,0) -> max_iter`. |
-| 32x24 exact model, `2ctx 1M+1A`, `MUL_LAT=6`, `ADD_LAT=7` | `768` pixels, average iteration `61.605469`, `1124348` compute cycles. |
-| 32x24 fast model, same scene/config | `1088955` compute cycles, within about `3.1%` of exact for this small frame. |
+| 32x24 exact model, `2ctx 1M+1A`, `MUL_LAT=6`, `ADD_LAT=7` | `768` pixels, average iteration `61.605469`, `282276` compute cycles. |
+| 32x24 fast model, same scene/config | `278388` compute cycles, within about `1.4%` of exact for this small frame. |
 | Legacy latency cross-check, `MUL_LAT=11`, `ADD_LAT=11` | C exact model gives `1842020` cycles versus Python model `1827819` cycles for 32x24 2ctx; close enough for scheduler-level modeling, with differences from the generalized issue arbitration. |
 
-The simulator intentionally reports `compute_pps` without applying the UART ceiling. This lets the model expose FPGA-side compute throughput that is otherwise hidden by the current 576000 baud output link.
+The simulator intentionally reports `compute_pps` without applying the UART ceiling. This lets the model expose FPGA-side compute throughput that can be hidden by the output link or host protocol.
 
 ## C Simulator Predictions For Architecture Options
 
-All rows below use the fast aggregate model, four workers, 100 MHz, dynamic row scheduling, `MUL_LAT=6`, `ADD_LAT=7`, and no UART cap. These are compute-side predictions, not end-to-end UART throughput.
+All rows below use the updated fast aggregate model, four workers, 100 MHz, dynamic row scheduling, `MUL_LAT=6`, `ADD_LAT=7`, and no UART cap. These are compute-side predictions, not end-to-end UART throughput. The model now accounts for the current tagged worker stage latency, overlapped `mag`/`zrzi`, and one coordinate add issue per launched pixel.
 
 ### Standard And Fast Scenes
 
 | Worker architecture | Fast escape @128 | Standard @64 | Seahorse zoom @512 |
 |---|---:|---:|---:|
-| `1ctx 1M+1A` | `584357 pps` | `542667 pps` | `77823 pps` |
-| `2ctx 1M+1A` | `1168700 pps` | `1085321 pps` | `155645 pps` |
-| `4ctx 1M+1A` | `2337330 pps` | `2170582 pps` | `311289 pps` |
-| `8ctx 1M+1A` | `4674297 pps` | `4340850 pps` | `622572 pps` |
-| `16ctx 1M+1A` | `5438297 pps` | `5040573 pps` | `717116 pps` |
+| `1ctx 1M+1A` | `571474 pps` | `530772 pps` | `76159 pps` |
+| `2ctx 1M+1A` | `1142934 pps` | `1061531 pps` | `152317 pps` |
+| `2ctx 1M+2A` | `1142934 pps` | `1061531 pps` | `152317 pps` |
+| `2ctx 2M+1A` | `1142934 pps` | `1061531 pps` | `152317 pps` |
+| `4ctx 1M+1A` | `2285801 pps` | `2123005 pps` | `304633 pps` |
+| `8ctx 1M+1A` | `4571255 pps` | `4245710 pps` | `609259 pps` |
+| `16ctx 1M+1A` | `5365351 pps` | `4977671 pps` | `715832 pps` |
 | `16ctx 1M+2A` | `8637619 pps` | `8069140 pps` | `1187095 pps` |
-| `24ctx 2M+2A` | `10873088 pps` | `10078126 pps` | `1434171 pps` |
-| `32ctx 2M+3A` | `15986164 pps` | `15033418 pps` | `2151132 pps` |
-| `48ctx 3M+5A` | `25868054 pps` | `24168190 pps` | `3560438 pps` |
+| `16ctx 2M+1A` | `5365351 pps` | `4977671 pps` | `715832 pps` |
+| `16ctx 2M+2A` | `9140474 pps` | `8489660 pps` | `1218482 pps` |
+| `24ctx 2M+2A` | `10727289 pps` | `9952399 pps` | `1431604 pps` |
+| `32ctx 2M+3A` | `15895215 pps` | `14890110 pps` | `2147283 pps` |
 
 Fast scenes have low average iteration counts, so their compute-only pps is already very high. On the actual board they are completely UART-bound long before these compute limits matter.
 
@@ -456,45 +552,76 @@ Fast scenes have low average iteration counts, so their compute-only pps is alre
 
 | Worker architecture | Deep tendrils @8192 | Deep mini-brot @8192 | Deep seahorse @1024 |
 |---|---:|---:|---:|
-| `1ctx 1M+1A` | `37734 pps` | `15059 pps` | `35304 pps` |
-| `2ctx 1M+1A` | `75468 pps` | `30117 pps` | `70608 pps` |
-| `4ctx 1M+1A` | `150936 pps` | `60234 pps` | `141216 pps` |
-| `8ctx 1M+1A` | `301870 pps` | `120468 pps` | `282431 pps` |
-| `16ctx 1M+1A` | `347437 pps` | `138584 pps` | `325037 pps` |
+| `1ctx 1M+1A` | `36929 pps` | `14738 pps` | `34551 pps` |
+| `2ctx 1M+1A` | `73858 pps` | `29476 pps` | `69102 pps` |
+| `2ctx 1M+2A` | `73858 pps` | `29476 pps` | `69102 pps` |
+| `2ctx 2M+1A` | `73858 pps` | `29476 pps` | `69102 pps` |
+| `4ctx 1M+1A` | `147716 pps` | `58951 pps` | `138205 pps` |
+| `8ctx 1M+1A` | `295431 pps` | `117902 pps` | `276408 pps` |
+| `16ctx 1M+1A` | `347136 pps` | `138536 pps` | `324773 pps` |
 | `16ctx 1M+2A` | `577052 pps` | `230653 pps` | `540038 pps` |
-| `24ctx 2M+2A` | `694860 pps` | `277165 pps` | `650061 pps` |
-| `32ctx 2M+3A` | `1042261 pps` | `415743 pps` | `975067 pps` |
-| `48ctx 3M+5A` | `1730956 pps` | `691926 pps` | `1619938 pps` |
+| `16ctx 2M+1A` | `347136 pps` | `138536 pps` | `324773 pps` |
+| `16ctx 2M+2A` | `590853 pps` | `235803 pps` | `552809 pps` |
+| `24ctx 2M+2A` | `694257 pps` | `277069 pps` | `649534 pps` |
+| `32ctx 2M+3A` | `1041357 pps` | `415599 pps` | `974275 pps` |
 
-The deep mini-brot scene is the useful compute-bound reference. The current implemented `2ctx 1M+1A` model predicts about `30117 pps` compute-side throughput, while the measured board throughput is `24771.84 pps`. That is close enough to confirm the scale of the model and leaves plausible room for RTL overhead, dynamic row/FIFO effects, ordered commit stalls, and UART still consuming about 14% of the theoretical `28800 pps` link.
+The deep mini-brot scene is the useful compute-bound reference. The current implemented `2ctx 1M+1A` model predicts about `29476 pps` compute-side throughput. The measured 12M host-tiled board throughput is `24898.89 pps`, about `84.5%` of the compute-only model. That is close enough to confirm the scale of the model and leaves plausible room for RTL overhead, dynamic row/FIFO effects, ordered commit stalls, UART output, host parsing, and tile framing.
 
 ### Prediction Versus Current Board Measurements
 
-This table compares the compute-only C model for the current implemented architecture, `2ctx 1M+1A`, against measured 1080p board throughput. The board numbers include UART output, so they are expected to be far below compute-only predictions once a scene reaches the link ceiling.
+This table compares the compute-only C model for the current implemented architecture, `2ctx 1M+1A`, against measured 12M host-tiled 1080p board throughput. The board numbers include UART output, packet framing, host parsing, row scheduling, FIFO/raster ordering, and occasional tile retry overhead.
 
-| Scene | C model compute pps, `2ctx 1M+1A` | Measured board pps | Board / model | Main limiter in measurement |
+| Scene | C model compute pps, `2ctx 1M+1A` | 12M host-tiled board pps | Board / model | Main limiter in measurement |
 |---|---:|---:|---:|---|
-| Fast escape @128 | `1168700` | `28514.74` | `2.4%` | UART ceiling. |
-| Standard @64 | `1085321` | `28514.28` | `2.6%` | UART ceiling. |
-| Seahorse zoom @512 | `155645` | `28487.54` | `18.3%` | Mostly UART ceiling. |
-| Deep tendrils @8192 | `75468` | `28491.11` | `37.8%` | UART ceiling after 2ctx. |
-| Deep mini-brot @8192 | `30117` | `24771.84` | `82.3%` | Still partly compute-bound. |
-| Deep seahorse @1024 | `70608` | `28493.04` | `40.4%` | UART ceiling after 2ctx. |
+| Fast escape @128 | `1142934` | `428068.64` | `37.5%` | Output/host path. |
+| Standard @64 | `1061531` | `466030.04` | `43.9%` | Output/host path. |
+| Seahorse zoom @512 | `152317` | `118207.86` | `77.6%` | Mixed compute/output. |
+| Deep tendrils @8192 | `73858` | `61080.26` | `82.7%` | Mostly compute. |
+| Deep mini-brot @8192 | `29476` | `24898.89` | `84.5%` | Compute-bound. |
+| Deep seahorse @1024 | `69102` | `57056.36` | `82.6%` | Mostly compute. |
 
-The comparison gives the intended answer that the UART hides most compute improvements. If the output link were upgraded, a 4/8/16-context `1M+1A` worker would matter immediately. Adding more FP units only becomes worthwhile after enough contexts exist to feed them and after the output path no longer caps the frame rate.
+The comparison gives the updated answer: at 12 Mbaud, compute improvements are no longer hidden for deep scenes, but fast scenes remain output/host limited. If the output link is upgraded again, a 4/8/16-context `1M+1A` worker would matter immediately across more scenes. Adding more FP units only becomes worthwhile after enough contexts exist to feed them.
+
+### Incremental Benefit Of Contexts, ADDs, And MULs
+
+The updated sweep intentionally includes low-context multi-unit cases. The result is consistent across all six scenes:
+
+| Change | Model result | Explanation |
+|---|---|---|
+| `2ctx 1M+1A` -> `2ctx 1M+2A` | no gain | Two contexts cannot generate enough independent ready adder work to use the second ADD. |
+| `2ctx 1M+1A` -> `2ctx 2M+1A` | no gain | Two contexts are latency-limited, and the adder remains required for escape and update stages. |
+| `4ctx 1M+1A` -> `4ctx 1M+2A` | no gain | Four contexts still do not hide enough dependency latency. |
+| `8ctx 1M+1A` -> `8ctx 1M+2A` | no gain in the fast aggregate model | Eight contexts are near the 1M+1A issue boundary but still context-limited for this stage graph. |
+| `16ctx 1M+1A` -> `16ctx 1M+2A` | about `1.61x-1.66x` gain | Context count is finally high enough that one adder becomes the limiter. |
+| `16ctx 1M+1A` -> `16ctx 2M+1A` | no gain | Extra multiplier does not help because the single adder bottleneck remains. |
+| `16ctx 1M+2A` -> `16ctx 2M+2A` | small extra gain, about `1.03x-1.06x` | A second multiplier helps only after the second adder exists, and even then the context/dependency limit remains visible. |
+
+Representative deep mini-brot compute-only predictions:
+
+| Architecture | Compute pps | Speedup vs `2ctx 1M+1A` | Interpretation |
+|---|---:|---:|---|
+| `2ctx 1M+1A` | `29476` | `1.00x` | Current implemented compute baseline. |
+| `4ctx 1M+1A` | `58951` | `2.00x` | Best next pure-context step. |
+| `8ctx 1M+1A` | `117902` | `4.00x` | Major gain without extra FP units. |
+| `16ctx 1M+1A` | `138536` | `4.70x` | Near 1M+1A issue saturation. |
+| `16ctx 1M+2A` | `230653` | `7.82x` | Second ADD becomes valuable only here. |
+| `16ctx 2M+1A` | `138536` | `4.70x` | Second MUL alone is wasted. |
+| `16ctx 2M+2A` | `235803` | `8.00x` | Small gain over 1M+2A, high DSP cost. |
+
+This changes the planning priority. The next RTL step should not be adding FP units to the existing 2-context worker. It should be scaling the tagged context table and ordered commit machinery to 4 and then 8 contexts while keeping `1M+1A`. A second adder is only attractive after the design can keep roughly 16 contexts active. A second multiplier is lower priority on this device because it consumes scarce DSPs and gives no benefit without more adder capacity.
 
 ## Whole-System Model With Faster Output
 
-If the output path allowed 100000 pixels/s, a compute-speedup of 8x from a practical 8-context `1M+1A` worker would become much more visible:
+If the output path allowed 600000 pixels/s sustained end-to-end throughput, roughly the 12 Mbaud UART payload ceiling without host/protocol overhead, an 8-context `1M+1A` worker would become visible on the deep scenes while fast scenes would still approach the output cap:
 
-| Scene | Current 4-core 576k | 8x compute model with 100k pps output cap | Visible speedup |
-|---|---:|---:|---:|
-| Seahorse zoom @512 | 27921 pps | 100000 pps cap | 3.58x |
-| Deep tendrils @8192 | 22079 pps | 100000 pps cap | 4.53x |
-| Deep mini-brot @8192 | 8853 pps | 70822 pps | 8.00x |
-| Deep seahorse @1024 | 20600 pps | 100000 pps cap | 4.85x |
+| Scene | Current 12M host-tiled pps | 8ctx `1M+1A` compute pps | 600k output-capped pps | Visible speedup |
+|---|---:|---:|---:|---:|
+| Seahorse zoom @512 | `118208` | `609259` | `600000` | `5.08x` |
+| Deep tendrils @8192 | `61080` | `295431` | `295431` | `4.84x` |
+| Deep mini-brot @8192 | `24899` | `117902` | `117902` | `4.74x` |
+| Deep seahorse @1024 | `57056` | `276408` | `276408` | `4.84x` |
 
-This shows the architectural dependency: de-bubbling is compute-significant, but it should be paired with transport/protocol improvement to be system-significant.
+This shows the architectural dependency: de-bubbling is compute-significant, but fast scenes still require transport/protocol improvement to expose the full compute gain. Deep scenes are already compute-sensitive at 12 Mbaud and would benefit directly from more contexts.
 
 ## Legacy Python 2-Context Prototype Model
 
@@ -688,9 +815,9 @@ For long-term performance, tagged output is preferable because it allows later f
 
 ### Stage 4: Evaluate More Adders Before More Multipliers
 
-If `1M+1A` with 16 contexts is proven and transport is no longer the bottleneck, evaluate `1M+2A`. It improves the ideal issue limit from 5 cycles/iter to 3 cycles/iter without adding DSP-heavy FP multipliers.
+If `1M+1A` with roughly 16 contexts is proven and transport is no longer the bottleneck, evaluate `1M+2A`. The updated model shows no benefit from a second ADD at 2, 4, or 8 contexts, but a clear `1.6x+` compute gain at 16 contexts because the single adder finally becomes the limiter.
 
-Only after that should `2M+2A` be considered. It consumes most of the remaining DSP budget on the current device.
+Only after that should `2M+2A` be considered. `2M+1A` gives no modeled gain over `1M+1A` because the adder remains the bottleneck, and `2M+2A` consumes most of the remaining DSP budget on the current device for only a small gain over `1M+2A` at 16 contexts.
 
 ## Practical Recommendation
 
@@ -698,17 +825,17 @@ Recommended priority:
 
 | Priority | Work | Reason |
 |---:|---|---|
-| 1 | Higher-bandwidth output path | Current UART hides most compute gains. |
-| 2 | Tagged row/tile protocol | Enables out-of-order worker/tile completion without large FPGA reorder buffers. |
-| 3 | Scale the proven 2-context RTL to 4/8 contexts | The 2-context worker is now correct on board; more contexts are needed to hide most FP latency. |
-| 4 | 8/16-context `1M+1A` worker | Best compute gain per DSP after the 2-context proof point. |
-| 5 | Add second adder per worker | Useful next issue-limit improvement without DSP pressure. |
-| 6 | Consider second multiplier per worker | Only after bandwidth and timing headroom are proven. |
+| 1 | Scale the proven 2-context RTL to 4 contexts, then 8 contexts | Pure context scaling is the next modeled gain and does not add FP units. |
+| 2 | Preserve tagged writeback and ordered commit while scaling contexts | Correctness depends on result tags and local raster-order commit. |
+| 3 | Keep improving transport/protocol | Fast scenes remain output/host limited even at 12 Mbaud. |
+| 4 | Evaluate 16-context `1M+1A` | Approaches the one-adder issue limit and creates the first point where extra ADD capacity is useful. |
+| 5 | Add second adder per worker only after high-context scheduling works | `1M+2A` has no modeled benefit at 2/4/8 contexts, but is valuable around 16 contexts. |
+| 6 | Consider second multiplier only after adding adder capacity and proving DSP/timing headroom | `2M+1A` is modeled as wasted; `2M+2A` is DSP-heavy and only modestly better than `1M+2A` at 16 contexts. |
 
 ## Conclusion
 
-The current worker has substantial pipeline bubbles: roughly 3 multiplier issues and 5 adder issues are spread across about 77 cycles. A multi-context worker can theoretically reduce a `1M+1A` worker toward 5 cycles per non-escaping iteration, a per-worker compute gain up to about 15x before practical overhead.
+The legacy single-context worker had substantial pipeline bubbles: roughly 3 multiplier issues and 5 adder issues were spread across about 77 conservative wait-scheduled cycles. The current tagged worker model, using `MUL_LAT=6` and `ADD_LAT=7`, reduces the single-context dependency chain to about 47 cycles, but the implemented two-context design still leaves significant bubbles. A deeper multi-context `1M+1A` worker can move toward the 5-cycle adder issue limit, a compute gain of about `9.4x` versus the current tagged single-context dependency chain or about `4.7x` versus the implemented two-context compute model.
 
-The first de-bubbling architecture has now been proven with two in-flight pixel contexts per worker, one multiplier, one adder, tagged FP writeback, and ordered commit. The next compute target is still 8 to 16 in-flight pixel contexts per worker. Adding more multipliers is not the first move because the adder is the bottleneck for `2M+1A`, and extra FP64 multipliers consume scarce DSPs. Adding a second adder after proving deeper multi-context scheduling is more attractive.
+The first de-bubbling architecture has now been proven with two in-flight pixel contexts per worker, one multiplier, one adder, tagged FP writeback, and ordered commit. Re-running the model with the current latencies strengthens the earlier conclusion: add contexts before adding FP units. `2ctx`/`4ctx`/`8ctx` do not benefit from extra ADD or MUL units in the aggregate model; `16ctx 1M+2A` is the first clear multi-unit step. Adding more multipliers is not the first move because `2M+1A` is still adder-bottlenecked and FP64 multipliers consume scarce DSPs.
 
-However, whole-system speedup on the current 576000 baud UART design is capped near 28800 pixels/s. De-bubbling becomes strategically important only when paired with faster output and tagged/out-of-order result handling.
+At 12 Mbaud, de-bubbling is already strategically relevant for deep scenes: current board throughput is about 80-85% of the compute-only `2ctx 1M+1A` model for deep tendrils, deep mini-brot, and deep Seahorse. Fast scenes remain output/host limited, so transport/protocol work is still required to expose compute gains there.
