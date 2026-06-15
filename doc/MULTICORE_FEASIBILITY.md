@@ -558,7 +558,7 @@ If UART is improved to 1 Mbps or higher using oversampling/fractional generation
 - Separate image-level control from row computation.
 - Add worker parameters: `row_start`, `row_stride`, `rows_total`, `cols`.
 - Preserve single-core behavior with `CORE_COUNT=1`.
-- Run existing `sim_core.tcl` and board verify.
+- Run existing `../sim_core.tcl` and board verify.
 
 ### Milestone 2: Static 2-Core Interleaved Rows
 

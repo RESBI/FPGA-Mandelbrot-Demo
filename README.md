@@ -2,7 +2,7 @@
 
 FPGA-based Mandelbrot renderer with a UART host interface. The PC sends one image command containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a 4-worker FP64 engine, dynamically assigns rows to available workers, restores raster order, and streams one 16-bit iteration count per pixel. Each worker interleaves two pixel contexts over one shared FP64 multiplier and one shared FP64 adder. The host renders the result to PNG or text and can optionally compare against a software reference.
 
-For detailed hardware architecture, pipeline scheduling, timing constraints, software design, and validation notes, see [ARCHITECTURE.md](ARCHITECTURE.md). For the project-level evolution from the initial single-core design to the current dynamic 4-worker, 2-context implementation, see [ARCHITECTURE_EVOLUTION_REPORT.md](ARCHITECTURE_EVOLUTION_REPORT.md). For the worker pipeline bubble analysis and 2-context results, see [PIPELINE_BUBBLE_ANALYSIS.md](PIPELINE_BUBBLE_ANALYSIS.md).
+For detailed hardware architecture, pipeline scheduling, timing constraints, software design, and validation notes, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the project-level evolution from the initial single-core design to the current dynamic 4-worker, 2-context implementation, see [ARCHITECTURE_EVOLUTION_REPORT.md](doc/ARCHITECTURE_EVOLUTION_REPORT.md). For the worker pipeline bubble analysis and 2-context results, see [PIPELINE_BUBBLE_ANALYSIS.md](doc/PIPELINE_BUBBLE_ANALYSIS.md).
 
 ## Demo Images
 
@@ -75,6 +75,17 @@ Mandelbrot/
 │   ├── test_random_compare.py
 │   ├── uart_raw_probe.py
 │   └── uart_listen_raw.py
+├── doc/                         Architecture, design, analysis, and TODO documents
+│   ├── ARCHITECTURE.md
+│   ├── ARCHITECTURE_CN.md
+│   ├── ARCHITECTURE_EVOLUTION_REPORT.md
+│   ├── ARCHITECTURE_EVOLUTION_REPORT_CN.md
+│   ├── PIPELINE_BUBBLE_ANALYSIS.md
+│   ├── PIPELINE_BUBBLE_ANALYSIS_CN.md
+│   ├── TILE_DESIGN.md
+│   ├── TILE_DESIGN_CN.md
+│   ├── TODO.md
+│   └── TODO_CN.md
 ├── build_fp64.tcl               Default FP64 build, dynamic scheduler + 2 contexts
 ├── build_fp64_static.tcl        Static scheduler + 1-context regression build
 ├── build_fp64_dynamic.tcl       Earlier dynamic-scheduler build script
@@ -87,17 +98,7 @@ Mandelbrot/
 ├── sim_multicore_dynamic_stress.tcl
 ├── sim_multicore_static.tcl
 ├── sim_worker_2ctx_model.tcl
-├── ARCHITECTURE.md              Detailed architecture document
-├── ARCHITECTURE_EVOLUTION_REPORT.md
-├── PIPELINE_BUBBLE_ANALYSIS.md
-├── MULTICORE_4CORE_ARCHITECTURE.md
-├── PERFORMANCE_100MHZ.md
-├── UART_BAUDRATE_BENCHMARK.md
-├── UART_BAUDRATE_INVESTIGATION.md
-├── UART_TIMING_ANALYSIS.md
-├── FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md
-├── MULTICORE_FEASIBILITY.md
-└── DESIGN.md                    Original design notes
+└── README.md                    Project overview
 ```
 
 ## System Diagram
@@ -591,7 +592,7 @@ The 4096x4096 default host-tiled path was also checked at RTL packetizer level. 
 
 ### Host Tile Size Comparison
 
-The current tile design was also benchmarked with several host tile sizes across the same six 1080p scenes. This matrix uses one run per scene/tile-size and disables software verification so it measures FPGA/transport elapsed time. Detailed design notes and logs are in [TILE_DESIGN.md](TILE_DESIGN.md), [TILE_DESIGN_CN.md](TILE_DESIGN_CN.md), and `python/host_tile_size_matrix/`.
+The current tile design was also benchmarked with several host tile sizes across the same six 1080p scenes. This matrix uses one run per scene/tile-size and disables software verification so it measures FPGA/transport elapsed time. Detailed design notes and logs are in [TILE_DESIGN.md](doc/TILE_DESIGN.md), [TILE_DESIGN_CN.md](doc/TILE_DESIGN_CN.md), and `python/host_tile_size_matrix/`.
 
 | Scene | `80x60` | `320x120` | `960x120` | `1920x120` | `1920x240` |
 |---|---:|---:|---:|---:|---:|
@@ -644,13 +645,13 @@ Comparison against the previous 4-worker, single-context, 576000 baud baseline:
 
 The UART now uses a 32-bit fractional baud accumulator in both RX and TX. `BAUD=12000000` is the experimental source default and has completed the six 1080p scenes after targeted reprobes. `8000000` remains the safer high-baud fallback from the first full six-scene sweep, while `576000` remains the conservative historical baseline. At 12 Mbaud, occasional byte loss was observed during multi-megabyte bursts. Host-driven tiling provides a practical retry boundary today, but long soak tests are still recommended before relying on 12 Mbaud unattended.
 
-Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md), [UART_TIMING_ANALYSIS.md](UART_TIMING_ANALYSIS.md).
+Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](doc/UART_BAUDRATE_INVESTIGATION.md), [UART_TIMING_ANALYSIS.md](doc/UART_TIMING_ANALYSIS.md).
 
 ### HW/SW Boundary Differences
 
 The FPGA FP64 engine uses truncation-rounding (round-toward-zero) while the Python software reference uses IEEE 754 round-to-nearest-even. This causes small pixel-level differences near the Mandelbrot set boundary where chaotic dynamics amplify sub-ULP errors across iterations. These differences are not a bug and do not affect visual image quality.
 
-Detailed report: [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md).
+Detailed report: [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](doc/FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md).
 
 Current default 100 MHz FP64 routed timing is signed off with no core multicycle exceptions:
 
@@ -669,7 +670,7 @@ Latest placed utilization for the default build:
 | DSP48E1 | 37 | 80 | 46.25% |
 | Block RAM Tile | 9.5 | 60 | 15.83% |
 
-Historical resource/timing points from earlier architecture stages are tracked in [ARCHITECTURE_EVOLUTION_REPORT.md](ARCHITECTURE_EVOLUTION_REPORT.md); this table is reserved for the current default bitstream.
+Historical resource/timing points from earlier architecture stages are tracked in [ARCHITECTURE_EVOLUTION_REPORT.md](doc/ARCHITECTURE_EVOLUTION_REPORT.md); this table is reserved for the current default bitstream.
 
 ## Troubleshooting
 
@@ -718,34 +719,34 @@ Use host tiling, a smaller frame, rebuild with a larger dynamic owner table, or 
 For detailed hardware architecture, pipeline scheduling, timing constraints, and validation notes, see:
 
 ```text
-ARCHITECTURE.md
-ARCHITECTURE_CN.md
-ARCHITECTURE_EVOLUTION_REPORT.md
-ARCHITECTURE_EVOLUTION_REPORT_CN.md
-TILE_DESIGN.md
-TILE_DESIGN_CN.md
-PIPELINE_BUBBLE_ANALYSIS.md
-PIPELINE_BUBBLE_ANALYSIS_CN.md
-PERFORMANCE_100MHZ.md
-PERFORMANCE_100MHZ_CN.md
-UART_BAUDRATE_BENCHMARK.md
-UART_BAUDRATE_BENCHMARK_CN.md
-UART_BAUDRATE_INVESTIGATION.md
-UART_BAUDRATE_INVESTIGATION_CN.md
-UART_TIMING_ANALYSIS.md
-UART_TIMING_ANALYSIS_CN.md
-FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md
-FP64_BOUNDARY_DIFFERENCE_ANALYSIS_CN.md
-MULTICORE_FEASIBILITY.md
-MULTICORE_FEASIBILITY_CN.md
-MULTICORE_4CORE_ARCHITECTURE.md
-MULTICORE_4CORE_ARCHITECTURE_CN.md
-DYNAMIC_IDLE_CORE_SCHEDULING.md
-DYNAMIC_IDLE_CORE_SCHEDULING_CN.md
-DESIGN.md
-DESIGN_CN.md
-TODO.md
-TODO_CN.md
+doc/ARCHITECTURE.md
+doc/ARCHITECTURE_CN.md
+doc/ARCHITECTURE_EVOLUTION_REPORT.md
+doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md
+doc/TILE_DESIGN.md
+doc/TILE_DESIGN_CN.md
+doc/PIPELINE_BUBBLE_ANALYSIS.md
+doc/PIPELINE_BUBBLE_ANALYSIS_CN.md
+doc/PERFORMANCE_100MHZ.md
+doc/PERFORMANCE_100MHZ_CN.md
+doc/UART_BAUDRATE_BENCHMARK.md
+doc/UART_BAUDRATE_BENCHMARK_CN.md
+doc/UART_BAUDRATE_INVESTIGATION.md
+doc/UART_BAUDRATE_INVESTIGATION_CN.md
+doc/UART_TIMING_ANALYSIS.md
+doc/UART_TIMING_ANALYSIS_CN.md
+doc/FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md
+doc/FP64_BOUNDARY_DIFFERENCE_ANALYSIS_CN.md
+doc/MULTICORE_FEASIBILITY.md
+doc/MULTICORE_FEASIBILITY_CN.md
+doc/MULTICORE_4CORE_ARCHITECTURE.md
+doc/MULTICORE_4CORE_ARCHITECTURE_CN.md
+doc/DYNAMIC_IDLE_CORE_SCHEDULING.md
+doc/DYNAMIC_IDLE_CORE_SCHEDULING_CN.md
+doc/DESIGN.md
+doc/DESIGN_CN.md
+doc/TODO.md
+doc/TODO_CN.md
 ```
 
 ## License

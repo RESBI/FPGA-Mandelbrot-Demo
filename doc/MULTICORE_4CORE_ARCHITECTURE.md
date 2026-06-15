@@ -21,7 +21,7 @@ The host protocol is intentionally unchanged because the current transport is st
 
 ```mermaid
 flowchart LR
-    PC[Host Python\nexisting UART protocol] --> RX[UART RX]
+    PC[Host ..\Python\nexisting UART protocol] --> RX[UART RX]
     RX --> CMD[cmd_parser]
     CMD --> MC[mandelbrot_multicore\nCORE_COUNT=4]
     MC --> OFIFO[Output FIFO\n1024 x 16]
@@ -101,7 +101,7 @@ An optional dynamic row scheduler is also available through `SCHED_MODE=1` in `m
 | Mode | Dispatcher | Collector | Validation |
 |---:|---|---|---|
 | `SCHED_MODE=0` | `work_dispatch_static_rows` | `raster_merge_static_rows` | Default board mode. |
-| `SCHED_MODE=1` | `work_dispatch_dynamic_rows` | `raster_collect_dynamic_rows` | `sim_multicore_dynamic.tcl` and `build_fp64_dynamic.tcl` pass. |
+| `SCHED_MODE=1` | `work_dispatch_dynamic_rows` | `raster_collect_dynamic_rows` | `../sim_multicore_dynamic.tcl` and `../build_fp64_dynamic.tcl` pass. |
 
 ## Raster Merge
 
@@ -211,13 +211,13 @@ The DSP count matches the feasibility estimate: roughly one top-level multiply f
 
 | Test | Result |
 |---|---|
-| `sim_fp.tcl` | Pass |
-| `sim_core.tcl` | Pass |
-| `sim_multicore.tcl` | `=== MULTICORE TEST PASS: 192 pixels ===` |
-| `sim_multicore_dynamic.tcl` | `=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===` |
-| `build_fp64.tcl` | Pass, bitstream generated |
-| `build_fp64_dynamic.tcl` | Pass, dynamic-scheduler bitstream generated |
-| `program.tcl` | Pass |
+| `../sim_fp.tcl` | Pass |
+| `../sim_core.tcl` | Pass |
+| `../sim_multicore.tcl` | `=== MULTICORE TEST PASS: 192 pixels ===` |
+| `../sim_multicore_dynamic.tcl` | `=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===` |
+| `../build_fp64.tcl` | Pass, bitstream generated |
+| `../build_fp64_dynamic.tcl` | Pass, dynamic-scheduler bitstream generated |
+| `../program.tcl` | Pass |
 | `python python\test_esc.py` | Pass |
 | `python python\mandelbrot_host.py --verify --width 160 --height 120 --max-iter 256 ...` | `19200/19200 match` |
 | `python python\scan_points.py --y 0 --x0 0 --x1 159 --max-iter 128` | `PASS: 160/160 row points match` |

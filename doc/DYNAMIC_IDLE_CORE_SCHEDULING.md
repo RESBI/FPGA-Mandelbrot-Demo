@@ -6,12 +6,12 @@ This report documents the dynamic idle-core scheduler added beside the existing 
 
 | Item | Status |
 |---|---|
-| Dynamic dispatcher | Implemented in `rtl/work_dispatch_dynamic_rows.v`. |
-| Dynamic result collector | Implemented in `rtl/raster_collect_dynamic_rows.v`. |
+| Dynamic dispatcher | Implemented in `../rtl/work_dispatch_dynamic_rows.v`. |
+| Dynamic result collector | Implemented in `../rtl/raster_collect_dynamic_rows.v`. |
 | Compile-time mode switch | `SCHED_MODE` in `mandelbrot_multicore` and `top`. |
 | Static default | Preserved as `SCHED_MODE=0`. |
-| Dynamic optional build | `build_fp64_dynamic.tcl`, `SCHED_MODE=1`. |
-| Dynamic simulation | `sim_multicore_dynamic.tcl`. |
+| Dynamic optional build | `../build_fp64_dynamic.tcl`, `SCHED_MODE=1`. |
+| Dynamic simulation | `../sim_multicore_dynamic.tcl`. |
 | Host protocol | Unchanged raster-order 16-bit pixel stream. |
 
 The default board build remains the static interleaved-row design. Dynamic mode is available for scheduler experiments and row-level load-balance evaluation.
@@ -97,8 +97,8 @@ Build scripts:
 
 | Script | Mode |
 |---|---|
-| `build_fp64.tcl` | Static default, `SCHED_MODE=0`. |
-| `build_fp64_dynamic.tcl` | Dynamic, `SCHED_MODE=1`. |
+| `../build_fp64.tcl` | Static default, `SCHED_MODE=0`. |
+| `../build_fp64_dynamic.tcl` | Dynamic, `SCHED_MODE=1`. |
 
 ## Validation Results
 
@@ -115,8 +115,8 @@ Routed timing:
 
 | Build | Scheduler | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|
-| `build_fp64.tcl` | Static interleaved rows | 0.358 ns | 0.000 ns | 0.024 ns | 0.000 ns |
-| `build_fp64_dynamic.tcl` | Dynamic idle-core rows | 0.269 ns | 0.000 ns | 0.027 ns | 0.000 ns |
+| `../build_fp64.tcl` | Static interleaved rows | 0.358 ns | 0.000 ns | 0.024 ns | 0.000 ns |
+| `../build_fp64_dynamic.tcl` | Dynamic idle-core rows | 0.269 ns | 0.000 ns | 0.027 ns | 0.000 ns |
 
 Placed utilization:
 
@@ -174,12 +174,12 @@ Generated benchmark images:
 
 | Scene | Output file |
 |---|---|
-| Fast escape @128 | `python/dyn_1080p_fast_escape_i128.png` |
-| Standard @64 | `python/dyn_1080p_standard_i64.png` |
-| Seahorse zoom @512 | `python/dyn_1080p_seahorse_zoom_i512_s5e-6.png` |
-| Deep tendrils @8192 | `python/dyn_1080p_deep_tendrils_i8192_s1e-9.png` |
-| Deep mini-brot @8192 | `python/dyn_1080p_deep_minibrot_i8192_s1e-9.png` |
-| Deep seahorse @1024 | `python/dyn_1080p_deep_seahorse_i1024_s1e-8.png` |
+| Fast escape @128 | `../python/dyn_1080p_fast_escape_i128.png` |
+| Standard @64 | `../python/dyn_1080p_standard_i64.png` |
+| Seahorse zoom @512 | `../python/dyn_1080p_seahorse_zoom_i512_s5e-6.png` |
+| Deep tendrils @8192 | `../python/dyn_1080p_deep_tendrils_i8192_s1e-9.png` |
+| Deep mini-brot @8192 | `../python/dyn_1080p_deep_minibrot_i8192_s1e-9.png` |
+| Deep seahorse @1024 | `../python/dyn_1080p_deep_seahorse_i1024_s1e-8.png` |
 
 Interpretation:
 

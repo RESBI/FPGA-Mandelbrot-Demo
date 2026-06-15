@@ -27,7 +27,7 @@ Current validated capabilities:
 
 ## 2. Top-Level Architecture
 
-Top-level integration is in `rtl/top.v`.
+Top-level integration is in `../rtl/top.v`.
 
 ```text
 Host PC
@@ -54,23 +54,23 @@ The main modules are:
 
 | Module | File | Role |
 |---|---|---|
-| `top` | `rtl/top.v` | Instantiates clock-enable generator, UART, command parser, 4-core wrapper, output FIFO, and TX controller. |
-| `uart_rx` | `rtl/uart_rx.v` | Receives 8N1 UART bytes using a fractional baud accumulator. |
-| `uart_tx` | `rtl/uart_tx.v` | Sends 8N1 UART bytes using a fractional baud accumulator. |
-| `cmd_parser` | `rtl/cmd_parser.v` | Parses command packet and validates XOR checksum. |
-| `mandelbrot_multicore` | `rtl/mandelbrot_multicore.v` | 4-core wrapper with scheduler, per-core FIFOs, raster merger, and `tx_start` handling. |
-| `work_dispatch_static_rows` | `rtl/work_dispatch_static_rows.v` | Static regression scheduler. Assigns interleaved rows to workers. |
-| `work_dispatch_dynamic_rows` | `rtl/work_dispatch_dynamic_rows.v` | Default scheduler. Assigns one full row at a time to an available worker and records row ownership. |
-| `mandelbrot_core_worker_2ctx` | `rtl/mandelbrot_core_worker_2ctx.v` | Default two-context row worker. Interleaves two pixel contexts over one FP64 multiplier and one FP64 adder. |
-| `mandelbrot_core_worker_kctx` | `rtl/mandelbrot_core_worker_kctx.v` | Experimental parameterized 4/8-context worker used for feasibility synthesis only; not a deployable xc7z010 default. |
-| `mandelbrot_core_worker` | `rtl/mandelbrot_core_worker.v` | Stable single-context row worker used by static regression builds. |
-| `raster_merge_static_rows` | `rtl/raster_merge_static_rows.v` | Static-mode merger. Restores per-worker row streams to strict row-major output order. |
-| `raster_collect_dynamic_rows` | `rtl/raster_collect_dynamic_rows.v` | Default dynamic result collector. Uses the row-owner table to drain dynamically assigned rows in raster order. |
-| `mandelbrot_core` | `rtl/mandelbrot_core.v` | Legacy/single-core raster-order Mandelbrot engine used by regression simulation. |
-| `fp_mul` | `rtl/fp_mul.v` | Parameterized FP multiplier. |
-| `fp_add` | `rtl/fp_add.v` | Parameterized FP adder/subtractor. |
-| `queue` | `rtl/queue.v` | Synchronous FIFO for per-core and output buffering. |
-| `tx_ctrl` | `rtl/tx_ctrl.v` | Builds response header, drains FIFO, transmits pixels and checksum. |
+| `top` | `../rtl/top.v` | Instantiates clock-enable generator, UART, command parser, 4-core wrapper, output FIFO, and TX controller. |
+| `uart_rx` | `../rtl/uart_rx.v` | Receives 8N1 UART bytes using a fractional baud accumulator. |
+| `uart_tx` | `../rtl/uart_tx.v` | Sends 8N1 UART bytes using a fractional baud accumulator. |
+| `cmd_parser` | `../rtl/cmd_parser.v` | Parses command packet and validates XOR checksum. |
+| `mandelbrot_multicore` | `../rtl/mandelbrot_multicore.v` | 4-core wrapper with scheduler, per-core FIFOs, raster merger, and `tx_start` handling. |
+| `work_dispatch_static_rows` | `../rtl/work_dispatch_static_rows.v` | Static regression scheduler. Assigns interleaved rows to workers. |
+| `work_dispatch_dynamic_rows` | `../rtl/work_dispatch_dynamic_rows.v` | Default scheduler. Assigns one full row at a time to an available worker and records row ownership. |
+| `mandelbrot_core_worker_2ctx` | `../rtl/mandelbrot_core_worker_2ctx.v` | Default two-context row worker. Interleaves two pixel contexts over one FP64 multiplier and one FP64 adder. |
+| `mandelbrot_core_worker_kctx` | `../rtl/mandelbrot_core_worker_kctx.v` | Experimental parameterized 4/8-context worker used for feasibility synthesis only; not a deployable xc7z010 default. |
+| `mandelbrot_core_worker` | `../rtl/mandelbrot_core_worker.v` | Stable single-context row worker used by static regression builds. |
+| `raster_merge_static_rows` | `../rtl/raster_merge_static_rows.v` | Static-mode merger. Restores per-worker row streams to strict row-major output order. |
+| `raster_collect_dynamic_rows` | `../rtl/raster_collect_dynamic_rows.v` | Default dynamic result collector. Uses the row-owner table to drain dynamically assigned rows in raster order. |
+| `mandelbrot_core` | `../rtl/mandelbrot_core.v` | Legacy/single-core raster-order Mandelbrot engine used by regression simulation. |
+| `fp_mul` | `../rtl/fp_mul.v` | Parameterized FP multiplier. |
+| `fp_add` | `../rtl/fp_add.v` | Parameterized FP adder/subtractor. |
+| `queue` | `../rtl/queue.v` | Synchronous FIFO for per-core and output buffering. |
+| `tx_ctrl` | `../rtl/tx_ctrl.v` | Builds response header, drains FIFO, transmits pixels and checksum. |
 
 ## 3. Command And Response Protocol
 
@@ -121,7 +121,7 @@ wire fp_ce;
 assign fp_ce = (`FP_CE_DIV == 1) ? 1'b1 : (ce_counter == `FP_CE_DIV - 1);
 ```
 
-Current `rtl/fp_defines.vh` sets:
+Current `../rtl/fp_defines.vh` sets:
 
 ```verilog
 `define FP_CE_DIV 1
@@ -788,7 +788,7 @@ Because `queue.v` has synchronous read data, both the raster merger and `tx_ctrl
 
 ## 9. UART Design
 
-UART is 8N1, no parity, no hardware flow control. The current source default is `BAUD=12000000` for both `rtl/uart_rx.v`, `rtl/uart_tx.v`, and `python/mandelbrot_host.py`.
+UART is 8N1, no parity, no hardware flow control. The current source default is `BAUD=12000000` for both `../rtl/uart_rx.v`, `../rtl/uart_tx.v`, and `../python/mandelbrot_host.py`.
 
 The original UART used an integer `CLOCKS_PER_BIT` divider. That worked at conservative rates but quantized every baudrate to an integer number of 100 MHz system clocks. The current design keeps `CLOCKS_PER_BIT = CLK_HZ / BAUD` as a compatibility parameter, but actual bit timing is generated by a 32-bit fractional phase accumulator:
 
@@ -885,9 +885,9 @@ The current design keeps the same compute command format and raster-ordered pixe
 
 | Layer | Implemented In | Function |
 |---|---|---|
-| RTL response tiling | `rtl/tx_ctrl.v` | Splits the response stream into framed `TD` packets with coordinates and per-packet checksums. |
-| Host-driven display tiling | `python/mandelbrot_host.py` | Splits a large image into host-visible stripes and stitches returned subframes. |
-| Hardware compute sub-tiling | `python/mandelbrot_host.py` | Splits each host tile into smaller retryable hardware commands. |
+| RTL response tiling | `../rtl/tx_ctrl.v` | Splits the response stream into framed `TD` packets with coordinates and per-packet checksums. |
+| Host-driven display tiling | `../python/mandelbrot_host.py` | Splits a large image into host-visible stripes and stitches returned subframes. |
+| Hardware compute sub-tiling | `../python/mandelbrot_host.py` | Splits each host tile into smaller retryable hardware commands. |
 
 The RTL layer detects and localizes byte slips. The host-driven layer provides recovery by recomputing only the failed hardware compute tile inside the host tile.
 
@@ -968,13 +968,13 @@ The RTL response tile is not the same thing as a host compute tile:
 
 | Concept | Controlled By | Example | Purpose |
 |---|---|---|---|
-| RTL response tile | `CFG_RESPONSE_TILE_COLS` in `rtl/config.vh` | `64` columns | Adds packet boundaries and checksums inside one FPGA response. |
+| RTL response tile | `CFG_RESPONSE_TILE_COLS` in `../rtl/config.vh` | `64` columns | Adds packet boundaries and checksums inside one FPGA response. |
 | Host tile | `--tile-width`, `--tile-height` | full width x 120 rows | Defines the display/logging stripe and final image copy region. |
 | Hardware compute tile | `--compute-tile-width`, `--compute-tile-height` | `512x120` | Creates retryable hardware commands inside each host tile. |
 
 A single hardware compute tile can therefore produce many RTL `TD` packets. For example, a `512x120` compute tile with `CFG_RESPONSE_TILE_COLS=64` produces 960 64-column response packets inside one response frame. A `1920x120` host tile is assembled from four such compute commands by default.
 
-Host-driven tiling is now the default behavior in `python/mandelbrot_host.py`. If the user does not pass `--tile-width` or `--tile-height`, the host selects a full-width stripe with a default height of 120 rows. If the user does not pass `--compute-tile-width` or `--compute-tile-height`, each host stripe is split into `512x120` hardware compute tiles. Tile receive uses a shorter per-read timeout, `--tile-read-timeout 30`, so a byte slip can fail and retry a compute subtile without waiting for the global serial timeout. The old single-command path is still available through `--full-frame` for regression and controlled experiments.
+Host-driven tiling is now the default behavior in `../python/mandelbrot_host.py`. If the user does not pass `--tile-width` or `--tile-height`, the host selects a full-width stripe with a default height of 120 rows. If the user does not pass `--compute-tile-width` or `--compute-tile-height`, each host stripe is split into `512x120` hardware compute tiles. Tile receive uses a shorter per-read timeout, `--tile-read-timeout 30`, so a byte slip can fail and retry a compute subtile without waiting for the global serial timeout. The old single-command path is still available through `--full-frame` for regression and controlled experiments.
 
 `CFG_RESPONSE_TILE_GAP_CYCLES` inserts a small idle gap between response packets. This gives the host/USB serial stack short scheduling windows without adding a large throughput penalty. The current default of `1000` cycles is about 10 us at 100 MHz.
 
@@ -1088,7 +1088,7 @@ Tile size is a tradeoff between recovery granularity and fixed overhead. The his
 
 | Tile Shape | Host Tiles Per 1080p Frame | Behavior |
 |---:|---:|---|
-| `80x60` | 432 | Fine retry granularity, but Python/serial/protocol overhead dominates. |
+| `80x60` | 432 | Fine retry granularity, but ../Python/serial/protocol overhead dominates. |
 | `320x120` | 54 | Much lower overhead, but still many commands; useful as a recovery stress point. |
 | `960x120` | 18 | High-throughput range with moderate retry unit. |
 | `1920x120` | 9 | Current recommended default; strong 30-run stability data. |
@@ -1186,7 +1186,7 @@ flowchart TB
 
 ## 11. Host Software Architecture
 
-Host code is in `python/mandelbrot_host.py`.
+Host code is in `../python/mandelbrot_host.py`.
 
 Responsibilities:
 
@@ -1252,7 +1252,7 @@ Verification uses several layers.
 
 ### 12.1 Unit Simulation
 
-`sim/tb_fp.v` tests FP add/multiply cases. Coverage includes:
+`../sim/tb_fp.v` tests FP add/multiply cases. Coverage includes:
 
 | Category | Examples |
 |---|---|
@@ -1270,7 +1270,7 @@ vivado -mode batch -source sim_fp.tcl
 
 ### 12.2 Core Simulation
 
-`sim/tb_core.v` runs the Mandelbrot core against a software reference embedded in the testbench. It covers individual points, a small grid, and a full-size first-pixel regression.
+`../sim/tb_core.v` runs the Mandelbrot core against a software reference embedded in the testbench. It covers individual points, a small grid, and a full-size first-pixel regression.
 
 Run:
 
@@ -1286,7 +1286,7 @@ Expected pass marker:
 
 ### 12.3 Multicore Simulation
 
-`sim/tb_multicore.v` instantiates `mandelbrot_multicore` with four workers and checks that the default static merged output stream matches row-major software reference order. `sim/tb_multicore_dynamic.v` runs the same raster-order check with `SCHED_MODE=1` dynamic idle-core row scheduling.
+`../sim/tb_multicore.v` instantiates `mandelbrot_multicore` with four workers and checks that the default static merged output stream matches row-major software reference order. `../sim/tb_multicore_dynamic.v` runs the same raster-order check with `SCHED_MODE=1` dynamic idle-core row scheduling.
 
 Run:
 
@@ -1324,7 +1324,7 @@ The 4096x4096 test follows the host default geometry: 34 responses of `4096x120`
 
 ### 12.5 Host-Side Random Reference Testing
 
-`python/test_random_compare.py` compares host/software reference conventions across randomized cases. This catches coordinate convention errors, checksum assumptions, and corner cases in command construction.
+`../python/test_random_compare.py` compares host/software reference conventions across randomized cases. This catches coordinate convention errors, checksum assumptions, and corner cases in command construction.
 
 Example validated command:
 
@@ -1334,7 +1334,7 @@ python python/test_random_compare.py --cases 300 --seed 20260608
 
 ### 12.6 Hardware Smoke Tests
 
-`python/test_esc.py` sends 1x1-like commands for obvious escape points. It verifies UART RX, command parsing, core start, escape logic, FIFO/TX, and host parsing.
+`../python/test_esc.py` sends 1x1-like commands for obvious escape points. It verifies UART RX, command parsing, core start, escape logic, FIFO/TX, and host parsing.
 
 Validated points include:
 
@@ -1424,7 +1424,7 @@ Latest routed timing for the current default build:
 
 | Build | Scheduler | Worker contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|
-| `build_fp64.tcl` | Dynamic idle-core rows + tiled response | 2 | 0.285 ns | 0.000 ns | 0.021 ns | 0.000 ns |
+| `../build_fp64.tcl` | Dynamic idle-core rows + tiled response | 2 | 0.285 ns | 0.000 ns | 0.021 ns | 0.000 ns |
 
 The design is now LUT-dense but still has DSP headroom. Historical resource and timing points are kept in `ARCHITECTURE_EVOLUTION_REPORT.md`; this section is reserved for the current default bitstream. Many practical scenes are limited by UART bandwidth or host/protocol overhead. More worker contexts or more FP units only help the most compute-bound views unless the output path also improves.
 

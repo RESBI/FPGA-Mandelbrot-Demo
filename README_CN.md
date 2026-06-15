@@ -2,7 +2,7 @@
 
 这是一个基于 FPGA 的 Mandelbrot 渲染器。PC 通过 UART 发送一次图像命令，包含中心坐标、像素步长、最大迭代次数和图像尺寸；FPGA 使用 4 个 FP64 worker 计算像素，并以 16 位迭代次数流式返回。当前默认 worker 在一个 FP64 乘法器和一个 FP64 加法器上交错执行 2 个像素上下文。
 
-详细硬件架构见 `ARCHITECTURE_CN.md`，架构演进见 `ARCHITECTURE_EVOLUTION_REPORT_CN.md`，worker 去气泡分析见 `PIPELINE_BUBBLE_ANALYSIS_CN.md`。
+详细硬件架构见 `doc/ARCHITECTURE_CN.md`，架构演进见 `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md`，worker 去气泡分析见 `doc/PIPELINE_BUBBLE_ANALYSIS_CN.md`。
 
 ## 当前默认配置
 
@@ -30,12 +30,13 @@
 |---|---|
 | `rtl/` | Verilog RTL 源码。 |
 | `python/` | Host 工具、benchmark、图像输出脚本。 |
+| `doc/` | 架构、设计、分析和 TODO 文档。 |
 | `constraints/` | FPGA 管脚和时钟约束。 |
 | `sim/` | Vivado testbench。 |
 | `build_fp64.tcl` | 默认 FP64 bitstream 构建脚本。 |
 | `program.tcl` | JTAG 烧录脚本。 |
-| `ARCHITECTURE.md` / `ARCHITECTURE_CN.md` | 当前架构说明。 |
-| `TILE_DESIGN.md` / `TILE_DESIGN_CN.md` | Tile response 和 host tile retry 设计。 |
+| `doc/ARCHITECTURE.md` / `doc/ARCHITECTURE_CN.md` | 当前架构说明。 |
+| `doc/TILE_DESIGN.md` / `doc/TILE_DESIGN_CN.md` | Tile response 和 host tile retry 设计。 |
 
 ## 构建和烧录
 
@@ -105,9 +106,9 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 
 | 文档 | 说明 |
 |---|---|
-| `ARCHITECTURE_CN.md` | 当前 RTL、协议、tile、host 软件和资源。 |
-| `ARCHITECTURE_EVOLUTION_REPORT_CN.md` | 从单核到当前高波特率 tile 模式的演进。 |
-| `PIPELINE_BUBBLE_ANALYSIS_CN.md` | FP pipeline 去气泡、context/ADD/MUL 取舍。 |
-| `TILE_DESIGN_CN.md` | Tile response 和 host-driven tile 可靠性方案。 |
-| `UART_BAUDRATE_INVESTIGATION_CN.md` | UART baudrate 调查。 |
-| `UART_TIMING_ANALYSIS_CN.md` | UART 采样和时序分析。 |
+| `doc/ARCHITECTURE_CN.md` | 当前 RTL、协议、tile、host 软件和资源。 |
+| `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md` | 从单核到当前高波特率 tile 模式的演进。 |
+| `doc/PIPELINE_BUBBLE_ANALYSIS_CN.md` | FP pipeline 去气泡、context/ADD/MUL 取舍。 |
+| `doc/TILE_DESIGN_CN.md` | Tile response 和 host-driven tile 可靠性方案。 |
+| `doc/UART_BAUDRATE_INVESTIGATION_CN.md` | UART baudrate 调查。 |
+| `doc/UART_TIMING_ANALYSIS_CN.md` | UART 采样和时序分析。 |

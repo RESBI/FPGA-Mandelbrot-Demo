@@ -512,7 +512,7 @@ For fast escape and standard views, the board is still output/host limited even 
 
 ## Implemented 2-Context RTL Results
 
-The first synthesizable de-bubbling step has now been implemented in `rtl/mandelbrot_core_worker_2ctx.v` and selected by `WORKER_CONTEXTS=2`. The design keeps the original four workers and keeps one FP64 multiplier plus one FP64 adder per worker. It adds a second pixel context inside each worker and interleaves the two contexts over the existing FP units.
+The first synthesizable de-bubbling step has now been implemented in `../rtl/mandelbrot_core_worker_2ctx.v` and selected by `WORKER_CONTEXTS=2`. The design keeps the original four workers and keeps one FP64 multiplier plus one FP64 adder per worker. It adds a second pixel context inside each worker and interleaves the two contexts over the existing FP units.
 
 ### RTL Architecture
 
@@ -582,22 +582,22 @@ The `2.80x` whole-system speedup on mini-brot is larger than the simple legacy 2
 
 ## Generic C Pipeline Simulator
 
-The original exploratory model was `python/pipeline_2ctx_model.py`. It was useful for proving that ordered commit is required, but it only modeled `1M+1A` and 1 or 2 contexts. A faster and more general C simulator has now been added:
+The original exploratory model was `../python/pipeline_2ctx_model.py`. It was useful for proving that ordered commit is required, but it only modeled `1M+1A` and 1 or 2 contexts. A faster and more general C simulator has now been added:
 
 | File | Purpose |
 |---|---|
-| `tools/pipeline_sim.c` | Generic Mandelbrot compute-side pipeline model. Supports `K` contexts per worker, `A` adders per worker, `M` multipliers per worker, dynamic/static row scheduling, and host-like scene parameters. |
+| `../tools/pipeline_sim.c` | Generic Mandelbrot compute-side pipeline model. Supports `K` contexts per worker, `A` adders per worker, `M` multipliers per worker, dynamic/static row scheduling, and host-like scene parameters. |
 
 Build command:
 
 ```bash
-gcc -O3 -std=c11 -Wall -Wextra -o tools\pipeline_sim.exe tools\pipeline_sim.c -lm
+gcc -O3 -std=c11 -Wall -Wextra -o ..\tools\pipeline_sim.exe ..\tools\pipeline_sim.c -lm
 ```
 
 Example single configuration:
 
 ```bash
-tools\pipeline_sim.exe --width 1920 --height 1080 \
+..\tools\pipeline_sim.exe --width 1920 --height 1080 \
   --center -1.25066 0.02012 --step 1e-9 --max-iter 8192 \
   --contexts 16 --multipliers 1 --adders 1
 ```
@@ -605,7 +605,7 @@ tools\pipeline_sim.exe --width 1920 --height 1080 \
 Example sweep over the architecture options in this report:
 
 ```bash
-tools\pipeline_sim.exe --width 1920 --height 1080 \
+..\tools\pipeline_sim.exe --width 1920 --height 1080 \
   --center -1.25066 0.02012 --step 1e-9 --max-iter 8192 \
   --sweep
 ```
@@ -624,7 +624,7 @@ Validation checks already run:
 | Check | Result |
 |---|---|
 | Built with `gcc -O3 -std=c11 -Wall -Wextra` | Clean after removing the local binary from version control. |
-| `tools\pipeline_sim.exe --self-test` | Passed known point checks such as `(2.5,0) -> 1` and `(0,0) -> max_iter`. |
+| `../tools\pipeline_sim.exe --self-test` | Passed known point checks such as `(2.5,0) -> 1` and `(0,0) -> max_iter`. |
 | 32x24 exact model, `2ctx 1M+1A`, `MUL_LAT=6`, `ADD_LAT=7` | `768` pixels, average iteration `61.605469`, `282276` compute cycles. |
 | 32x24 fast model, same scene/config | `278388` compute cycles, within about `1.4%` of exact for this small frame. |
 | Legacy latency cross-check, `MUL_LAT=11`, `ADD_LAT=11` | C exact model gives `1842020` cycles versus Python model `1827819` cycles for 32x24 2ctx; close enough for scheduler-level modeling, with differences from the generalized issue arbitration. |
@@ -735,10 +735,10 @@ Before changing synthesizable worker RTL, a cycle model was added to validate th
 
 | File | Purpose |
 |---|---|
-| `python/pipeline_2ctx_model.py` | Cycle model for 1-context vs 2-context FP issue scheduling, tagged completion, and ordered commit. |
-| `sim_worker_2ctx_model.tcl` | Convenience Tcl wrapper that runs the model with a fast default trace. |
+| `../python/pipeline_2ctx_model.py` | Cycle model for 1-context vs 2-context FP issue scheduling, tagged completion, and ordered commit. |
+| `../sim_worker_2ctx_model.tcl` | Convenience Tcl wrapper that runs the model with a fast default trace. |
 
-This is a legacy performance/timing model, not a bitstream replacement. It remains useful for explaining why ordered commit is mandatory, but it only covers the original 1/2-context `1M+1A` experiment and uses the old conservative `PIPE_WAIT + 1 = 11` latency assumption. Use `tools/pipeline_sim.c` for current `MUL_LAT=6`, `ADD_LAT=7`, `K`-context, multi-adder, and multi-multiplier predictions.
+This is a legacy performance/timing model, not a bitstream replacement. It remains useful for explaining why ordered commit is mandatory, but it only covers the original 1/2-context `1M+1A` experiment and uses the old conservative `PIPE_WAIT + 1 = 11` latency assumption. Use `../tools/pipeline_sim.c` for current `MUL_LAT=6`, `ADD_LAT=7`, `K`-context, multi-adder, and multi-multiplier predictions.
 
 ### Modeled 2-Context Timing Plan
 

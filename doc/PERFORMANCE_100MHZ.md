@@ -148,8 +148,8 @@ The current 100 MHz bitstream was programmed and tested on board.
 
 | Test | Result |
 |---|---|
-| `sim_fp.tcl` | pass |
-| `sim_core.tcl` | pass |
+| `../sim_fp.tcl` | pass |
+| `../sim_core.tcl` | pass |
 | `python python\test_esc.py` | pass after transient UART retry |
 | `160x120 @256 --verify` | `19200/19200 match` |
 | Row compare `y=59, x=0..159` | all points match |

@@ -14,8 +14,8 @@ The tile design solves this by adding two layers:
 
 | Layer | Location | Role |
 |---|---|---|
-| RTL response tiling | `rtl/tx_ctrl.v` | Breaks the response stream into framed `TD` packets with coordinates and per-packet checksums. |
-| Host-driven compute tiling | `python/mandelbrot_host.py` | Splits a large image into retryable compute requests and stitches the returned subframes. |
+| RTL response tiling | `../rtl/tx_ctrl.v` | Breaks the response stream into framed `TD` packets with coordinates and per-packet checksums. |
+| Host-driven compute tiling | `../python/mandelbrot_host.py` | Splits a large image into retryable compute requests and stitches the returned subframes. |
 
 The RTL layer detects and localizes byte slips. The host-driven layer provides recovery by recomputing only the failed host tile.
 
@@ -65,7 +65,7 @@ The `TD` checksum is payload-only. Header fields are protected by semantic check
 
 ### RTL Defaults
 
-The response packet size is configured in `rtl/config.vh`:
+The response packet size is configured in `../rtl/config.vh`:
 
 | Parameter | Current Default | Meaning |
 |---|---:|---|
@@ -132,7 +132,7 @@ Very large stripes, such as `1920x240`, reduce the command count to 5 and were f
 
 The matrix below used five host tile sizes across the six standard 1080p scenes. Each combination was run once, with `--tile-retries 3` and `--quiet`. Software verification was disabled for this matrix so the measurements reflect FPGA/transport elapsed time, not Python reference rendering time.
 
-Detailed logs are under `python/host_tile_size_matrix/`.
+Detailed logs are under `../python/host_tile_size_matrix/`.
 
 ### By Scene
 

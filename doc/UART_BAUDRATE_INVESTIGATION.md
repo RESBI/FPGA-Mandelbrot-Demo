@@ -92,7 +92,7 @@ Fractional full-protocol baseline retest at `576000`:
 
 The fixed-sequence fractional echo sweep intentionally did not narrow around failures. The `10 Mbaud` timeout was recorded and testing continued directly to `12 Mbaud`.
 
-Full-protocol benchmarking used `python/uart_fractional_benchmark.py`, which rebuilds/programs the FP64 bitstream for each baudrate, runs a `160x120 --verify` gate, then runs the six existing 1080p scenes for baudrates that pass the gate. Complete logs and generated images are under `python/uart_fractional_bench/`.
+Full-protocol benchmarking used `../python/uart_fractional_benchmark.py`, which rebuilds/programs the FP64 bitstream for each baudrate, runs a `160x120 --verify` gate, then runs the six existing 1080p scenes for baudrates that pass the gate. Complete logs and generated images are under `../python/uart_fractional_bench/`.
 
 Small-frame gate results:
 
@@ -147,7 +147,7 @@ Recommended next steps for using the FT232HL bandwidth:
 
 ## Test Method
 
-The sweep used `python/baud_sweep.py`, which patches the UART constants, builds
+The sweep used `../python/baud_sweep.py`, which patches the UART constants, builds
 the bitstream, programs the FPGA, then runs serial tests. The serial port tests
 were run serially because `COM4` cannot be shared.
 

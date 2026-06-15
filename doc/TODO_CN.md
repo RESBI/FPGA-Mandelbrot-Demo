@@ -24,10 +24,10 @@
 
 ## 最近已完成
 
-- RTL 默认配置集中到 `rtl/config.vh`。
+- RTL 默认配置集中到 `../rtl/config.vh`。
 - UART RX/TX 改成 32-bit fractional-NCO baud generator。
 - 当前 host/RTL 默认 baudrate 为 12 Mbaud。
-- `rtl/tx_ctrl.v` 增加 `RT` / `TD` / `TE` tiled response framing。
+- `../rtl/tx_ctrl.v` 增加 `RT` / `TD` / `TE` tiled response framing。
 - Host parser 同时支持 legacy `RK` 和 tiled response。
 - Host-driven tiling 默认开启，`--full-frame` 保留旧单命令路径。
 - 增加 `--tile-read-timeout`，避免 byte slip 后等待全局 timeout。

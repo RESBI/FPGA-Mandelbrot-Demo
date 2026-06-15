@@ -367,10 +367,10 @@ output bandwidth (pixel ceiling at 1M baud = 50000 pixels/s).
 
 ## 7. References
 
-- `rtl/uart_rx.v` — current single‑sample UART RX implementation
-- `rtl/uart_tx.v` — current UART TX implementation
-- `rtl/uart_tx_pattern_top.v` — TX‑only test design
-- `python/uart_raw_probe.py` — raw byte dump test script
-- `python/uart_listen_raw.py` — RX‑only pattern listener
+- `../rtl/uart_rx.v` — current single‑sample UART RX implementation
+- `../rtl/uart_tx.v` — current UART TX implementation
+- `../rtl/uart_tx_pattern_top.v` — TX‑only test design
+- `../python/uart_raw_probe.py` — raw byte dump test script
+- `../python/uart_listen_raw.py` — RX‑only pattern listener
 - `UART_BAUDRATE_INVESTIGATION.md` — earlier baudrate investigation report
 - CP2102 datasheet (Silicon Labs) — baud‑rate generation formula

@@ -6,7 +6,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 
 | Stage | Report | Scope |
 |---|---|---|
-| Detailed current architecture | [ARCHITECTURE.md](ARCHITECTURE.md) | Full RTL/software architecture, protocol, verification, timing, and current performance. |
+| Detailed current architecture | [ARCHITECTURE.md](ARCHITECTURE.md) | Full ../RTL/software architecture, protocol, verification, timing, and current performance. |
 | 100 MHz timing closure | [PERFORMANCE_100MHZ.md](PERFORMANCE_100MHZ.md) | FP64 pipeline changes, 50 MHz effective to true 100 MHz migration, timing and performance impact. |
 | UART baudrate optimization | [UART_BAUDRATE_BENCHMARK.md](UART_BAUDRATE_BENCHMARK.md) | CP2102 baudrate tests, 500000 baud selection, UART-limited benchmark impact. |
 | UART baudrate deep investigation | [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md) | Raw-probe integer-divider tests, TX-only isolation, 576000 candidate. |
@@ -215,7 +215,7 @@ The 100 MHz clock allowed exact integer dividers for several candidate rates:
 
 ### Raw-Probe Deep Investigation
 
-A follow-up investigation used `python/uart_raw_probe.py` to dump raw byte-level responses at each integer-divided baud rate, identifying three distinct failure classes:
+A follow-up investigation used `../python/uart_raw_probe.py` to dump raw byte-level responses at each integer-divided baud rate, identifying three distinct failure classes:
 
 | Baud | CPB | FPGA actual | Symptom | Root cause |
 |---:|---:|---:|---:|---|
@@ -601,10 +601,10 @@ Validation after adding this mode:
 
 | Command | Result |
 |---|---|
-| `sim_multicore.tcl` | `=== MULTICORE TEST PASS: 192 pixels ===` |
-| `sim_multicore_dynamic.tcl` | `=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===` |
-| `build_fp64.tcl` | Static bitstream generated, timing met. |
-| `build_fp64_dynamic.tcl` | Dynamic bitstream generated, timing met. |
+| `../sim_multicore.tcl` | `=== MULTICORE TEST PASS: 192 pixels ===` |
+| `../sim_multicore_dynamic.tcl` | `=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===` |
+| `../build_fp64.tcl` | Static bitstream generated, timing met. |
+| `../build_fp64_dynamic.tcl` | Dynamic bitstream generated, timing met. |
 
 ## Recommended Next Evolution
 

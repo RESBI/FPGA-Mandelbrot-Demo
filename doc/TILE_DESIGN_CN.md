@@ -14,8 +14,8 @@ Tile 设计用两层机制解决这个问题：
 
 | 层级 | 位置 | 作用 |
 |---|---|---|
-| RTL response tiling | `rtl/tx_ctrl.v` | 将 response stream 切成带坐标和 per-packet checksum 的 `TD` packets。 |
-| Host-driven compute tiling | `python/mandelbrot_host.py` | 将大图拆成可重试的 compute requests，并把返回的 subframes 拼回最终图像。 |
+| RTL response tiling | `../rtl/tx_ctrl.v` | 将 response stream 切成带坐标和 per-packet checksum 的 `TD` packets。 |
+| Host-driven compute tiling | `../python/mandelbrot_host.py` | 将大图拆成可重试的 compute requests，并把返回的 subframes 拼回最终图像。 |
 
 RTL 层负责尽早检测和定位 byte slip。Host-driven 层负责恢复：只重算失败的 host tile，而不是重算整张图。
 
@@ -65,7 +65,7 @@ packet 含义：
 
 ### RTL 默认参数
 
-Response packet 大小在 `rtl/config.vh` 中配置：
+Response packet 大小在 `../rtl/config.vh` 中配置：
 
 | Parameter | 当前默认 | 含义 |
 |---|---:|---|
@@ -132,7 +132,7 @@ Tile size 是恢复粒度和固定开销之间的折中。
 
 下面的矩阵用 5 种 host tile size 跑 6 个标准 1080p 场景。每个组合跑 1 次，使用 `--tile-retries 3` 和 `--quiet`。该矩阵默认关闭 software verification，因此测量的是 FPGA/transport elapsed time，不包含 Python reference rendering 时间。
 
-详细日志在 `python/host_tile_size_matrix/` 下。
+详细日志在 `../python/host_tile_size_matrix/` 下。
 
 ### 按场景对比
 

@@ -46,7 +46,7 @@ operation: **0.5 ULP** (Unit in the Last Place).
 
 ### 2.2 FPGA Truncation (Round‑Toward‑Zero)
 
-#### fp_mul (`rtl/fp_mul.v:98–104`)
+#### fp_mul (`../rtl/fp_mul.v:98–104`)
 
 ```verilog
 // Stage 5 normalization: select 52 mantissa bits, discard remainder
@@ -63,7 +63,7 @@ retained LSB.
 
 Per‑multiply truncation error: **up to ~1 ULP** (twice IEEE 754 worst case).
 
-#### fp_add (`rtl/fp_add.v:73,141–142`)
+#### fp_add (`../rtl/fp_add.v:73,141–142`)
 
 ```verilog
 // Alignment right‑shift: discard shifted‑out bits
@@ -81,7 +81,7 @@ Two truncation points in every addition:
 
 Per‑add truncation error: **up to ~1–2 ULP**, worse than IEEE 754 RNE (0.5 ULP).
 
-#### Verification: Escape Threshold (`rtl/mandelbrot_core_worker.v:88–94`)
+#### Verification: Escape Threshold (`../rtl/mandelbrot_core_worker.v:88–94`)
 
 ```verilog
 function quick_esc;
@@ -219,10 +219,10 @@ None of these are necessary for the project’s goals.
 
 ## 6. References
 
-- `rtl/fp_mul.v` — FPGA multiplier with truncation (lines 92–104)
-- `rtl/fp_add.v` — FPGA adder with truncation (lines 73, 129–143)
-- `rtl/mandelbrot_core_worker.v` — Iteration FSM and escape check (lines 232–318)
-- `rtl/fp_defines.vh` — FP64 bit‑field definitions
-- `python/mandelbrot_host.py:214–238` — Software reference implementation
-- `python/trace_boundary_pixel.py` — Per‑iteration divergence trace script
+- `../rtl/fp_mul.v` — FPGA multiplier with truncation (lines 92–104)
+- `../rtl/fp_add.v` — FPGA adder with truncation (lines 73, 129–143)
+- `../rtl/mandelbrot_core_worker.v` — Iteration FSM and escape check (lines 232–318)
+- `../rtl/fp_defines.vh` — FP64 bit‑field definitions
+- `../python/mandelbrot_host.py:214–238` — Software reference implementation
+- `../python/trace_boundary_pixel.py` — Per‑iteration divergence trace script
 - `FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md` — This document

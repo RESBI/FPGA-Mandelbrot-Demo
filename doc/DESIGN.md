@@ -1,6 +1,6 @@
 # Mandelbrot FPGA Accelerator — 设计文档
 
-> Historical design notes. Some timing notes below describe earlier iterations of the design. The current validated configuration is documented in `README.md` and `ARCHITECTURE.md`: FP64, `FP_CE_DIV=1`, true 100 MHz core operation, 460800 baud UART.
+> Historical design notes. Some timing notes below describe earlier iterations of the design. The current validated configuration is documented in `../README.md` and `ARCHITECTURE.md`: FP64, `FP_CE_DIV=1`, true 100 MHz core operation, 460800 baud UART.
 
 ## 1. 使用过程
 
@@ -264,4 +264,4 @@ FP 流水线与 core 的同步：
 
 ## 5. FP128 模式
 
-通过 `build_fp128.tcl` 构建。FP_CE_DIV=4（25MHz 有效速率）。113×113 位乘法器将消耗约 35 个 DSP48E1 和大量 LUT。在 xc7z010-1 上资源紧张但可综合。功能正确性取决于 DSP 时序是否能收敛（FP128 的 114 位加法器 + 桶形移位器关键路径）。
+通过 `../build_fp128.tcl` 构建。FP_CE_DIV=4（25MHz 有效速率）。113×113 位乘法器将消耗约 35 个 DSP48E1 和大量 LUT。在 xc7z010-1 上资源紧张但可综合。功能正确性取决于 DSP 时序是否能收敛（FP128 的 114 位加法器 + 桶形移位器关键路径）。

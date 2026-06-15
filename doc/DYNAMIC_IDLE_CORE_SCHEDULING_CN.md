@@ -8,13 +8,13 @@
 
 | 项目 | 状态 |
 |---|---|
-| 动态 dispatcher | 已实现：`rtl/work_dispatch_dynamic_rows.v`。 |
-| 动态结果收集模块 | 已实现：`rtl/raster_collect_dynamic_rows.v`。 |
+| 动态 dispatcher | 已实现：`../rtl/work_dispatch_dynamic_rows.v`。 |
+| 动态结果收集模块 | 已实现：`../rtl/raster_collect_dynamic_rows.v`。 |
 | 模式切换 | 已实现：`mandelbrot_multicore` 和 `top` 参数 `SCHED_MODE`。 |
 | 默认模式 | `SCHED_MODE=0`，static interleaved rows。 |
 | 动态模式 | `SCHED_MODE=1`，空闲核心优先领取单行 job。 |
-| 动态 build 脚本 | `build_fp64_dynamic.tcl`。 |
-| 动态仿真 | `sim_multicore_dynamic.tcl`，通过 `=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===`。 |
+| 动态 build 脚本 | `../build_fp64_dynamic.tcl`。 |
+| 动态仿真 | `../sim_multicore_dynamic.tcl`，通过 `=== DYNAMIC MULTICORE TEST PASS: 192 pixels ===`。 |
 | Host 协议 | 保持不变，仍输出 strict raster-order 16-bit pixel stream。 |
 
 实现采用兼容旧协议的方案：每个 job 是一整行，dispatcher 把下一行分配给第一个可用 core，并写入 `owner[row] = core_id`；collector 按 raster order 逐行查 owner table，再从对应 core FIFO 取像素。该实现不是 tagged protocol v2，也不是 tile scheduler，但为后续 out-of-order/tagged/tile 架构打好了调度边界。
@@ -34,8 +34,8 @@
 
 | Build | Scheduler | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|
-| `build_fp64.tcl` | Static interleaved rows | 0.358 ns | 0.000 ns | 0.024 ns | 0.000 ns |
-| `build_fp64_dynamic.tcl` | Dynamic idle-core rows | 0.269 ns | 0.000 ns | 0.027 ns | 0.000 ns |
+| `../build_fp64.tcl` | Static interleaved rows | 0.358 ns | 0.000 ns | 0.024 ns | 0.000 ns |
+| `../build_fp64_dynamic.tcl` | Dynamic idle-core rows | 0.269 ns | 0.000 ns | 0.027 ns | 0.000 ns |
 
 | Resource | Static | Dynamic |
 |---|---:|---:|
@@ -532,7 +532,7 @@ packetizer 轮询已完成 chunk FIFO，直接发给 host。不再需要 `raster
 
 ### Milestone 4：host protocol v2
 
-在 `python/mandelbrot_host.py` 增加 `--protocol tagged` 或自动识别新 magic。host 分配目标 image buffer，按 `row_start` 写入 payload。
+在 `../python/mandelbrot_host.py` 增加 `--protocol tagged` 或自动识别新 magic。host 分配目标 image buffer，按 `row_start` 写入 payload。
 
 ### Milestone 5：hardware benchmark
 

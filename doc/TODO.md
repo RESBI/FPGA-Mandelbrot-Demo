@@ -37,10 +37,10 @@ Current default routed timing/resource snapshot:
 
 ## Completed Recently
 
-- Centralized RTL defaults in `rtl/config.vh`.
+- Centralized RTL defaults in `../rtl/config.vh`.
 - Switched UART RX/TX to a 32-bit fractional-NCO baud generator.
 - Set current default host/RTL baudrate to 12 Mbaud.
-- Added `RT` / `TD` / `TE` tiled response framing in `rtl/tx_ctrl.v`.
+- Added `RT` / `TD` / `TE` tiled response framing in `../rtl/tx_ctrl.v`.
 - Added host parser support for both legacy `RK` and tiled response protocols.
 - Made host-driven tiling the default and kept `--full-frame` for the old single-command path.
 - Added `--tile-read-timeout` so a byte slip fails a tile read promptly instead of waiting for the global timeout.
@@ -235,4 +235,4 @@ python python\mandelbrot_host.py --port COM6 --width 4096 --height 4096 --max-it
 - Program the board.
 - Run one verified small image.
 - Run one 1080p quiet transport smoke.
-- If transport/tile defaults changed, update `README.md`, `README_CN.md`, `ARCHITECTURE.md`, `ARCHITECTURE_CN.md`, `TODO.md`, and `TODO_CN.md` together.
+- If transport/tile defaults changed, update `../README.md`, `../README_CN.md`, `ARCHITECTURE.md`, `ARCHITECTURE_CN.md`, `TODO.md`, and `TODO_CN.md` together.
