@@ -2,7 +2,7 @@
 
 This report analyzes the bubble situation in the current Mandelbrot compute worker, explores multi-context in-worker scheduling, discusses tagged out-of-order pixel completion and reorder before commit, compares different `fp_mul`/`fp_add` allocations per worker, and estimates theoretical compute and whole-system performance benefits.
 
-The short version: the current two-context worker already proves the tagged multi-context architecture, but it still leaves most FP pipeline issue slots empty. Re-running the model with the current RTL latencies, `MUL_LAT=6` and `ADD_LAT=7`, shows that adding more ADD or MUL units is not useful at low context counts. The next compute gain should come from increasing contexts first. A second ADD becomes useful around 16 contexts, while a second MUL without more ADD capacity still gives essentially no gain. With the current 12 Mbaud UART path, fast scenes are output-bound; deeper compute-bound scenes would benefit most from more contexts and later from a second ADD.
+The short version: the current two-context worker already proves the tagged multi-context architecture, but it still leaves many FP pipeline issue slots empty. Re-running the model with the current RTL latencies, `MUL_LAT=6` and `ADD_LAT=7`, shows that adding more ADD or MUL units is not useful at low context counts. The next compute gain should come from increasing contexts first. On XC7K70T, the generic four-context worker now builds, programs, and passes board tests; deep compute-bound scenes improve about `1.78x-2.17x` versus the default 2ctx build. The cost is high LUT use (`88.70%`), so 4ctx is an optional build, not the default. A second ADD becomes useful around 16 contexts, while a second MUL without more ADD capacity still gives essentially no gain. With the current 12 Mbaud UART path, fast scenes remain output-bound.
 
 ## Current Context
 
@@ -16,6 +16,7 @@ Current implemented accelerator:
 | FP clock enable | `FP_CE_DIV=1` |
 | Default worker | `mandelbrot_core_worker_2ctx` |
 | Worker contexts | 2 |
+| Validated optional worker | `mandelbrot_core_worker_kctx`, 4 contexts on XC7K70T |
 | Tagged multiplier latency | `MUL_LAT=6` |
 | Tagged adder latency | `ADD_LAT=7` |
 | Legacy single-context wait | `PIPE_WAIT=10` |
@@ -182,23 +183,36 @@ The `5` comes from the adder bottleneck: one adder must issue 5 operations per i
 
 In practice, 8 to 16 contexts is still the useful range for the current FP-unit allocation. Below 8 contexts, many pipeline bubbles remain. Above 16 contexts, the one-adder issue limit dominates and extra contexts mostly add control complexity unless they are needed to tolerate divergence and ordered-commit stalls.
 
-## 4/8-Context RTL Deployment Attempt
+## 4/8-Context RTL Deployment Status
 
-After the model indicated that more contexts should be tried before adding more FP units, an experimental parameterized `1M+1A` worker was implemented as `mandelbrot_core_worker_kctx` and selected from `mandelbrot_multicore` when `WORKER_CONTEXTS` is explicitly set to 4 or 8. The existing 2-context worker remains the default deployable path.
+After the model indicated that more contexts should be tried before adding more FP units, an experimental parameterized `1M+1A` worker was implemented as `mandelbrot_core_worker_kctx` and selected from `mandelbrot_multicore` when `WORKER_CONTEXTS` is explicitly set to 4 or 8. The existing 2-context worker remains the default deployable path because it has much lower LUT use and more timing margin, but the 4-context generic worker is now validated on the larger XC7K70T target.
 
-The experiment result is important: the generic K-context RTL is functionally plausible but not deployable on the current xc7z010 target. The behavioral simulation passes, but the synthesized design is far over the available LUT budget before placement.
+The target matters. On the earlier xc7z010 target, the generic K-context RTL was functionally plausible but not deployable because it exceeded the available LUT budget before placement. On XC7K70T, the same 4-context direction becomes placeable and timing-clean, though still LUT-heavy.
 
-| Configuration | Behavioral dynamic multicore sim | Synthesized Slice LUTs | LUT-as-logic | Slice registers | DSPs | Placement result |
-|---|---:|---:|---:|---:|---:|---|
-| 2ctx current deployed worker | Existing board baseline | `13917 / 17600` (`79.07%`) | `13641 / 17600` (`77.51%`) | `14458 / 35200` (`41.07%`) | `37 / 80` (`46.25%`) | Bitstream available, timing clean |
-| 4ctx generic K-context worker | PASS, 192 pixels, `445045 ns` sim time | `37350 / 17600` (`212.22%`) | `36562 / 17600` (`207.74%`) | `19046 / 35200` (`54.11%`) | `37 / 80` (`46.25%`) | FAIL, LUT over-utilized |
-| 8ctx generic K-context worker | PASS, 192 pixels, `364705 ns` sim time | `71462 / 17600` (`406.03%`) | `70674 / 17600` (`401.56%`) | `29378 / 35200` (`83.46%`) | `37 / 80` (`46.25%`) | FAIL, LUT over-utilized |
+| Configuration | Target | Behavioral dynamic multicore sim | Slice LUTs | Slice registers | DSPs | Result |
+|---|---|---:|---:|---:|---:|---|
+| 2ctx current default | XC7K70T | Existing board baseline | `13726 / 41000` (`33.48%`) | `14559 / 82000` (`17.75%`) | `37 / 240` (`15.42%`) | Bitstream available, timing clean, default |
+| 4ctx generic K-context worker | XC7K70T | Board validated | `36367 / 41000` (`88.70%`) | `19149 / 82000` (`23.35%`) | `37 / 240` (`15.42%`) | Bitstream available, timing clean, optional |
+| 2ctx historical | xc7z010 | Existing board baseline | `13917 / 17600` (`79.07%`) | `14458 / 35200` (`41.07%`) | `37 / 80` (`46.25%`) | Bitstream available, timing clean |
+| 4ctx generic historical | xc7z010 | PASS, 192 pixels, `445045 ns` sim time | `37350 / 17600` (`212.22%`) | `19046 / 35200` (`54.11%`) | `37 / 80` (`46.25%`) | FAIL, LUT over-utilized |
+| 8ctx generic historical | xc7z010 | PASS, 192 pixels, `364705 ns` sim time | `71462 / 17600` (`406.03%`) | `29378 / 35200` (`83.46%`) | `37 / 80` (`46.25%`) | FAIL, LUT over-utilized |
 
-Because neither 4ctx nor 8ctx generated a placeable bitstream, no small-image board gate or 1080p five-run scene benchmark could be run for these configurations. The correct comparison table is therefore not a performance table; it is a feasibility table. The 2ctx data remains the only valid measured board baseline.
+The XC7K70T 4ctx bitstream was programmed successfully and passed a `160x120` small-image software verification gate: `19200/19200` pixels matched (`100.00%`) with `0.091s` FPGA elapsed. A one-run six-scene 1080p sweep with `1920x120` host/compute tiles also passed transport for every scene:
+
+| Scene | 2ctx default FPGA s | 4ctx optional FPGA s | 4ctx pps | 4ctx vs 2ctx |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `5.127` | `4.683` | `442824.20` | `1.09x` |
+| Standard @64 | `4.731` | `5.782` | `358640.05` | `0.82x` |
+| Seahorse zoom @512 | `19.440` | `9.836` | `210825.06` | `1.98x` |
+| Deep tendrils @8192 | `37.326` | `17.677` | `117303.25` | `2.11x` |
+| Deep mini-brot @8192 | `83.561` | `44.146` | `46971.46` | `1.89x` |
+| Deep Seahorse @1024 | `36.626` | `19.965` | `103861.51` | `1.83x` |
+
+The 4ctx result confirms the model direction: deeper compute-bound scenes benefit strongly from more contexts without adding DSPs. Fast scenes remain close to the output/host ceiling, and the `standard @64` one-run result shows that short-iteration scenes can be sensitive to scheduling/refill/ordering overhead rather than monotonically improving.
 
 The failure is not caused by DSP or BRAM pressure. DSP usage remains about the same because the experiment still uses one multiplier per worker. The blocker is control and routing logic: generic arrays of FP64 context state create wide operand muxes, result writeback muxes, inflight scans, and modulo context arbitration. Vivado maps those structures into a very large amount of LUT logic, and the xc7z010 has only 17600 Slice LUTs.
 
-The practical conclusion is that simply parameterizing the 2ctx scoreboard style into arbitrary `CONTEXTS=N` is the wrong deployable RTL shape for this small device. More contexts are still the right compute direction according to the model, but the implementation must be much more area-conscious.
+The practical conclusion is now target-dependent. Simply parameterizing the 2ctx scoreboard style into arbitrary `CONTEXTS=N` was the wrong deployable RTL shape for the small xc7z010 and remains area-expensive on XC7K70T. More contexts are the right compute direction, but 8/12/16-context work should still move toward a more area-conscious barrel/ring structure rather than continuing to widen the generic scoreboard.
 
 ## Current 2-Context RTL Shape
 

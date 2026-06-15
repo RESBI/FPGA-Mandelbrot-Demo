@@ -15,6 +15,7 @@
 | 浮点模式 | FP64 |
 | Mandelbrot worker | 4 |
 | 每 worker 像素上下文 | 2 |
+| 已验证可选上下文 | 4，通过 `build_fp64_contexts.tcl 4` |
 | 调度器 | 动态空闲 core 行调度，`SCHED_MODE=1` |
 | FP 有效频率 | 100 MHz，`FP_CE_DIV=1` |
 | UART | 12000000 baud，fractional NCO |
@@ -27,7 +28,7 @@
 | 当前 routed timing | `WNS=1.148ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns` |
 | 当前 placed utilization | `13726` LUTs, `14559` registers, `37` DSP48E1, `9.5` BRAM tiles |
 
-当前默认 RTL 仍是 2-context worker。本分支已从旧 Zynq-7010 平台迁移到 XC7K70T，完整 FP64 bitstream 已在新器件上构建并满足 timing。Generic 4/8-context scoreboard worker 以及后续 ring/lookahead 实验仍属于研究路径。
+当前默认 RTL 仍是 2-context worker。本分支已从旧 Zynq-7010 平台迁移到 XC7K70T，完整 FP64 bitstream 已在新器件上构建并满足 timing。Generic 4-context worker 现在也已在 XC7K70T 上完成构建、烧录和板级测试，但 LUT 占用很高，因此作为可选性能/架构实验而不是默认 bitstream。
 
 ## 目录结构
 
@@ -93,6 +94,19 @@ python python\mandelbrot_host.py --port COM9 --soft-reset
 | deep mini-brot @8192 | PASS | `83.561s` | `24815.51 pps` |
 | deep Seahorse @1024 | PASS | `36.626s` | `56615.56 pps` |
 
+可选 4-context worker 在同一 XC7K70T 环境下也已验证，bitstream 为 `fp64_ctx4_proj/mandelbrot_fp64_ctx4.runs/impl_1/top.bit`：
+
+| 场景 | 状态 | FPGA 时间 | 吞吐 |
+|---|---:|---:|---:|
+| fast escape @128 | PASS | `4.683s` | `442824.20 pps` |
+| standard @64 | PASS | `5.782s` | `358640.05 pps` |
+| Seahorse zoom @512 | PASS | `9.836s` | `210825.06 pps` |
+| deep tendrils @8192 | PASS | `17.677s` | `117303.25 pps` |
+| deep mini-brot @8192 | PASS | `44.146s` | `46971.46 pps` |
+| deep Seahorse @1024 | PASS | `19.965s` | `103861.51 pps` |
+
+4ctx 小图 gate 为 `160x120`、`--verify`、`100.00%` match，FPGA elapsed `0.091s`。深度 compute-bound 场景相对默认 2ctx 提升约 `1.78x-2.17x`；fast scenes 仍接近 12 Mbaud host/transport ceiling。`standard @64` 在这次 4ctx 单次测量中反而更慢，应视为场景和调度敏感结果。
+
 主要阶段性能对比：
 
 | 阶段 | 模式 | fast escape @128 | standard @64 | Seahorse @512 | deep mini-brot @8192 |
@@ -101,6 +115,7 @@ python python\mandelbrot_host.py --port COM9 --soft-reset
 | 12M single-burst 4-worker 2ctx | 高 baud 长 burst | `4.678s` | `4.202s` | `17.280s` | `83.428s` |
 | 12M tiled `512x120` compute | 较小 retry tile | `7.010s` | `7.374s` | `18.721s` | `84.984s` |
 | 12M tiled host tile = compute tile | 当前默认，1080p 为 `1920x120` | `5.127s` | `4.731s` | `19.440s` | `83.561s` |
+| 12M tiled 可选 4ctx worker | `build_fp64_contexts.tcl 4`，1080p 为 `1920x120` | `4.683s` | `5.782s` | `9.836s` | `44.146s` |
 
 直接使用 200 MHz 作为完整计算时钟的尝试没有得到 timing-clean bitstream。最好的 200 MHz 尝试仍为 `WNS=-0.651ns`, `TNS=-306.186ns`，因此没有下载跑分。详见 `doc/200MHZ_ATTEMPT_REPORT.md`。
 
@@ -114,6 +129,16 @@ python python\mandelbrot_host.py --port COM9 --soft-reset
 | Build | Scheduler | Contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|
 | `build_fp64.tcl` | dynamic rows + tiled response | 2 | `1.148ns` | `0.000ns` | `0.042ns` | `0.000ns` |
+| `build_fp64_contexts.tcl 4` | dynamic rows + tiled response | 4 | `0.583ns` | `0.000ns` | `0.039ns` | `0.000ns` |
+
+可选 4ctx XC7K70T 资源：
+
+| Resource | Used | Device | Utilization |
+|---|---:|---:|---:|
+| Slice LUTs | 36367 | 41000 | 88.70% |
+| Slice Registers | 19149 | 82000 | 23.35% |
+| DSP48E1 | 37 | 240 | 15.42% |
+| Block RAM Tile | 9.5 | 135 | 7.04% |
 
 ## 重要限制
 
@@ -122,7 +147,8 @@ python python\mandelbrot_host.py --port COM9 --soft-reset
 | UART 长 burst | 12 Mbaud 单帧长 burst 偶发 byte slip；推荐 host tile。 |
 | FP64 实现 | IEEE-like，非完整 IEEE-754；不完整支持 NaN/Inf/denormal/rounding。 |
 | FP64 边界差异 | RTL truncation 与 Python RNE 在边界点可能不同，视觉上可接受。 |
-| 4/8ctx generic worker | 行为仿真通过，但旧 generic 实现在早期 xc7z010 目标上 LUT 超量。 |
+| 4ctx generic worker | XC7K70T 可构建并通过板级测试，但 LUT 占用 `88.70%`，仍不是默认配置。 |
+| 8ctx generic worker | 行为仿真通过，但旧 generic 实现在早期 xc7z010 目标上 LUT 超量，XC7K70T 尚未作为默认候选验证。 |
 | 动态 owner 表 | 默认 `DYNAMIC_OWNER_DEPTH=4096`，超高帧需要重新配置。 |
 
 默认 host tile 会把逻辑大图拆成多个硬件命令，因此 4096 行限制作用于每个 tile 的高度，而不是逻辑整图高度。`--full-frame` 会恢复旧行为，此时超过 4096 行的单硬件请求仍可能 stall。

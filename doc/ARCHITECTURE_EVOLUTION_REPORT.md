@@ -382,8 +382,9 @@ The table below summarizes how each stage moved the system bottleneck.
 | Dynamic backpressure fix | Large UART-bound dynamic frames could deadlock | Gate dynamic row reuse on empty per-core FIFO | 1920-wide and full 1080p frames complete reliably under UART backpressure. |
 | Fractional UART 12 Mbaud | Integer divider precision and 576k output ceiling | Replaced integer CPB timing with 32-bit fractional baud accumulators in RX/TX | Fast 1080p scenes improve from about `28.5k pps` to `443k-493k pps`; compute-heavy scenes expose core limits. |
 | Tiled response and host-driven stripes | 12 Mbaud multi-megabyte bursts can occasionally lose bytes | Added `RT`/`TD`/`TE` response packets and host `1920x120` stripe retries | Six-scene 30-run sweep completed with 30/30 transport pass; two checksum errors recovered at tile granularity. |
-| Compute-tile retry and soft reset | Host-tile retry still recomputed large stripes and stale bytes could leave the link out of sync | Split host tiles into smaller compute tiles and added UART soft reset `RST!RST!` | Retry unit is now one compute tile, default `512x120`; host quiet mode shows compute/host tile progress. |
+| Compute-tile retry and soft reset | Host-tile retry still recomputed large stripes and stale bytes could leave the link out of sync | Added explicit compute-tile controls and UART soft reset `RST!RST!` | Retry unit is one compute tile; current default uses the host tile itself (`1920x120` at 1080p) with width capped at 4096, and optional smaller compute tiles remain available. |
 | Planned low-LUT N-context worker | Generic K-context scoreboard proved functional but exceeded LUT capacity | Documented ring/barrel context-slot worker direction | Future 4/8/12/16-context work should reduce wide muxes and scans before adding FP units. |
+| XC7K70T 4ctx optional worker | 2ctx still leaves FP issue bubbles in deep scenes | Built and validated `WORKER_CONTEXTS=4` generic worker on larger XC7K70T | Timing clean at `WNS=0.583ns`; deep 1080p scenes improve about `1.8x-2.1x`, but LUT use reaches `88.70%`. |
 
 ## Final 1080p Performance Comparison
 
@@ -558,9 +559,9 @@ Test parameters for the comparison table:
 | Deep mini-brot @8192 | `(-1.25066, 0.02012)` | `1e-9` | `8192` |
 | Deep seahorse @1024 | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` |
 
-### Abandoned N-Context Worker Experiments
+### N-Context Worker Experiments And XC7K70T 4ctx Validation
 
-After the 2-context worker became the default timing-clean design, the next compute-side question was whether more contexts could hide more FP latency without adding DSPs. Two related experiments were tried and then abandoned for xc7z010 deployment.
+After the 2-context worker became the default timing-clean design, the next compute-side question was whether more contexts could hide more FP latency without adding DSPs. Two related experiments were tried and abandoned for xc7z010 deployment, but the later XC7K70T migration provided enough LUT capacity to validate the 4-context generic worker on board.
 
 The first experiment was the generic K-context scoreboard worker, `mandelbrot_core_worker_kctx`. It preserves the 2ctx tagged writeback idea but scales it to `CONTEXTS=4` or `8` by using generic context arrays, ready scans, context tags, and ordered commit. Behavioral simulation passed, but synthesis showed that the LUT cost scales too poorly:
 
@@ -569,6 +570,28 @@ The first experiment was the generic K-context scoreboard worker, `mandelbrot_co
 | Current 2ctx specialized worker | Board baseline | `13917 / 17600` (`79.07%`) | Timing-clean default |
 | Generic 4ctx scoreboard | PASS, 192 pixels | `37350 / 17600` (`212.22%`) | Not placeable |
 | Generic 8ctx scoreboard | PASS, 192 pixels | `71462 / 17600` (`406.03%`) | Not placeable |
+
+On XC7K70T, the 4ctx version becomes deployable:
+
+| Case | Target | Timing | Slice LUTs | Registers | DSPs | Board result |
+|---|---|---:|---:|---:|---:|---|
+| Default 2ctx worker | XC7K70T | `WNS=1.148ns` | `13726 / 41000` (`33.48%`) | `14559 / 82000` (`17.75%`) | `37 / 240` (`15.42%`) | Timing-clean default, `160x120` verify PASS |
+| Generic 4ctx scoreboard | XC7K70T | `WNS=0.583ns` | `36367 / 41000` (`88.70%`) | `19149 / 82000` (`23.35%`) | `37 / 240` (`15.42%`) | Timing-clean optional build, `160x120` verify PASS |
+
+The 4ctx bitstream was built with `build_fp64_contexts.tcl 4`, programmed from `fp64_ctx4_proj/mandelbrot_fp64_ctx4.runs/impl_1/top.bit`, and verified at `160x120`: `19200/19200` pixels matched (`100.00%`) with `0.091s` FPGA elapsed.
+
+One-run 1080p results at 12 Mbaud using `1920x120` host/compute tiles:
+
+| Scene | Default 2ctx FPGA s | Optional 4ctx FPGA s | Optional 4ctx pps | 4ctx vs 2ctx |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `5.127` | `4.683` | `442824.20` | `1.09x` |
+| Standard @64 | `4.731` | `5.782` | `358640.05` | `0.82x` |
+| Seahorse zoom @512 | `19.440` | `9.836` | `210825.06` | `1.98x` |
+| Deep tendrils @8192 | `37.326` | `17.677` | `117303.25` | `2.11x` |
+| Deep mini-brot @8192 | `83.561` | `44.146` | `46971.46` | `1.89x` |
+| Deep Seahorse @1024 | `36.626` | `19.965` | `103861.51` | `1.83x` |
+
+The result updates the earlier conclusion: generic K-context is not deployable on the small xc7z010, but 4ctx is deployable on XC7K70T. It is still not the best long-term RTL shape because it spends most of the extra device headroom on wide context arrays, operand muxes, writeback demuxes, and scans. The right next high-context architecture remains a lower-LUT explicit-slot or barrel/ring worker.
 
 The second experiment modeled a ring/barrel worker with a small lookahead window. The model suggested that `4ctx ring_la4` could recover most of the lost scheduling freedom while avoiding a full K-way scoreboard. A minimal RTL attempt implemented that idea by adding lookahead scheduling to the generic K-context worker. It was also abandoned because it still left Vivado with generic FP64 context arrays and wide mux/writeback fabrics:
 
@@ -579,9 +602,9 @@ The second experiment modeled a ring/barrel worker with a small lookahead window
 | `4ctx LA4` generic lookahead | PASS, 192 pixels, `444355 ns` | Placement blocked: synth `39025 / 17600` Slice LUTs (`221.73%`) |
 | `8ctx LA4` generic lookahead | PASS, 192 pixels, `328325 ns` | Not pursued to implementation after 4ctx failed |
 
-No 1080p board benchmark was run for these experiments because there was no timing-clean candidate bitstream. The architectural decision is to revert RTL to the last scoreboard version for documentation and regression only, keep the timing-clean 2ctx worker as the deployed default, and not pursue the ring/lookahead implementation path in this repository.
+No 1080p board benchmark was run for the abandoned xc7z010 lookahead variants because there was no suitable timing-clean candidate bitstream. The current architectural decision is to keep the timing-clean 2ctx worker as the default, keep the XC7K70T 4ctx generic worker as an optional validated build, and not pursue the old generic lookahead implementation path in this repository.
 
-The practical lesson is that model-level scheduling improvements are not enough when the RTL shape still exposes generic FP64 context arrays to synthesis. Any future high-context attempt would need to be a fresh hand-shaped worker with explicit slots and measured single-core/two-core LUT scaling, not a parameterized extension of `mandelbrot_core_worker_kctx`.
+The practical lesson is that model-level scheduling improvements are not enough when the RTL shape still exposes generic FP64 context arrays to synthesis. XC7K70T proves the performance direction for 4ctx, but its `88.70%` LUT use also shows why any future 8/12/16-context attempt should be a fresh hand-shaped worker with explicit slots and measured single-core/two-core LUT scaling, not a wider parameterized extension of `mandelbrot_core_worker_kctx`.
 
 ## Architectural Lessons
 
@@ -654,7 +677,7 @@ Recommended order:
 | 1 | Add sequence numbers and true retransmission | Current `RT`/`TD`/`TE` packets detect errors, and host-driven tiling can recompute a stripe, but the FPGA still cannot retransmit one packet. |
 | 2 | Add request IDs and stronger row/tile IDs | Enables resynchronization, duplicate rejection, and out-of-order completion beyond the current raster collector. |
 | 3 | Add a higher-bandwidth transport | USB FIFO, SPI, Ethernet, or PS memory mapping would remove UART/driver burst limits. |
-| 4 | Keep 2ctx as the deployable worker; treat 4/8ctx as research-only unless a fresh explicit-slot worker is designed | Generic scoreboard and lookahead paths are not deployable on xc7z010. |
+| 4 | Keep 2ctx as the default worker; treat XC7K70T 4ctx as an optional high-LUT performance build | Generic 4ctx is now board-validated on XC7K70T, but `88.70%` LUT use leaves little headroom. |
 | 5 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
 | 6 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
 | 7 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
@@ -675,5 +698,6 @@ The project evolved through a pragmatic sequence:
 10. Fix dynamic row reuse under UART backpressure by requiring an empty per-core FIFO before assigning another row to a core.
 11. Replace integer UART timing with a fractional baud accumulator and validate 12 Mbaud full-protocol operation.
 12. Add tiled response framing and host-driven 1920x120 stripe retries to make 12 Mbaud operation recoverable at tile granularity.
+13. Validate the optional 4-context generic worker on XC7K70T, confirming the context-scaling performance direction while exposing the LUT cost.
 
-The current design preserves the original host command protocol while raising the default transport to 12 Mbaud and adding packetized response parsing. Fast 1080p scenes now reach hundreds of thousands of pixels per second, while deep mini-brot remains compute-bound around `24.9k pixels/s`. The next major architecture step is no longer another integer baud tweak; it is sequence-numbered retransmission or a stronger transport so high-baud long bursts are recoverable without recomputing a whole host tile.
+The current design preserves the original host command protocol while raising the default transport to 12 Mbaud and adding packetized response parsing. Fast 1080p scenes now reach hundreds of thousands of pixels per second, while the optional 4ctx worker raises deep mini-brot from about `24.8k` to `47.0k pixels/s`. The next major architecture step is no longer another integer baud tweak; it is sequence-numbered retransmission, a stronger transport, or a lower-LUT high-context worker that keeps the 4ctx performance direction without consuming nearly all XC7K70T LUTs.

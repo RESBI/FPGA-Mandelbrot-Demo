@@ -17,23 +17,23 @@ This file tracks current work after the default FP64, 4-worker, dynamic-row, 12 
 | RTL response tile width | 64 columns |
 | Host tiling | Enabled by default |
 | Default host tile | full width, up to 120 rows |
-| Default compute tile | `512x120` inside each host tile |
+| Default compute tile | host tile itself, width capped at 4096 |
 | Retry unit | One hardware compute tile |
 | Soft reset command | `RST!RST!` |
-| Default serial port | `COM6` |
+| Default serial port | `COM9` |
 
 Current default routed timing/resource snapshot:
 
 | Metric | Value |
 |---|---:|
-| WNS | 0.285 ns |
+| WNS | 1.148 ns |
 | TNS | 0.000 ns |
-| WHS | 0.021 ns |
+| WHS | 0.042 ns |
 | THS | 0.000 ns |
-| Slice LUTs | 13917 / 17600, 79.07% |
-| Slice Registers | 14458 / 35200, 41.07% |
-| DSP48E1 | 37 / 80, 46.25% |
-| Block RAM Tile | 9.5 / 60, 15.83% |
+| Slice LUTs | 13726 / 41000, 33.48% |
+| Slice Registers | 14559 / 82000, 17.75% |
+| DSP48E1 | 37 / 240, 15.42% |
+| Block RAM Tile | 9.5 / 135, 7.04% |
 
 ## Completed Recently
 
@@ -44,7 +44,7 @@ Current default routed timing/resource snapshot:
 - Added host parser support for both legacy `RK` and tiled response protocols.
 - Made host-driven tiling the default and kept `--full-frame` for the old single-command path.
 - Added `--tile-read-timeout` so a byte slip fails a tile read promptly instead of waiting for the global timeout.
-- Added compute sub-tiling inside host tiles with default `512x120` retry units.
+- Added compute-tile controls; current default uses the host tile as the compute tile, with compute width capped at 4096.
 - Added failed compute-tile coordinate logging and per-compute-tile retry.
 - Added UART soft reset command `RST!RST!` and automatic soft reset after failed compute tile attempts.
 - Added `--soft-reset` and `--no-soft-reset-on-retry` host options.
@@ -53,17 +53,18 @@ Current default routed timing/resource snapshot:
 - Added `tx_ctrl` tiled response simulations for `4096x120` and host-tiled `4096x4096` behavior.
 - Added `cmd_parser` soft reset simulation.
 - Validated dynamic multicore simulation after reset changes.
+- Validated optional XC7K70T 4-context worker: timing clean at `WNS=0.583ns`, `160x120` verify PASS, and six 1080p scenes PASS.
 - Documented current resource/timing, 4/8-context experiments, pipeline-bubble analysis, and Chinese documentation mirrors.
 
 ## P0 - Reliability And Correctness
 
-### Board-Level Soak For Compute Sub-Tile Retry
+### Board-Level Soak For Current Compute-Tile Defaults
 
-The previous 30-run 1080p stability data used host-tile retry. The current host uses `512x120` compute subtiles and automatic soft reset, so it needs fresh board-level soak data.
+The previous 30-run 1080p stability data used host-tile retry with older defaults. The current host uses the host tile as the compute tile by default and automatic soft reset on retry, so it needs fresh multi-run board-level soak data beyond the one-run six-scene pass.
 
 Tasks:
 
-- Re-run the six-scene 1080p stability benchmark with default compute sub-tiling.
+- Re-run the six-scene 1080p stability benchmark with current default host/compute tiling.
 - Record retry count, recovered compute tile coordinates, elapsed time, and whether soft reset was used.
 - Include at least one long `4096x4096` run without `--verify`.
 - Keep failed cases in the log; do not shrink or bisect the requested image when recording failures.
@@ -137,13 +138,13 @@ Tasks:
 
 ### Low-LUT Higher-Context Worker
 
-Generic 4/8-context workers pass behavioral simulation but exceed xc7z010 LUT capacity.
+Generic 4ctx now passes board validation on XC7K70T but uses `88.70%` of LUTs. Generic 8ctx exceeded xc7z010 capacity historically and should not be scaled up without a lower-LUT structure.
 
 Tasks:
 
-- Design a specialized 4-context worker with lower control/register overhead than the generic K-context prototype.
+- Design a specialized 8/12/16-context worker with lower control/register overhead than the generic K-context prototype.
 - Reuse one multiplier and one adder first; do not add FP units until context count is high enough.
-- Re-run pipeline simulator and RTL simulation for 4ctx/8ctx candidates.
+- Re-run pipeline simulator and RTL simulation for 8ctx/12ctx/16ctx candidates.
 - Only evaluate `1M+2A` after a high-context `1M+1A` worker is viable; avoid `2M+1A` unless the ADD bottleneck is solved.
 
 ### FP128 Conservative Path
@@ -159,15 +160,15 @@ Tasks:
 
 ## P2 - Performance And UX
 
-### Re-Tune Tile Sizes After Compute Sub-Tiling
+### Re-Tune Explicit Compute Tile Sizes
 
-The existing tile-size matrix predates default compute sub-tiling.
+The current default favors lower command overhead by using the host tile as the compute tile. Smaller explicit compute tiles may still be useful when retry cost is more important than throughput.
 
 Tasks:
 
-- Sweep `--compute-tile-width 256/512/1024/2048` with `--tile-height 120`.
+- Sweep `--compute-tile-width 256/512/1024/2048/1920` with `--tile-height 120`.
 - Compare retry cost, command overhead, and total frame time across the six standard scenes.
-- Keep `512x120` if it is the best reliability/throughput compromise; otherwise update defaults and docs.
+- Keep host tile = compute tile if it remains the best throughput/reliability compromise; otherwise update defaults and docs.
 
 ### Reduce Python Host Overhead
 
@@ -215,13 +216,13 @@ python python\mandelbrot_host.py --verify --width 160 --height 120 --max-iter 25
 Recommended 1080p transport smoke:
 
 ```bash
-python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --tile-width 1920 --tile-height 120 --compute-tile-width 512 --compute-tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_transport_smoke.png
+python python\mandelbrot_host.py --port COM9 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_transport_smoke.png
 ```
 
 Large logical image smoke, no software verification:
 
 ```bash
-python python\mandelbrot_host.py --port COM6 --width 4096 --height 4096 --max-iter 8192 --center -0.743643887037151 0.13182590420533 --step 1.2e-09 --timeout 3600 --quiet --output python\hw_4096x4096_smoke.png
+python python\mandelbrot_host.py --port COM9 --width 4096 --height 4096 --max-iter 8192 --center -0.743643887037151 0.13182590420533 --step 1.2e-09 --timeout 3600 --quiet --output python\hw_4096x4096_smoke.png
 ```
 
 ## Release Checklist

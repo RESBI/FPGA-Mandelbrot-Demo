@@ -4,7 +4,7 @@
 
 ## 摘要
 
-当前 2-context worker 已证明 tagged multi-context 架构可行，但 FP pipeline 仍未饱和。使用当前 RTL latency `MUL_LAT=6`、`ADD_LAT=7` 重新建模后，结论是：低 context 下增加 ADD 或 MUL 没有收益。下一步应先增加 contexts。第二个 ADD 大约到 16 contexts 才明显有价值；第二个 MUL 在没有更多 ADD 容量时基本无收益。
+当前 2-context worker 已证明 tagged multi-context 架构可行，但 FP pipeline 仍未饱和。使用当前 RTL latency `MUL_LAT=6`、`ADD_LAT=7` 重新建模后，结论是：低 context 下增加 ADD 或 MUL 没有收益。下一步应先增加 contexts。XC7K70T 上 4-context generic worker 已经构建、烧录并通过板级测试，深度 compute-bound 场景相对默认 2ctx 提升约 `1.78x-2.17x`。代价是 LUT 占用达到 `88.70%`，因此 4ctx 是可选 build，不是默认配置。第二个 ADD 大约到 16 contexts 才明显有价值；第二个 MUL 在没有更多 ADD 容量时基本无收益。
 
 ## 当前实现
 
@@ -14,6 +14,7 @@
 | System clock | 100 MHz |
 | Worker count | 4 |
 | Worker contexts | 2 |
+| 已验证可选 worker | `mandelbrot_core_worker_kctx`，XC7K70T 4 contexts |
 | Per worker FP units | 1 multiplier + 1 adder |
 | `MUL_LAT` | 6 |
 | `ADD_LAT` | 7 |
@@ -68,17 +69,30 @@ escape iteration latency ~= 2*MUL_LAT + max(MUL_LAT, ADD_LAT)
 | 12 | 5.0 | 接近饱和。 |
 | 16 | 5.0 | 多余 context 主要吸收 stall。 |
 
-## 4/8ctx RTL 部署实验
+## 4/8ctx RTL 部署状态
 
-实现了实验性 `mandelbrot_core_worker_kctx`，当 `WORKER_CONTEXTS=4/8` 时使用。默认 2ctx 仍使用专用 `mandelbrot_core_worker_2ctx`。
+实现了 `mandelbrot_core_worker_kctx`，当 `WORKER_CONTEXTS=4/8` 时使用。默认 2ctx 仍使用专用 `mandelbrot_core_worker_2ctx`，因为资源低、timing margin 更高；但 4ctx generic worker 已经在更大的 XC7K70T 上验证通过。
 
-| 配置 | 行为仿真 | Slice LUTs | LUT-as-logic | Registers | DSPs | 结果 |
-|---|---:|---:|---:|---:|---:|---|
-| 2ctx current | board baseline | `13917 / 17600` | `13641 / 17600` | `14458 / 35200` | `37 / 80` | 可部署，timing clean |
-| 4ctx generic | PASS, 192 pixels, `445045 ns` | `37350 / 17600` | `36562 / 17600` | `19046 / 35200` | `37 / 80` | FAIL, LUT 超量 |
-| 8ctx generic | PASS, 192 pixels, `364705 ns` | `71462 / 17600` | `70674 / 17600` | `29378 / 35200` | `37 / 80` | FAIL, LUT 超量 |
+| 配置 | 目标 | 行为/板级状态 | Slice LUTs | Registers | DSPs | 结果 |
+|---|---|---:|---:|---:|---:|---|
+| 2ctx 当前默认 | XC7K70T | board baseline | `13726 / 41000` (`33.48%`) | `14559 / 82000` (`17.75%`) | `37 / 240` (`15.42%`) | 可部署，timing clean，默认 |
+| 4ctx generic | XC7K70T | board validated | `36367 / 41000` (`88.70%`) | `19149 / 82000` (`23.35%`) | `37 / 240` (`15.42%`) | 可部署，timing clean，可选 |
+| 2ctx historical | xc7z010 | board baseline | `13917 / 17600` (`79.07%`) | `14458 / 35200` (`41.07%`) | `37 / 80` (`46.25%`) | 可部署，timing clean |
+| 4ctx generic historical | xc7z010 | PASS, 192 pixels, `445045 ns` | `37350 / 17600` (`212.22%`) | `19046 / 35200` (`54.11%`) | `37 / 80` (`46.25%`) | FAIL, LUT 超量 |
+| 8ctx generic historical | xc7z010 | PASS, 192 pixels, `364705 ns` | `71462 / 17600` (`406.03%`) | `29378 / 35200` (`83.46%`) | `37 / 80` (`46.25%`) | FAIL, LUT 超量 |
 
-结论：generic K-context 数组式 scoreboard 功能上可行，但在 xc7z010 上不可部署。问题不是 DSP，而是 FP64 context array、wide mux、writeback mux、inflight scan 和 arbitration logic 造成 LUT 爆炸。
+4ctx XC7K70T bitstream 已成功烧录，并通过 `160x120` 小图 `--verify` gate：`19200/19200` match (`100.00%`)，FPGA elapsed `0.091s`。1080p 六场景、默认 `1920x120` host/compute tile 单次测试也全部 PASS：
+
+| Scene | 2ctx default FPGA s | 4ctx optional FPGA s | 4ctx pps | 4ctx vs 2ctx |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `5.127` | `4.683` | `442824.20` | `1.09x` |
+| Standard @64 | `4.731` | `5.782` | `358640.05` | `0.82x` |
+| Seahorse zoom @512 | `19.440` | `9.836` | `210825.06` | `1.98x` |
+| Deep tendrils @8192 | `37.326` | `17.677` | `117303.25` | `2.11x` |
+| Deep mini-brot @8192 | `83.561` | `44.146` | `46971.46` | `1.89x` |
+| Deep Seahorse @1024 | `36.626` | `19.965` | `103861.51` | `1.83x` |
+
+结论：generic K-context 数组式 scoreboard 功能上可行；在 xc7z010 上不可部署，在 XC7K70T 上 4ctx 可部署但 LUT 很高。问题不是 DSP，而是 FP64 context array、wide mux、writeback mux、inflight scan 和 arbitration logic 造成 LUT 快速增长。后续 8/12/16ctx 仍应转向更低 LUT 的 barrel/ring 结构。
 
 ## 当前 2ctx RTL 形态
 
@@ -165,6 +179,19 @@ cycle k+7:   adder result returns to delayed slot s
 |---:|---:|---:|---:|
 | `0.285ns` | `0.000ns` | `0.021ns` | `0.000ns` |
 
+XC7K70T 4ctx 可选 build 资源和 timing：
+
+| Resource | Used | Device | Utilization |
+|---|---:|---:|---:|
+| Slice LUTs | 36367 | 41000 | 88.70% |
+| Slice Registers | 19149 | 82000 | 23.35% |
+| DSP48E1 | 37 | 240 | 15.42% |
+| Block RAM Tile | 9.5 | 135 | 7.04% |
+
+| WNS | TNS | WHS | THS |
+|---:|---:|---:|---:|
+| `0.583ns` | `0.000ns` | `0.039ns` | `0.000ns` |
+
 ## ADD/MUL 数量分析
 
 一个 non-escaping iteration 需要 3 个 MUL issue 和 5 个 ADD issue。理想 issue limit：
@@ -199,7 +226,7 @@ T_issue = max(3 / M, 5 / A)
 
 | 优先级 | 工作 | 原因 |
 |---:|---|---|
-| 1 | 设计低 LUT 4ctx worker | generic kctx LUT 超量，但模型显示 context 是下一步。 |
+| 1 | 设计低 LUT 高 context worker | XC7K70T 4ctx 已验证方向正确，但 generic kctx LUT 占用高。 |
 | 2 | 保持 tagged writeback 和 ordered commit | 正确性依赖 result tag 和行内顺序。 |
 | 3 | 继续改善 transport/protocol | fast scenes 仍 output-bound。 |
 | 4 | 评估 8ctx/16ctx `1M+1A` | 接近 adder issue limit。 |
@@ -208,4 +235,4 @@ T_issue = max(3 / M, 5 / A)
 
 ## 结论
 
-当前 2ctx worker 是正确的去气泡第一步，但还没有填满 FP pipeline。下一步不是增加 FP unit，而是实现低 LUT 的更多 context。Generic 4/8ctx 实验证明了功能方向，也证明了不能用天真的参数化数组结构直接部署在小器件上。
+当前 2ctx worker 是正确的去气泡第一步，但还没有填满 FP pipeline。XC7K70T 4ctx 板级结果进一步证明了增加 context 的性能方向，尤其是深度 compute-bound 场景。下一步不是增加 FP unit，而是实现低 LUT 的更多 context。Generic 4/8ctx 实验证明了功能方向，也证明了天真的参数化数组结构会快速消耗 LUT。

@@ -22,6 +22,7 @@ Current validated default configuration:
 | Floating-point mode | FP64 |
 | Mandelbrot workers | 4 |
 | Pixel contexts per worker | 2 |
+| Validated optional worker contexts | 4 via `build_fp64_contexts.tcl 4` |
 | Default scheduler | Dynamic idle-core rows (`SCHED_MODE=1`) |
 | Worker context generic | `WORKER_CONTEXTS=2` |
 | FP datapath effective rate | 100 MHz (`FP_CE_DIV=1`) |
@@ -35,7 +36,7 @@ Current validated default configuration:
 | Current routed timing | `WNS=1.148ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns` |
 | Current placed utilization | `13726` LUTs, `14559` registers, `37` DSP48E1, `9.5` BRAM tiles |
 
-The default RTL remains the 2-context worker. On this branch the board target has moved from the earlier Zynq-7010 platform to XC7K70T, and the full FP64 bitstream now builds and meets timing on the new part. The generic 4/8-context scoreboard worker and the follow-up ring/lookahead experiment remain research paths. See [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md) for the data.
+The default RTL remains the 2-context worker. On this branch the board target has moved from the earlier Zynq-7010 platform to XC7K70T, and the full FP64 bitstream now builds and meets timing on the new part. The generic 4-context scoreboard worker also now builds, programs, and passes board tests on XC7K70T, but it is kept as an optional high-LUT build rather than the default. The earlier 4/8-context feasibility data on xc7z010 and the ring/lookahead follow-up remain documented research paths. See [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md) for the historical data.
 
 ## Repository Layout
 
@@ -312,6 +313,7 @@ The existing Vivado build scripts intentionally override some top-level paramete
 | Script | Overrides | Purpose |
 |---|---|---|
 | `build_fp64.tcl` | `SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=2` | Default FP64 dynamic 2-context build. |
+| `build_fp64_contexts.tcl` | `SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=N` | Optional K-context worker build, validated with `N=4` on XC7K70T. |
 | `build_fp64_static.tcl` | `SCHED_MODE=0 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=1` | Static scheduler, single-context regression build. |
 | `build_fp64_dynamic.tcl` | `SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096` | Earlier dynamic scheduler build. |
 
@@ -347,6 +349,22 @@ Expected output includes:
 BUILD SUCCESSFUL
 Bitstream: ./fp64_proj/mandelbrot_fp64.runs/impl_1/top.bit
 ```
+
+### Optional 4-Context FP64 Build
+
+The XC7K70T branch also validates the generic K-context worker at four contexts:
+
+```bash
+Z:\Softwares\Xilinx\Vivado\2020.2\bin\vivado.bat -mode batch -source build_fp64_contexts.tcl -tclargs 4
+```
+
+Expected bitstream:
+
+```text
+./fp64_ctx4_proj/mandelbrot_fp64_ctx4.runs/impl_1/top.bit
+```
+
+This build is timing-clean on XC7K70T but uses substantially more LUTs than the default 2-context worker, so it is treated as an optional performance/architecture experiment.
 
 ### FP128 Build
 
@@ -593,6 +611,19 @@ Latest 1080p host-tiled results at 12 Mbaud with compute tile equal to host tile
 | Deep mini-brot @8192 | `1/1` | `0` | `83.561s` | `24815.51 pps` |
 | Deep Seahorse @1024 | `1/1` | `0` | `36.626s` | `56615.56 pps` |
 
+Optional 4-context worker results on the same XC7K70T setup, after programming `fp64_ctx4_proj/mandelbrot_fp64_ctx4.runs/impl_1/top.bit`:
+
+| Scene | Transport pass | Retry events | FPGA Time | Throughput |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `1/1` | `0` | `4.683s` | `442824.20 pps` |
+| Standard @64 | `1/1` | `0` | `5.782s` | `358640.05 pps` |
+| Seahorse zoom @512 | `1/1` | `0` | `9.836s` | `210825.06 pps` |
+| Deep tendrils @8192 | `1/1` | `0` | `17.677s` | `117303.25 pps` |
+| Deep mini-brot @8192 | `1/1` | `0` | `44.146s` | `46971.46 pps` |
+| Deep Seahorse @1024 | `1/1` | `0` | `19.965s` | `103861.51 pps` |
+
+The 4-context worker passed a `160x120` software-verified gate at `100.00%` match with `0.091s` FPGA elapsed. Its deep compute-bound scenes improve by about `1.78x-2.17x` versus the default 2-context build, while fast scenes remain close to the 12 Mbaud host/transport ceiling. The `standard @64` scene is slower in this one-run 4ctx measurement, so it should be treated as scene- and scheduler-sensitive rather than a universal win.
+
 Earlier repeated 1080p host-tiled stability results at 12 Mbaud with smaller compute subtiles:
 
 | Scene | Transport pass | Retry events | Mean FPGA Time | Min | Max | Stddev | CV | Mean Throughput | Change vs single-burst 12M |
@@ -678,6 +709,7 @@ Current XC7K70T 100 MHz internal FP64 routed timing is signed off with no core m
 | Build | Scheduler | Worker contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|
 | `build_fp64.tcl` on `xc7k70tfbg676-1` | Dynamic idle-core rows + tiled response | 2 | `1.148ns` | `0.000ns` | `0.042ns` | `0.000ns` |
+| `build_fp64_contexts.tcl 4` on `xc7k70tfbg676-1` | Dynamic idle-core rows + tiled response | 4 | `0.583ns` | `0.000ns` | `0.039ns` | `0.000ns` |
 
 Latest placed utilization for the XC7K70T default build:
 
@@ -685,6 +717,15 @@ Latest placed utilization for the XC7K70T default build:
 |---|---:|---:|---:|
 | Slice LUTs | 13726 | 41000 | 33.48% |
 | Slice Registers | 14559 | 82000 | 17.75% |
+| DSP48E1 | 37 | 240 | 15.42% |
+| Block RAM Tile | 9.5 | 135 | 7.04% |
+
+Optional 4-context XC7K70T placed utilization:
+
+| Resource | Used | Device | Utilization |
+|---|---:|---:|---:|
+| Slice LUTs | 36367 | 41000 | 88.70% |
+| Slice Registers | 19149 | 82000 | 23.35% |
 | DSP48E1 | 37 | 240 | 15.42% |
 | Block RAM Tile | 9.5 | 135 | 7.04% |
 
@@ -696,6 +737,7 @@ Major validated performance points:
 | 12M single-burst, 4-worker 2ctx | High baud, long burst | `4.678s` | `4.202s` | `17.280s` | `83.428s` |
 | 12M tiled, `512x120` compute | Retry-safe smaller compute tiles | `7.010s` | `7.374s` | `18.721s` | `84.984s` |
 | 12M tiled, host tile as compute tile | Current default, `1920x120` at 1080p | `5.127s` | `4.731s` | `19.440s` | `83.561s` |
+| 12M tiled, optional 4ctx worker | `build_fp64_contexts.tcl 4`, `1920x120` at 1080p | `4.683s` | `5.782s` | `9.836s` | `44.146s` |
 
 The direct-200 MHz datapath experiment did not produce a timing-clean bitstream. The best attempted 200 MHz build after RTL and implementation-strategy changes still failed at `WNS=-0.651ns`, `TNS=-306.186ns`, so it was not downloaded or benchmarked. Details are in [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md).
 
