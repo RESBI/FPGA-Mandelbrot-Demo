@@ -15,6 +15,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Dynamic idle-core scheduling | [DYNAMIC_IDLE_CORE_SCHEDULING.md](DYNAMIC_IDLE_CORE_SCHEDULING.md) | Optional row-level dynamic scheduler, result collector, mode switching, validation, and limits. |
 | Multi-core feasibility | [MULTICORE_FEASIBILITY.md](MULTICORE_FEASIBILITY.md) | Resource model, scheduler alternatives, output-order constraints, expected scaling. |
 | Implemented 4-core design | [MULTICORE_4CORE_ARCHITECTURE.md](MULTICORE_4CORE_ARCHITECTURE.md) | Final 4-core architecture, modular dispatch/merge boundary, validation, 1080p benchmark results. |
+| Abandoned N-context worker experiments | [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](CONTEXT_WORKER_ARCHITECTURE_REPORT.md) | Generic scoreboard 4/8ctx and ring/lookahead experiments; behavioral pass but not deployable on xc7z010. |
 | Historical notes | [DESIGN.md](DESIGN.md) | Earlier design notes and historical context. |
 
 ## Final Current State
@@ -554,6 +555,31 @@ Test parameters for the comparison table:
 | Deep mini-brot @8192 | `(-1.25066, 0.02012)` | `1e-9` | `8192` |
 | Deep seahorse @1024 | `(-0.743643887037151, 0.13182590420533)` | `1e-8` | `1024` |
 
+### Abandoned N-Context Worker Experiments
+
+After the 2-context worker became the default timing-clean design, the next compute-side question was whether more contexts could hide more FP latency without adding DSPs. Two related experiments were tried and then abandoned for xc7z010 deployment.
+
+The first experiment was the generic K-context scoreboard worker, `mandelbrot_core_worker_kctx`. It preserves the 2ctx tagged writeback idea but scales it to `CONTEXTS=4` or `8` by using generic context arrays, ready scans, context tags, and ordered commit. Behavioral simulation passed, but synthesis showed that the LUT cost scales too poorly:
+
+| Case | Behavioral sim | Slice LUTs | Placement result |
+|---|---:|---:|---|
+| Current 2ctx specialized worker | Board baseline | `13917 / 17600` (`79.07%`) | Timing-clean default |
+| Generic 4ctx scoreboard | PASS, 192 pixels | `37350 / 17600` (`212.22%`) | Not placeable |
+| Generic 8ctx scoreboard | PASS, 192 pixels | `71462 / 17600` (`406.03%`) | Not placeable |
+
+The second experiment modeled a ring/barrel worker with a small lookahead window. The model suggested that `4ctx ring_la4` could recover most of the lost scheduling freedom while avoiding a full K-way scoreboard. A minimal RTL attempt implemented that idea by adding lookahead scheduling to the generic K-context worker. It was also abandoned because it still left Vivado with generic FP64 context arrays and wide mux/writeback fabrics:
+
+| Case | Behavioral sim | Implementation result |
+|---|---:|---|
+| `4ctx LA1` generic lookahead | PASS, 192 pixels, `497905 ns` | Bitstream generated but timing failed: `WNS=-0.271ns`, `TNS=-3.574ns` |
+| `4ctx LA2` generic lookahead | PASS, 192 pixels, `468745 ns` | Placement blocked: synth `25194 / 17600` Slice LUTs (`143.15%`) |
+| `4ctx LA4` generic lookahead | PASS, 192 pixels, `444355 ns` | Placement blocked: synth `39025 / 17600` Slice LUTs (`221.73%`) |
+| `8ctx LA4` generic lookahead | PASS, 192 pixels, `328325 ns` | Not pursued to implementation after 4ctx failed |
+
+No 1080p board benchmark was run for these experiments because there was no timing-clean candidate bitstream. The architectural decision is to revert RTL to the last scoreboard version for documentation and regression only, keep the timing-clean 2ctx worker as the deployed default, and not pursue the ring/lookahead implementation path in this repository.
+
+The practical lesson is that model-level scheduling improvements are not enough when the RTL shape still exposes generic FP64 context arrays to synthesis. Any future high-context attempt would need to be a fresh hand-shaped worker with explicit slots and measured single-core/two-core LUT scaling, not a parameterized extension of `mandelbrot_core_worker_kctx`.
+
 ## Architectural Lessons
 
 ### Streaming Was The Right Initial Choice
@@ -625,7 +651,7 @@ Recommended order:
 | 1 | Add sequence numbers and true retransmission | Current `RT`/`TD`/`TE` packets detect errors, and host-driven tiling can recompute a stripe, but the FPGA still cannot retransmit one packet. |
 | 2 | Add request IDs and stronger row/tile IDs | Enables resynchronization, duplicate rejection, and out-of-order completion beyond the current raster collector. |
 | 3 | Add a higher-bandwidth transport | USB FIFO, SPI, Ethernet, or PS memory mapping would remove UART/driver burst limits. |
-| 4 | Scale worker contexts from 2 toward 4/8 | Attacks the remaining compute-bound bottleneck inside each worker without adding DSPs. |
+| 4 | Keep 2ctx as the deployable worker; treat 4/8ctx as research-only unless a fresh explicit-slot worker is designed | Generic scoreboard and lookahead paths are not deployable on xc7z010. |
 | 5 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
 | 6 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
 | 7 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |

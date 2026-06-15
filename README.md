@@ -2,7 +2,7 @@
 
 FPGA-based Mandelbrot renderer with a UART host interface. The PC sends one image command containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a 4-worker FP64 engine, dynamically assigns rows to available workers, restores raster order, and streams one 16-bit iteration count per pixel. Each worker interleaves two pixel contexts over one shared FP64 multiplier and one shared FP64 adder. The host renders the result to PNG or text and can optionally compare against a software reference.
 
-For detailed hardware architecture, pipeline scheduling, timing constraints, software design, and validation notes, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the project-level evolution from the initial single-core design to the current dynamic 4-worker, 2-context implementation, see [ARCHITECTURE_EVOLUTION_REPORT.md](doc/ARCHITECTURE_EVOLUTION_REPORT.md). For the worker pipeline bubble analysis and 2-context results, see [PIPELINE_BUBBLE_ANALYSIS.md](doc/PIPELINE_BUBBLE_ANALYSIS.md).
+For detailed hardware architecture, pipeline scheduling, timing constraints, software design, and validation notes, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the project-level evolution from the initial single-core design to the current dynamic 4-worker, 2-context implementation, see [ARCHITECTURE_EVOLUTION_REPORT.md](doc/ARCHITECTURE_EVOLUTION_REPORT.md). For worker pipeline bubble analysis and N-context architecture modeling, see [PIPELINE_BUBBLE_ANALYSIS.md](doc/PIPELINE_BUBBLE_ANALYSIS.md) and [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md).
 
 ## Demo Images
 
@@ -31,6 +31,8 @@ Current validated default configuration:
 | Largest validated frame | 1920x1080 |
 | Current routed timing | `WNS=0.285ns`, `TNS=0.000ns`, `WHS=0.021ns`, `THS=0.000ns` |
 | Current placed utilization | `13917` LUTs, `14458` registers, `37` DSP48E1, `9.5` BRAM tiles |
+
+The default RTL remains the timing-clean 2-context worker. The generic 4/8-context scoreboard worker and the follow-up ring/lookahead experiment are documented as abandoned research paths: they pass small behavioral simulations but do not produce a timing-clean, placeable xc7z010 design. See [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md) for the data.
 
 ## Repository Layout
 
@@ -727,6 +729,8 @@ doc/TILE_DESIGN.md
 doc/TILE_DESIGN_CN.md
 doc/PIPELINE_BUBBLE_ANALYSIS.md
 doc/PIPELINE_BUBBLE_ANALYSIS_CN.md
+doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md
+doc/CONTEXT_WORKER_ARCHITECTURE_REPORT_CN.md
 doc/PERFORMANCE_100MHZ.md
 doc/PERFORMANCE_100MHZ_CN.md
 doc/UART_BAUDRATE_BENCHMARK.md

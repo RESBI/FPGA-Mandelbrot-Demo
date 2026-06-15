@@ -2,7 +2,7 @@
 
 这是一个基于 FPGA 的 Mandelbrot 渲染器。PC 通过 UART 发送一次图像命令，包含中心坐标、像素步长、最大迭代次数和图像尺寸；FPGA 使用 4 个 FP64 worker 计算像素，并以 16 位迭代次数流式返回。当前默认 worker 在一个 FP64 乘法器和一个 FP64 加法器上交错执行 2 个像素上下文。
 
-详细硬件架构见 `doc/ARCHITECTURE_CN.md`，架构演进见 `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md`，worker 去气泡分析见 `doc/PIPELINE_BUBBLE_ANALYSIS_CN.md`。
+详细硬件架构见 `doc/ARCHITECTURE_CN.md`，架构演进见 `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md`，worker 去气泡分析见 `doc/PIPELINE_BUBBLE_ANALYSIS_CN.md`，N-context 新旧结构对比英文主文档见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md`，中文备份见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT_CN.md`。
 
 ## 当前默认配置
 
@@ -23,6 +23,8 @@
 | 最大已验证帧 | 1920x1080 |
 | 当前 routed timing | `WNS=0.285ns`, `TNS=0.000ns`, `WHS=0.021ns`, `THS=0.000ns` |
 | 当前 placed utilization | `13917` LUTs, `14458` registers, `37` DSP48E1, `9.5` BRAM tiles |
+
+当前默认 RTL 仍是 timing-clean 的 2-context worker。Generic 4/8-context scoreboard worker 以及后续 ring/lookahead 实验已放弃：它们小图行为仿真可通过，但无法在 xc7z010 上得到可布局且 timing-clean 的设计。数据见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md` / `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT_CN.md`。
 
 ## 目录结构
 
@@ -109,6 +111,7 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 | `doc/ARCHITECTURE_CN.md` | 当前 RTL、协议、tile、host 软件和资源。 |
 | `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md` | 从单核到当前高波特率 tile 模式的演进。 |
 | `doc/PIPELINE_BUBBLE_ANALYSIS_CN.md` | FP pipeline 去气泡、context/ADD/MUL 取舍。 |
+| `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md` / `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT_CN.md` | 旧 N-context scoreboard 与新 ring/barrel/lookahead worker 架构及模拟对比。 |
 | `doc/TILE_DESIGN_CN.md` | Tile response 和 host-driven tile 可靠性方案。 |
 | `doc/UART_BAUDRATE_INVESTIGATION_CN.md` | UART baudrate 调查。 |
 | `doc/UART_TIMING_ANALYSIS_CN.md` | UART 采样和时序分析。 |

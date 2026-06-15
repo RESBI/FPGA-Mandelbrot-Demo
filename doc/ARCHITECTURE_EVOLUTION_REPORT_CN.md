@@ -119,6 +119,29 @@ compute-bound 场景提升约 `1.40x-1.41x`，但 fast scenes 很快暴露 UART 
 
 RTL 增加 `RT/TD/TE` response packet。Host 增加 `--tile-width`、`--tile-height`、`--tile-retries`，把大图拆为可重试 compute tile。
 
+## 阶段 11：放弃的 N-context worker 实验
+
+在 2-context worker 成为默认 timing-clean 设计后，曾评估继续增加 worker 内 context 数，以隐藏更多 FP latency。相关实验最终作为研究记录保留，不进入可部署 RTL。
+
+第一组是 generic K-context scoreboard worker，`mandelbrot_core_worker_kctx`。它把 2ctx 的 tagged writeback 推广到 4/8ctx，行为仿真可通过，但 LUT 成本不可接受：
+
+| Case | 行为仿真 | Slice LUTs | 结果 |
+|---|---:|---:|---|
+| 当前 2ctx 专用 worker | board baseline | `13917 / 17600` (`79.07%`) | timing-clean 默认设计 |
+| Generic 4ctx scoreboard | PASS, 192 pixels | `37350 / 17600` (`212.22%`) | 不可布局 |
+| Generic 8ctx scoreboard | PASS, 192 pixels | `71462 / 17600` (`406.03%`) | 不可布局 |
+
+第二组是 ring/lookahead 方向。模型显示 `4ctx ring_la4` 有潜力恢复 rigid ring 的性能损失，但最小 RTL 尝试是在 generic kctx 上加入 lookahead 窗口，仍保留 generic FP64 context arrays 和宽 mux/writeback fabric，结果不可部署：
+
+| Case | 行为仿真 | 实现结果 |
+|---|---:|---|
+| `4ctx LA1` generic lookahead | PASS, 192 pixels, `497905 ns` | 可生成 bitstream，但 timing failed：`WNS=-0.271ns`, `TNS=-3.574ns` |
+| `4ctx LA2` generic lookahead | PASS, 192 pixels, `468745 ns` | LUT 超量：synth `25194 / 17600` Slice LUTs (`143.15%`) |
+| `4ctx LA4` generic lookahead | PASS, 192 pixels, `444355 ns` | LUT 超量：synth `39025 / 17600` Slice LUTs (`221.73%`) |
+| `8ctx LA4` generic lookahead | PASS, 192 pixels, `328325 ns` | 4ctx 已失败，因此未继续实现 |
+
+因此没有进行新 4ctx lookahead 的 1080p 板级测试：没有 timing-clean 的候选 bitstream。当前决策是 Verilog 回退到 scoreboard 最后版本，默认仍使用 timing-clean 2ctx worker；ring/lookahead 新方案放弃，仅在 `CONTEXT_WORKER_ARCHITECTURE_REPORT.md` / `_CN.md` 中保留分析数据。
+
 推荐 1080p 模式为 `1920x120`，每帧 9 个 stripe。六场景各 5 次的 30-run stability sweep 全部 transport pass，出现的两个 checksum error 均通过 tile retry 恢复。
 
 当前 tiled build timing/resource：
