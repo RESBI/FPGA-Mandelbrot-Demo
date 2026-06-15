@@ -45,7 +45,7 @@
 `endif
 
 `ifndef CFG_WORKER_CONTEXTS
-`define CFG_WORKER_CONTEXTS 2
+`define CFG_WORKER_CONTEXTS 4
 `endif
 
 `endif // CONFIG_VH

@@ -4,7 +4,7 @@
 
 ## 摘要
 
-当前 2-context worker 已证明 tagged multi-context 架构可行，但 FP pipeline 仍未饱和。使用当前 RTL latency `MUL_LAT=6`、`ADD_LAT=7` 重新建模后，结论是：低 context 下增加 ADD 或 MUL 没有收益。下一步应先增加 contexts。XC7K70T 上 4-context generic worker 已经构建、烧录并通过板级测试，深度 compute-bound 场景相对默认 2ctx 提升约 `1.78x-2.17x`。代价是 LUT 占用达到 `88.70%`，因此 4ctx 是可选 build，不是默认配置。第二个 ADD 大约到 16 contexts 才明显有价值；第二个 MUL 在没有更多 ADD 容量时基本无收益。
+2-context worker 已证明 tagged multi-context 架构可行，但 FP pipeline 仍未饱和。使用当前 RTL latency `MUL_LAT=6`、`ADD_LAT=7` 重新建模后，结论是：低 context 下增加 ADD 或 MUL 没有收益。下一步应先增加 contexts。XC7K70T 上 4-context generic worker 已经构建、烧录并通过板级测试，当前成为默认 build；深度 compute-bound 场景相对之前默认 2ctx 提升约 `1.78x-2.17x`。代价是 LUT 占用达到 `88.70%`。第二个 ADD 大约到 16 contexts 才明显有价值；第二个 MUL 在没有更多 ADD 容量时基本无收益。
 
 ## 当前实现
 
@@ -13,8 +13,8 @@
 | FP mode | FP64 |
 | System clock | 100 MHz |
 | Worker count | 4 |
-| Worker contexts | 2 |
-| 已验证可选 worker | `mandelbrot_core_worker_kctx`，XC7K70T 4 contexts |
+| Worker contexts | 4 |
+| 当前默认 worker | `mandelbrot_core_worker_kctx`，XC7K70T 4 contexts |
 | Per worker FP units | 1 multiplier + 1 adder |
 | `MUL_LAT` | 6 |
 | `ADD_LAT` | 7 |
@@ -71,19 +71,19 @@ escape iteration latency ~= 2*MUL_LAT + max(MUL_LAT, ADD_LAT)
 
 ## 4/8ctx RTL 部署状态
 
-实现了 `mandelbrot_core_worker_kctx`，当 `WORKER_CONTEXTS=4/8` 时使用。默认 2ctx 仍使用专用 `mandelbrot_core_worker_2ctx`，因为资源低、timing margin 更高；但 4ctx generic worker 已经在更大的 XC7K70T 上验证通过。
+实现了 `mandelbrot_core_worker_kctx`，当 `WORKER_CONTEXTS=4/8` 时使用。4ctx generic worker 已经在更大的 XC7K70T 上验证通过并成为默认配置；专用 2ctx worker 保留为低 LUT 对照。
 
 | 配置 | 目标 | 行为/板级状态 | Slice LUTs | Registers | DSPs | 结果 |
 |---|---|---:|---:|---:|---:|---|
-| 2ctx 当前默认 | XC7K70T | board baseline | `13726 / 41000` (`33.48%`) | `14559 / 82000` (`17.75%`) | `37 / 240` (`15.42%`) | 可部署，timing clean，默认 |
-| 4ctx generic | XC7K70T | board validated | `36367 / 41000` (`88.70%`) | `19149 / 82000` (`23.35%`) | `37 / 240` (`15.42%`) | 可部署，timing clean，可选 |
+| 4ctx generic | XC7K70T | board validated | `36367 / 41000` (`88.70%`) | `19149 / 82000` (`23.35%`) | `37 / 240` (`15.42%`) | 可部署，timing clean，默认 |
+| 2ctx historical | XC7K70T | board baseline | `13726 / 41000` (`33.48%`) | `14559 / 82000` (`17.75%`) | `37 / 240` (`15.42%`) | 可部署，timing clean，低 LUT 对照 |
 | 2ctx historical | xc7z010 | board baseline | `13917 / 17600` (`79.07%`) | `14458 / 35200` (`41.07%`) | `37 / 80` (`46.25%`) | 可部署，timing clean |
 | 4ctx generic historical | xc7z010 | PASS, 192 pixels, `445045 ns` | `37350 / 17600` (`212.22%`) | `19046 / 35200` (`54.11%`) | `37 / 80` (`46.25%`) | FAIL, LUT 超量 |
 | 8ctx generic historical | xc7z010 | PASS, 192 pixels, `364705 ns` | `71462 / 17600` (`406.03%`) | `29378 / 35200` (`83.46%`) | `37 / 80` (`46.25%`) | FAIL, LUT 超量 |
 
 4ctx XC7K70T bitstream 已成功烧录，并通过 `160x120` 小图 `--verify` gate：`19200/19200` match (`100.00%`)，FPGA elapsed `0.091s`。1080p 六场景、默认 `1920x120` host/compute tile 单次测试也全部 PASS：
 
-| Scene | 2ctx default FPGA s | 4ctx optional FPGA s | 4ctx pps | 4ctx vs 2ctx |
+| Scene | 2ctx historical FPGA s | 4ctx default FPGA s | 4ctx pps | 4ctx vs 2ctx |
 |---|---:|---:|---:|---:|
 | Fast escape @128 | `5.127` | `4.683` | `442824.20` | `1.09x` |
 | Standard @64 | `4.731` | `5.782` | `358640.05` | `0.82x` |
@@ -179,7 +179,7 @@ cycle k+7:   adder result returns to delayed slot s
 |---:|---:|---:|---:|
 | `0.285ns` | `0.000ns` | `0.021ns` | `0.000ns` |
 
-XC7K70T 4ctx 可选 build 资源和 timing：
+当前默认 XC7K70T 4ctx build 资源和 timing：
 
 | Resource | Used | Device | Utilization |
 |---|---:|---:|---:|

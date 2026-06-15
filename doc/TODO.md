@@ -9,7 +9,7 @@ This file tracks current work after the default FP64, 4-worker, dynamic-row, 12 
 | Precision | FP64 |
 | System clock | 100 MHz |
 | Worker count | 4 |
-| Worker contexts | 2 per worker |
+| Worker contexts | 4 per worker |
 | Scheduler | Dynamic idle-core row scheduler |
 | Dynamic owner depth | 4096 rows per hardware command |
 | UART baudrate | 12000000 |
@@ -26,12 +26,12 @@ Current default routed timing/resource snapshot:
 
 | Metric | Value |
 |---|---:|
-| WNS | 1.148 ns |
+| WNS | 0.583 ns |
 | TNS | 0.000 ns |
-| WHS | 0.042 ns |
+| WHS | 0.039 ns |
 | THS | 0.000 ns |
-| Slice LUTs | 13726 / 41000, 33.48% |
-| Slice Registers | 14559 / 82000, 17.75% |
+| Slice LUTs | 36367 / 41000, 88.70% |
+| Slice Registers | 19149 / 82000, 23.35% |
 | DSP48E1 | 37 / 240, 15.42% |
 | Block RAM Tile | 9.5 / 135, 7.04% |
 
@@ -53,7 +53,7 @@ Current default routed timing/resource snapshot:
 - Added `tx_ctrl` tiled response simulations for `4096x120` and host-tiled `4096x4096` behavior.
 - Added `cmd_parser` soft reset simulation.
 - Validated dynamic multicore simulation after reset changes.
-- Validated optional XC7K70T 4-context worker: timing clean at `WNS=0.583ns`, `160x120` verify PASS, and six 1080p scenes PASS.
+- Made the validated XC7K70T 4-context worker the default: timing clean at `WNS=0.583ns`, `160x120` verify PASS, and six 1080p scenes PASS.
 - Documented current resource/timing, 4/8-context experiments, pipeline-bubble analysis, and Chinese documentation mirrors.
 
 ## P0 - Reliability And Correctness

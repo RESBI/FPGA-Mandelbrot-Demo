@@ -2,7 +2,7 @@
 
 This report analyzes the bubble situation in the current Mandelbrot compute worker, explores multi-context in-worker scheduling, discusses tagged out-of-order pixel completion and reorder before commit, compares different `fp_mul`/`fp_add` allocations per worker, and estimates theoretical compute and whole-system performance benefits.
 
-The short version: the current two-context worker already proves the tagged multi-context architecture, but it still leaves many FP pipeline issue slots empty. Re-running the model with the current RTL latencies, `MUL_LAT=6` and `ADD_LAT=7`, shows that adding more ADD or MUL units is not useful at low context counts. The next compute gain should come from increasing contexts first. On XC7K70T, the generic four-context worker now builds, programs, and passes board tests; deep compute-bound scenes improve about `1.78x-2.17x` versus the default 2ctx build. The cost is high LUT use (`88.70%`), so 4ctx is an optional build, not the default. A second ADD becomes useful around 16 contexts, while a second MUL without more ADD capacity still gives essentially no gain. With the current 12 Mbaud UART path, fast scenes remain output-bound.
+The short version: the two-context worker proved the tagged multi-context architecture, but it still left many FP pipeline issue slots empty. Re-running the model with the current RTL latencies, `MUL_LAT=6` and `ADD_LAT=7`, shows that adding more ADD or MUL units is not useful at low context counts. The next compute gain should come from increasing contexts first. On XC7K70T, the generic four-context worker now builds, programs, passes board tests, and is the default build; deep compute-bound scenes improve about `1.78x-2.17x` versus the previous 2ctx default. The cost is high LUT use (`88.70%`). A second ADD becomes useful around 16 contexts, while a second MUL without more ADD capacity still gives essentially no gain. With the current 12 Mbaud UART path, fast scenes remain output-bound.
 
 ## Current Context
 
@@ -14,9 +14,9 @@ Current implemented accelerator:
 | System clock | 100 MHz |
 | Worker count | 4 |
 | FP clock enable | `FP_CE_DIV=1` |
-| Default worker | `mandelbrot_core_worker_2ctx` |
-| Worker contexts | 2 |
-| Validated optional worker | `mandelbrot_core_worker_kctx`, 4 contexts on XC7K70T |
+| Default worker | `mandelbrot_core_worker_kctx` |
+| Worker contexts | 4 |
+| Historical lower-LUT worker | `mandelbrot_core_worker_2ctx`, 2 contexts |
 | Tagged multiplier latency | `MUL_LAT=6` |
 | Tagged adder latency | `ADD_LAT=7` |
 | Legacy single-context wait | `PIPE_WAIT=10` |
@@ -26,7 +26,7 @@ Current implemented accelerator:
 | Reliable output mode | host-driven `1920x120` tiled stripes |
 | Output protocol | raster-order pixels inside retryable tiled responses |
 
-The legacy single-context worker is latency scheduled: it issues an FP operation, waits `PIPE_WAIT` cycles, consumes the result, and then issues the next dependent operation. The current default two-context worker is tagged and can issue back-to-back FP operations when another context is ready. It no longer uses `PIPE_WAIT=10` for result routing; it uses the actual tagged latencies `MUL_LAT=6` and `ADD_LAT=7`.
+The legacy single-context worker is latency scheduled: it issues an FP operation, waits `PIPE_WAIT` cycles, consumes the result, and then issues the next dependent operation. The current default four-context worker is tagged and can issue back-to-back FP operations when another context is ready. It no longer uses `PIPE_WAIT=10` for result routing; it uses the actual tagged latencies `MUL_LAT=6` and `ADD_LAT=7`.
 
 ## Legacy Single-Context Per-Iteration Schedule
 
@@ -185,21 +185,21 @@ In practice, 8 to 16 contexts is still the useful range for the current FP-unit 
 
 ## 4/8-Context RTL Deployment Status
 
-After the model indicated that more contexts should be tried before adding more FP units, an experimental parameterized `1M+1A` worker was implemented as `mandelbrot_core_worker_kctx` and selected from `mandelbrot_multicore` when `WORKER_CONTEXTS` is explicitly set to 4 or 8. The existing 2-context worker remains the default deployable path because it has much lower LUT use and more timing margin, but the 4-context generic worker is now validated on the larger XC7K70T target.
+After the model indicated that more contexts should be tried before adding more FP units, a parameterized `1M+1A` worker was implemented as `mandelbrot_core_worker_kctx` and selected from `mandelbrot_multicore` when `WORKER_CONTEXTS` is explicitly set to 4 or 8. The 4-context generic worker is now validated on the larger XC7K70T target and is the default deployable path. The existing 2-context worker remains a lower-LUT comparison point with more timing margin.
 
 The target matters. On the earlier xc7z010 target, the generic K-context RTL was functionally plausible but not deployable because it exceeded the available LUT budget before placement. On XC7K70T, the same 4-context direction becomes placeable and timing-clean, though still LUT-heavy.
 
 | Configuration | Target | Behavioral dynamic multicore sim | Slice LUTs | Slice registers | DSPs | Result |
 |---|---|---:|---:|---:|---:|---|
-| 2ctx current default | XC7K70T | Existing board baseline | `13726 / 41000` (`33.48%`) | `14559 / 82000` (`17.75%`) | `37 / 240` (`15.42%`) | Bitstream available, timing clean, default |
-| 4ctx generic K-context worker | XC7K70T | Board validated | `36367 / 41000` (`88.70%`) | `19149 / 82000` (`23.35%`) | `37 / 240` (`15.42%`) | Bitstream available, timing clean, optional |
+| 4ctx generic K-context worker | XC7K70T | Board validated | `36367 / 41000` (`88.70%`) | `19149 / 82000` (`23.35%`) | `37 / 240` (`15.42%`) | Bitstream available, timing clean, default |
+| 2ctx historical lower-LUT worker | XC7K70T | Existing board baseline | `13726 / 41000` (`33.48%`) | `14559 / 82000` (`17.75%`) | `37 / 240` (`15.42%`) | Bitstream available, timing clean, historical baseline |
 | 2ctx historical | xc7z010 | Existing board baseline | `13917 / 17600` (`79.07%`) | `14458 / 35200` (`41.07%`) | `37 / 80` (`46.25%`) | Bitstream available, timing clean |
 | 4ctx generic historical | xc7z010 | PASS, 192 pixels, `445045 ns` sim time | `37350 / 17600` (`212.22%`) | `19046 / 35200` (`54.11%`) | `37 / 80` (`46.25%`) | FAIL, LUT over-utilized |
 | 8ctx generic historical | xc7z010 | PASS, 192 pixels, `364705 ns` sim time | `71462 / 17600` (`406.03%`) | `29378 / 35200` (`83.46%`) | `37 / 80` (`46.25%`) | FAIL, LUT over-utilized |
 
 The XC7K70T 4ctx bitstream was programmed successfully and passed a `160x120` small-image software verification gate: `19200/19200` pixels matched (`100.00%`) with `0.091s` FPGA elapsed. A one-run six-scene 1080p sweep with `1920x120` host/compute tiles also passed transport for every scene:
 
-| Scene | 2ctx default FPGA s | 4ctx optional FPGA s | 4ctx pps | 4ctx vs 2ctx |
+| Scene | 2ctx historical FPGA s | 4ctx default FPGA s | 4ctx pps | 4ctx vs 2ctx |
 |---|---:|---:|---:|---:|
 | Fast escape @128 | `5.127` | `4.683` | `442824.20` | `1.09x` |
 | Standard @64 | `4.731` | `5.782` | `358640.05` | `0.82x` |
@@ -318,15 +318,15 @@ Design rules for the planned worker:
 | Ordered result ring | Preserve existing per-core FIFO contract. |
 | Prototype one or two workers first | Measure LUT scaling before replicating four workers. |
 
-This architecture will likely give up some opportunistic scheduling freedom compared with the current 2ctx scoreboard, but it is the realistic route to 4, 8, or eventually 12 to 16 contexts on xc7z010. The goal is to approach the `1M+1A` issue limit before considering more FP adders.
+This architecture will likely give up some opportunistic scheduling freedom compared with the current generic scoreboard, but it is the realistic route to 8, 12, or eventually 16 contexts without consuming nearly all LUTs. The goal is to approach the `1M+1A` issue limit before considering more FP adders.
 
 Recommended next RTL direction:
 
 | Direction | Reason |
 |---|---|
-| Keep `2ctx 1M+1A` as the deployable default | It is the only currently placeable and board-tested high-baud configuration. |
-| Do not deploy the generic K-context worker on xc7z010 | 4ctx already requires over 2x available LUTs; 8ctx requires over 4x. |
-| Redesign 4ctx as an explicit low-LUT worker if more hardware testing is desired | Avoid generic variable indexing on FP64 arrays, wide muxes, and modulo arbitration. |
+| Keep `4ctx 1M+1A` as the XC7K70T deployable default | It is timing-clean and board-tested, and improves deep scenes. |
+| Do not scale the generic K-context worker further without a lower-LUT shape | 4ctx already uses `88.70%` of XC7K70T LUTs; 8ctx historically required over 4x xc7z010 LUTs. |
+| Redesign higher-context workers as explicit low-LUT slot/ring workers | Avoid generic variable indexing on FP64 arrays, wide muxes, and modulo arbitration. |
 | Prefer a ring/slot pipeline over full scoreboard scans | A fixed issue order can trade some scheduling freedom for much lower mux and comparator cost. |
 | Consider reducing `CORE_COUNT` while testing high-context workers | A single-core or two-core high-context build can validate compute scheduling before committing four copies. |
 | Do not add `1M+2A` until a high-context low-LUT worker exists | Extra ADD capacity is modeled as useful only after much higher context occupancy. |

@@ -271,7 +271,7 @@ vivado -mode batch -source build_fp64_contexts.tcl -tclargs <contexts> <lookahea
 
 | Case | Synthesis / implementation result | Slice LUTs | LUT as Logic | Registers | DSPs | BRAM | Timing |
 |---|---|---:|---:|---:|---:|---:|---|
-| Current default `2ctx` specialized worker | Existing timing-clean baseline | `13917 / 17600` (`79.07%`) | `13641 / 17600` (`77.51%`) | `14458 / 35200` (`41.07%`) | `37 / 80` (`46.25%`) | `9.5 / 60` (`15.83%`) | `WNS=0.285ns`, routed clean |
+| Historical `2ctx` specialized worker on xc7z010 | Existing timing-clean baseline | `13917 / 17600` (`79.07%`) | `13641 / 17600` (`77.51%`) | `14458 / 35200` (`41.07%`) | `37 / 80` (`46.25%`) | `9.5 / 60` (`15.83%`) | `WNS=0.285ns`, routed clean |
 | `4ctx LA1` generic lookahead | Bitstream generated, but timing failed | placed `16344 / 17600` (`92.86%`) | placed `15812 / 17600` (`89.84%`) | placed `19131 / 35200` (`54.35%`) | `37 / 80` (`46.25%`) | `9.5 / 60` (`15.83%`) | `WNS=-0.271ns`, `TNS=-3.574ns`, not acceptable |
 | `4ctx LA2` generic lookahead | Placement blocked by LUT over-utilization | synth `25194 / 17600` (`143.15%`) | synth `24406 / 17600` (`138.67%`) | synth `19119 / 35200` (`54.32%`) | `37 / 80` (`46.25%`) | `9.5 / 60` (`15.83%`) | Not placed |
 | `4ctx LA4` generic lookahead | Placement blocked by LUT over-utilization | synth `39025 / 17600` (`221.73%`) | synth `38237 / 17600` (`217.26%`) | synth `19197 / 35200` (`54.54%`) | `37 / 80` (`46.25%`) | `9.5 / 60` (`15.83%`) | Not placed |
@@ -285,7 +285,7 @@ No 1080p board run was performed for the new 4ctx lookahead worker because there
 - `4ctx LA4`, the intended performance candidate, cannot be placed due to LUT over-utilization.
 - `4ctx LA2` also cannot be placed.
 - `4ctx LA1` generates a bitstream but fails timing at 100 MHz, so it is not a valid stability or 1080p performance candidate.
-- The existing default `2ctx` timing-clean bitstream remains the only valid board-test baseline.
+- On xc7z010, the `2ctx` timing-clean bitstream remained the only valid board-test baseline for these lookahead variants. On XC7K70T, the generic 4ctx scoreboard is now timing-clean and is the default, but this failed lookahead path still has no valid board-test candidate.
 
 Running 1080p on a timing-failed exploratory bitstream would produce ambiguous results and would not validate the architecture.
 

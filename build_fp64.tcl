@@ -8,7 +8,7 @@ puts "========================================"
 puts " Mandelbrot FP64 Build Script"
 puts " Part: $part_name"
 puts " Default scheduler: dynamic idle-core rows (SCHED_MODE=1)"
-puts " Worker pipeline contexts: 2"
+puts " Worker pipeline contexts: 4"
 puts "========================================"
 
 create_project -force $proj_name $proj_dir -part $part_name
@@ -17,7 +17,7 @@ set_property target_language Verilog [current_project]
 # Add all RTL files
 add_files -fileset sources_1 [glob $rtl_dir/*.v]
 set_property top top [current_fileset]
-set_property generic {SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=2} [current_fileset]
+set_property generic {SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=4} [current_fileset]
 puts "Added [llength [glob $rtl_dir/*.v]] source files"
 
 # Set Verilog include path

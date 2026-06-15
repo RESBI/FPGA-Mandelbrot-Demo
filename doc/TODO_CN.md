@@ -9,7 +9,7 @@
 | 精度 | FP64 |
 | 系统时钟 | 100 MHz |
 | Worker 数 | 4 |
-| 每 worker contexts | 2 |
+| 每 worker contexts | 4 |
 | 调度 | Dynamic idle-core row scheduler |
 | Dynamic owner depth | 每个硬件命令 4096 行 |
 | UART | 12000000 baud |
@@ -39,7 +39,7 @@
 - `queue.v` 增加同步 reset，soft reset 可清 output FIFO 和 per-core FIFO。
 - 增加 `4096x120`、host-tiled `4096x4096` 的 `tx_ctrl` 仿真。
 - 增加 `cmd_parser` soft reset 仿真。
-- 验证 XC7K70T 可选 4-context worker：`WNS=0.583ns` timing clean，`160x120` verify PASS，1080p 六场景 PASS。
+- 将已验证的 XC7K70T 4-context worker 设为默认：`WNS=0.583ns` timing clean，`160x120` verify PASS，1080p 六场景 PASS。
 
 ## P0 - 可靠性和正确性
 
