@@ -378,6 +378,8 @@ The table below summarizes how each stage moved the system bottleneck.
 | Dynamic backpressure fix | Large UART-bound dynamic frames could deadlock | Gate dynamic row reuse on empty per-core FIFO | 1920-wide and full 1080p frames complete reliably under UART backpressure. |
 | Fractional UART 12 Mbaud | Integer divider precision and 576k output ceiling | Replaced integer CPB timing with 32-bit fractional baud accumulators in RX/TX | Fast 1080p scenes improve from about `28.5k pps` to `443k-493k pps`; compute-heavy scenes expose core limits. |
 | Tiled response and host-driven stripes | 12 Mbaud multi-megabyte bursts can occasionally lose bytes | Added `RT`/`TD`/`TE` response packets and host `1920x120` stripe retries | Six-scene 30-run sweep completed with 30/30 transport pass; two checksum errors recovered at tile granularity. |
+| Compute-tile retry and soft reset | Host-tile retry still recomputed large stripes and stale bytes could leave the link out of sync | Split host tiles into smaller compute tiles and added UART soft reset `RST!RST!` | Retry unit is now one compute tile, default `512x120`; host quiet mode shows compute/host tile progress. |
+| Planned low-LUT N-context worker | Generic K-context scoreboard proved functional but exceeded LUT capacity | Documented ring/barrel context-slot worker direction | Future 4/8/12/16-context work should reduce wide muxes and scans before adding FP units. |
 
 ## Final 1080p Performance Comparison
 
@@ -448,6 +450,10 @@ The implemented 2-context worker required three correctness details:
 | Ordered commit | Contexts can finish out of order, but the per-core FIFO must remain worker-local column order. |
 
 The dynamic scheduler also needed a backpressure rule: only assign a new row to a core when that core's FIFO is empty. Without this, a fast compute scene could fill a core FIFO with future rows while the raster collector waited for an earlier row from that same core, deadlocking under UART backpressure.
+
+Architecturally, the implemented 2-context worker is a tagged two-entry scoreboard. It keeps two pixel context register sets, issues ready operations into one shared FP64 multiplier and one shared FP64 adder, carries operation/context tags through latency-matched delay lines, and commits completed pixels in column order. This was the smallest correct deployable step, but its LUT cost comes from FP64 operand muxing, writeback demuxing, in-flight checks, and ordered commit logic rather than from DSP replication.
+
+The later generic 4/8-context experiment confirmed the functional direction but also showed the wrong deployable RTL shape for xc7z010: direct scoreboard parameterization expands the wide muxes and context scans too aggressively. The documented next architecture direction is a CPU-like barrel or ring worker with fixed context slots, a round-robin issue pointer, latency-delayed return pointers, and an ordered result ring. That approach still stores N pixel states, but it should reduce LUT use by avoiding arbitrary N-way context selection each cycle.
 
 Historical routed timing and placed utilization for this integration point, before the later 12 Mbaud tiled-response controller changes:
 

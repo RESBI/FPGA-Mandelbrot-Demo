@@ -93,6 +93,59 @@ FP64 边界差异来自 RTL truncation 和 Python 软件参考的 round-to-neare
 
 旧单 context worker 保留为 regression 路径。实验性 `mandelbrot_core_worker_kctx` 支持 4/8 context 行为仿真，但通用数组式实现 LUT 超量，不能部署在 xc7z010。
 
+当前 2-context RTL 结构：
+
+```mermaid
+flowchart TB
+    DISPATCH["row dispatch<br/>start,row_start,row_stride"] --> INIT("init sequencer<br/>c_re_start,row_c_im,row_step")
+    INIT --> LAUNCH("launch logic<br/>launch_col,c_re_next")
+    LAUNCH --> C0[["context 0 regs<br/>phase,col,iter,c,z,result"]]
+    LAUNCH --> C1[["context 1 regs<br/>phase,col,iter,c,z,result"]]
+    C0 --> ARB("ready arbitration<br/>ctx0/ctx1")
+    C1 --> ARB
+    ARB --> MUXM("FP64 mul operand mux")
+    ARB --> MUXA("FP64 add operand mux")
+    MUXM --> MUL("shared fp_mul<br/>MUL_LAT=6")
+    MUXA --> ADD("shared fp_add<br/>ADD_LAT=7")
+    ARB --> MTAG[["mul op/context tags"]]
+    ARB --> ATAG[["add op/context tags"]]
+    MUL --> MWR("tagged mul writeback")
+    MTAG --> MWR
+    ADD --> AWR("tagged add writeback")
+    ATAG --> AWR
+    MWR --> C0
+    MWR --> C1
+    AWR --> C0
+    AWR --> C1
+    C0 --> COMMIT("ordered commit<br/>commit_col")
+    C1 --> COMMIT
+    COMMIT --> FIFO["per-core FIFO"]
+```
+
+规划中的低 LUT N-context worker 不应直接扩展当前 scoreboard。更合理方向是 CPU-like barrel/ring worker：N 个 slot 保存 N 个像素状态，issue pointer 近似固定轮转，结果按 `MUL_LAT` / `ADD_LAT` 延迟后的 return pointer 写回固定 slot，从而减少 N 路 FP64 mux、ready scan 和 writeback demux。
+
+```mermaid
+flowchart TB
+    LOAD["row launch<br/>new pixel injection"] --> SLOTS[["N context slots<br/>valid,phase,col,iter,c,z"]]
+    SLOTS --> RPTR("round-robin issue pointer")
+    RPTR --> PHASE("slot phase decoder")
+    PHASE --> IMUX("current-slot operand select")
+    IMUX --> MULN("shared fp_mul")
+    IMUX --> ADDN("shared fp_add")
+    RPTR --> MRRET[["mul return pointer<br/>delay MUL_LAT"]]
+    RPTR --> ARRET[["add return pointer<br/>delay ADD_LAT"]]
+    MULN --> MRET("fixed-slot mul writeback")
+    MRRET --> MRET
+    ADDN --> ARET("fixed-slot add writeback")
+    ARRET --> ARET
+    MRET --> SLOTS
+    ARET --> SLOTS
+    SLOTS --> ROB[["ordered commit ring"]]
+    ROB --> FIFO2["per-core FIFO"]
+```
+
+该规划不是消除 per-pixel state；N 个在飞像素仍必须各自保存 `c/z/iter/phase`。目标是复用同一套 FP issue/control pipeline，并用固定 slot 时序替代通用 scoreboard 的宽组合逻辑。
+
 ## 7. 动态行调度
 
 动态调度器每次把一整行分派给一个空闲 worker，并记录 row owner。collector 按原始行顺序读取对应 worker FIFO，保证 host 看到的输出仍是 raster order。

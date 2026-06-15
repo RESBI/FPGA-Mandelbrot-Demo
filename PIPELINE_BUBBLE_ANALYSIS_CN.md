@@ -80,6 +80,77 @@ escape iteration latency ~= 2*MUL_LAT + max(MUL_LAT, ADD_LAT)
 
 结论：generic K-context 数组式 scoreboard 功能上可行，但在 xc7z010 上不可部署。问题不是 DSP，而是 FP64 context array、wide mux、writeback mux、inflight scan 和 arbitration logic 造成 LUT 爆炸。
 
+## 当前 2ctx RTL 形态
+
+当前 `mandelbrot_core_worker_2ctx` 是 tagged two-entry scoreboard，而不是复制两套 FP datapath。每个 worker 仍只有一个 `fp_mul` 和一个 `fp_add`。额外 LUT 来自两份像素状态、ready arbitration、operation/context tag delay line、result writeback demux 和 ordered commit。
+
+```mermaid
+flowchart TB
+    START["worker row start"] --> INIT("init shared row constants")
+    INIT --> LAUNCH("launch up to two pixels")
+    LAUNCH --> C0[["ctx0 registers<br/>c,z,iter,col,phase,result"]]
+    LAUNCH --> C1[["ctx1 registers<br/>c,z,iter,col,phase,result"]]
+    C0 --> READY("ready checks<br/>phase,inflight,result")
+    C1 --> READY
+    READY --> ISSUE("issue arbitration<br/>choose ctx and op")
+    ISSUE --> MULMUX("64-bit mul operand mux")
+    ISSUE --> ADDMUX("64-bit add operand mux")
+    MULMUX --> MUL("one fp_mul")
+    ADDMUX --> ADD("one fp_add")
+    ISSUE --> MTAG[["mul op/context tags<br/>6-cycle delay"]]
+    ISSUE --> ATAG[["add op/context tags<br/>7-cycle delay"]]
+    MUL --> MWB("tagged mul writeback")
+    MTAG --> MWB
+    ADD --> AWB("tagged add writeback")
+    ATAG --> AWB
+    MWB --> C0
+    MWB --> C1
+    AWB --> C0
+    AWB --> C1
+    C0 --> COMMIT("ordered commit")
+    C1 --> COMMIT
+    COMMIT --> FIFO["per-core FIFO"]
+```
+
+时序上，每次 issue 都同时写入 op tag 和 context tag。`MUL_LAT=6` 后 multiplier result 依据 tag 写回对应 context 和字段；`ADD_LAT=7` 后 adder result 同理。context 可乱序完成，但写 FIFO 前必须按 `commit_col` 顺序提交。
+
+## 规划低 LUT N-context 形态
+
+下一版高 context worker 不应直接扩展当前 scoreboard。更合理方向是 CPU-like barrel/ring pipeline：N 个 slot 保存 N 个像素状态，issue pointer 固定或近似固定轮转，结果按 latency-delayed return pointer 写回固定 slot。
+
+```mermaid
+flowchart TB
+    ROW["row context<br/>c_re_start,row_c_im,step"] --> INJECT("pixel injection")
+    INJECT --> SLOTS[["N slot state store<br/>valid,phase,col,iter,c,z"]]
+    SLOTS --> IPTR("issue pointer<br/>round-robin")
+    IPTR --> READ("read current slot")
+    READ --> DEC("phase decoder<br/>one slot only")
+    DEC --> OPS("build mul/add operands")
+    OPS --> MULN("shared fp_mul")
+    OPS --> ADDN("shared fp_add")
+    IPTR --> MRET[["mul return slot delay<br/>MUL_LAT"]]
+    IPTR --> ARET[["add return slot delay<br/>ADD_LAT"]]
+    MULN --> MWB2("write delayed slot")
+    MRET --> MWB2
+    ADDN --> AWB2("write delayed slot")
+    ARET --> AWB2
+    MWB2 --> SLOTS
+    AWB2 --> SLOTS
+    SLOTS --> ROB[["ordered result ring"]]
+    ROB --> FIFO2["per-core FIFO"]
+```
+
+预期时序：
+
+```text
+cycle k:     issue slot s phase p
+cycle k+1:   issue slot s+1 phase p or another ready phase
+cycle k+6:   multiplier result returns to delayed slot s
+cycle k+7:   adder result returns to delayed slot s
+```
+
+该结构不是消除 N 个像素状态，而是避免每周期扫描所有 context、避免 N 路 FP64 operand mux、避免任意 context writeback demux。它牺牲部分调度自由，换取更低 LUT，是 4/8/12/16 contexts 在 xc7z010 上可部署的更现实方向。
+
 ## 当前资源和 timing
 
 | Resource | Used | Device | Utilization |

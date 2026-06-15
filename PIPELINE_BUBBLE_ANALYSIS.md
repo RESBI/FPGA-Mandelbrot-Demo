@@ -200,6 +200,112 @@ The failure is not caused by DSP or BRAM pressure. DSP usage remains about the s
 
 The practical conclusion is that simply parameterizing the 2ctx scoreboard style into arbitrary `CONTEXTS=N` is the wrong deployable RTL shape for this small device. More contexts are still the right compute direction according to the model, but the implementation must be much more area-conscious.
 
+## Current 2-Context RTL Shape
+
+The implemented `mandelbrot_core_worker_2ctx` is a tagged two-entry scoreboard, not two duplicated FP datapaths. Each worker still contains one `fp_mul` and one `fp_add`. The extra area comes from duplicated pixel state, ready arbitration, operation/context tag delay lines, result writeback demuxing, and ordered commit.
+
+```mermaid
+flowchart TB
+    START["worker row start"] --> INIT("init shared row constants")
+    INIT --> LAUNCH("launch up to two pixels<br/>launch_col,c_re_next")
+
+    subgraph STATE["architectural pixel state"]
+        C0[["ctx0 registers<br/>c,z,iter,col,phase,result"]]
+        C1[["ctx1 registers<br/>c,z,iter,col,phase,result"]]
+    end
+
+    LAUNCH --> C0
+    LAUNCH --> C1
+    C0 --> READY("ready checks<br/>phase,inflight,result")
+    C1 --> READY
+    READY --> ISSUE("issue arbitration<br/>choose ctx and op")
+
+    ISSUE --> MULMUX("64-bit mul operand mux")
+    ISSUE --> ADDMUX("64-bit add operand mux")
+    MULMUX --> MUL("one fp_mul")
+    ADDMUX --> ADD("one fp_add")
+
+    ISSUE --> MTAG[["mul op/context tags<br/>6-cycle delay"]]
+    ISSUE --> ATAG[["add op/context tags<br/>7-cycle delay"]]
+    MUL --> MWB("tagged mul writeback")
+    MTAG --> MWB
+    ADD --> AWB("tagged add writeback")
+    ATAG --> AWB
+    MWB --> C0
+    MWB --> C1
+    AWB --> C0
+    AWB --> C1
+
+    C0 --> COMMIT("ordered commit by commit_col")
+    C1 --> COMMIT
+    COMMIT --> FIFO["per-core FIFO"]
+```
+
+The timing model is a real tagged pipeline:
+
+| Path | RTL objects | Latency | Function |
+|---|---|---:|---|
+| Multiplier issue | `mul_a`, `mul_b`, `mul_op_pipe`, `mul_ctx_pipe` | 6 cycles | Route `mul_result` to `c_z_re_sq`, `c_z_im_sq`, `c_z_re_z_im`, or init state. |
+| Adder issue | `add_a`, `add_b`, `add_op_pipe`, `add_ctx_pipe` | 7 cycles | Route `add_result` to magnitude, next `z`, coordinate, or init state. |
+| Commit | `c_result_valid`, `c_col`, `commit_col` | variable | Hold out-of-order finished pixels until the next column is allowed to write. |
+
+This style is correct and board-proven at two contexts, but its logic cost scales poorly. Adding contexts by widening this scoreboard creates larger FP64 operand muxes, wider writeback demuxes, more inflight scans, more ready comparisons, and more ordered-commit comparisons.
+
+## Planned Low-LUT Generic N-Context Shape
+
+The next deployable high-context worker should look more like a CPU barrel pipeline or fine-grained multithreaded pipeline than a fully flexible scoreboard. It still needs N architectural pixel states; the optimization is to avoid exposing all N states to wide combinational selection every cycle.
+
+```mermaid
+flowchart TB
+    ROW["row context<br/>c_re_start,row_c_im,step"] --> INJECT("pixel injection<br/>fill free slot")
+    INJECT --> SLOTS[["N slot state store<br/>valid,phase,col,iter<br/>c,z,temporary results"]]
+
+    SLOTS --> IPTR("issue pointer<br/>round-robin or barrel")
+    IPTR --> READ("read current slot")
+    READ --> DEC("phase decoder<br/>one slot only")
+    DEC --> OPS("build mul/add operands")
+    OPS --> MULN("shared fp_mul")
+    OPS --> ADDN("shared fp_add")
+
+    IPTR --> MRET[["mul return slot delay<br/>MUL_LAT"]]
+    IPTR --> ARET[["add return slot delay<br/>ADD_LAT"]]
+    DEC --> MPHAS[["mul phase tag"]]
+    DEC --> APHAS[["add phase tag"]]
+    MULN --> MWB("write current delayed slot")
+    MRET --> MWB
+    MPHAS --> MWB
+    ADDN --> AWB("write current delayed slot")
+    ARET --> AWB
+    APHAS --> AWB
+    MWB --> SLOTS
+    AWB --> SLOTS
+
+    SLOTS --> ROB[["ordered result ring"]]
+    ROB --> FIFO["per-core FIFO"]
+```
+
+Expected timing behavior:
+
+```text
+cycle k:     issue slot s phase p
+cycle k+1:   issue slot s+1 phase p or another ready phase
+cycle k+6:   multiplier result returns to delayed slot s
+cycle k+7:   adder result returns to delayed slot s
+```
+
+Design rules for the planned worker:
+
+| Rule | Reason |
+|---|---|
+| Fixed or near-fixed slot order | Avoid N-way ready encoders and wide priority muxes. |
+| Current-slot operand read | Avoid selecting FP64 operands from all contexts at once. |
+| Latency-delayed return pointer | Replace arbitrary context writeback demux with fixed-slot writeback. |
+| Small phase tags | Keep op routing without carrying full scoreboard metadata. |
+| Ordered result ring | Preserve existing per-core FIFO contract. |
+| Prototype one or two workers first | Measure LUT scaling before replicating four workers. |
+
+This architecture will likely give up some opportunistic scheduling freedom compared with the current 2ctx scoreboard, but it is the realistic route to 4, 8, or eventually 12 to 16 contexts on xc7z010. The goal is to approach the `1M+1A` issue limit before considering more FP adders.
+
 Recommended next RTL direction:
 
 | Direction | Reason |

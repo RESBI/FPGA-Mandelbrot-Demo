@@ -134,6 +134,14 @@ RTL 增加 `RT/TD/TE` response packet。Host 增加 `--tile-width`、`--tile-hei
 | DSP48E1 | `37 / 80` (`46.25%`) |
 | Block RAM Tile | `9.5 / 60` (`15.83%`) |
 
+## 阶段 11：Compute tile retry、soft reset 与 N-context 规划
+
+Host tile retry 仍会重算较大的 stripe，且失败后的 stale bytes 可能让 host/FPGA 链路暂时不同步。当前 host 已把 host tile 内部再拆成默认 `512x120` compute tile，失败时记录 compute tile 坐标、drain stale bytes、发送 UART soft reset 命令 `RST!RST!`，然后只重算该 compute tile。`--quiet` 也增加了 compute tile / host tile 单行进度条。
+
+当前 2-context worker 的 RTL 形态是 tagged two-entry scoreboard：两份像素 context 状态共享一个 FP64 multiplier 和一个 FP64 adder，operation/context tag 通过 latency-matched delay line 返回，最后按列顺序 ordered commit。这是已经部署验证的最小正确实现，但 LUT 成本主要来自 FP64 operand mux、writeback demux、in-flight check 和 ordered commit，而不是 DSP 复制。
+
+Generic 4/8-context 实验证明功能方向可行，但直接把 scoreboard 参数化会导致 wide mux 和 context scan 过大，在 xc7z010 上 LUT 超量。后续推荐低 LUT N-context worker 采用 CPU-like barrel/ring 思路：N 个固定 slot 保存像素状态，round-robin issue pointer 选择当前 slot，FP 结果按 `MUL_LAT` / `ADD_LAT` delayed return pointer 写回固定 slot，并通过 ordered result ring 保持 FIFO 顺序。
+
 ## 主要经验
 
 | 经验 | 说明 |

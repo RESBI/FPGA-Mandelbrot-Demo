@@ -593,6 +593,67 @@ The shared FP units use operation and context tag delay lines:
 
 The tag latency is not the old single-context `PIPE_WAIT=10`. It is the actual back-to-back FP latency plus the worker-side operand register handoff. Using the old guard latency caused adjacent context results to be captured under the wrong tag during continuous issue; the board symptom was a repeatable 32x24 mismatch concentrated on odd columns. The fixed latencies are `MUL_LAT=6` and `ADD_LAT=7`.
 
+Current 2-context RTL structure:
+
+```mermaid
+flowchart TB
+    DISPATCH["row dispatch<br/>start,row_start,row_stride"] --> INIT("init sequencer<br/>c_re_start,row_c_im,row_step")
+    INIT --> LAUNCH("launch logic<br/>launch_col,c_re_next")
+
+    subgraph CTX["two pixel contexts"]
+        C0[["context 0 regs<br/>c_state,c_col,c_iter<br/>c,z,intermediates,result"]]
+        C1[["context 1 regs<br/>c_state,c_col,c_iter<br/>c,z,intermediates,result"]]
+    end
+
+    LAUNCH --> C0
+    LAUNCH --> C1
+    C0 --> ARB("ready arbitration<br/>priority over ctx0/ctx1")
+    C1 --> ARB
+
+    ARB --> MUXM("FP64 mul operand mux")
+    ARB --> MUXA("FP64 add operand mux")
+    MUXM --> MUL("shared fp_mul<br/>MUL_LAT=6")
+    MUXA --> ADD("shared fp_add<br/>ADD_LAT=7")
+
+    ARB --> MTAG[["mul_op_pipe<br/>mul_ctx_pipe"]]
+    ARB --> ATAG[["add_op_pipe<br/>add_ctx_pipe"]]
+    MUL --> MWR("tagged multiplier writeback")
+    MTAG --> MWR
+    ADD --> AWR("tagged adder writeback")
+    ATAG --> AWR
+    MWR --> C0
+    MWR --> C1
+    AWR --> C0
+    AWR --> C1
+
+    C0 --> COMMIT("ordered commit<br/>commit_col")
+    C1 --> COMMIT
+    COMMIT --> FIFO["per-core FIFO<br/>uint16 iter"]
+```
+
+Timing model for one shared worker pipeline:
+
+```mermaid
+sequenceDiagram
+    participant I as Issue logic
+    participant M as fp_mul pipeline
+    participant A as fp_add pipeline
+    participant T as tag delay lines
+    participant C as context regs
+    I->>M: ctx0 MOP_ZRSQ
+    I->>T: ctx0,MOP_ZRSQ
+    I->>M: ctx1 MOP_ZRSQ
+    I->>T: ctx1,MOP_ZRSQ
+    M-->>C: ctx0 z_re_sq after 6 cycles
+    T-->>C: ctx0 destination tag
+    M-->>C: ctx1 z_re_sq after 6 cycles
+    T-->>C: ctx1 destination tag
+    I->>A: ctx0 AOP_MAG when operands ready
+    I->>T: ctx0,AOP_MAG
+    A-->>C: ctx0 mag after 7 cycles
+    T-->>C: ctx0 destination tag
+```
+
 Conceptually, the two-context worker keeps two pixels, written here as `z1` and `z2`, moving through the same shared FP pipeline. The table below is illustrative rather than a cycle-exact trace; real issue depends on each context's ready state and on whether the shared multiplier or adder is free.
 
 | Step | Shared multiplier issue | Shared adder issue | `z1` context stage | `z2` context stage |
@@ -616,6 +677,8 @@ The important property is not strict alternation. The arbiter can issue whicheve
 
 Two contexts can finish out of order, so the worker commits in column order. `commit_col` selects the next pixel that may be written to the per-core FIFO. If context 1 finishes before context 0, its result stays valid inside the worker until `commit_col` reaches its column. This preserves the existing per-core FIFO contract and keeps downstream raster collection unchanged.
 
+The LUT cost of this implementation comes mostly from control and routing rather than DSPs. The multiplier and adder are not duplicated. What grows is the pair of FP64 context register files, FP64 operand muxing, tagged result writeback, in-flight checks for operations such as `MAG` and `ZRZI`, and ordered commit logic. Scaling this exact scoreboard style to 4 or 8 contexts creates wide muxes and scans that exceed xc7z010 LUT capacity.
+
 The 2-context worker was validated with:
 
 | Check | Result |
@@ -625,7 +688,63 @@ The 2-context worker was validated with:
 | Board 32x24 verify | `768/768` matched. |
 | Board 160x120 verify | `19200/19200` matched. |
 
-### 8.6 Escape Check
+### 8.6 Planned Low-LUT N-Context Ring Worker
+
+The planned higher-context worker should not be a direct parameterized expansion of the 2-context scoreboard. The generic `mandelbrot_core_worker_kctx` experiment showed that arbitrary context indexing, ready scans, and wide FP64 muxes grow too quickly. The next deployable direction is a CPU-like barrel or ring worker: keep N pixel slots in flight, issue from a fixed or near-fixed slot order, and route FP results back with latency-aligned return pointers.
+
+Planned N-context ring structure:
+
+```mermaid
+flowchart TB
+    LOAD["row launch<br/>new pixel injection"] --> SLOTS[["N context slots<br/>valid,phase,col,iter<br/>c,z,intermediates"]]
+    SLOTS --> RPTR("round-robin issue pointer")
+    RPTR --> PHASE("slot phase decoder<br/>next needed op")
+    PHASE --> IMUX("narrow operand select<br/>current slot only")
+    IMUX --> MULN("shared fp_mul")
+    IMUX --> ADDN("shared fp_add")
+
+    RPTR --> MRRET[["mul return pointer<br/>delayed by MUL_LAT"]]
+    RPTR --> ARRET[["add return pointer<br/>delayed by ADD_LAT"]]
+    PHASE --> MOP[["mul phase tag"]]
+    PHASE --> AOP[["add phase tag"]]
+
+    MULN --> MRET("fixed-slot mul writeback")
+    MRRET --> MRET
+    MOP --> MRET
+    ADDN --> ARET("fixed-slot add writeback")
+    ARRET --> ARET
+    AOP --> ARET
+    MRET --> SLOTS
+    ARET --> SLOTS
+
+    SLOTS --> ROB[["ordered commit ring<br/>result_valid,iter"]]
+    ROB --> FIFO2["per-core FIFO"]
+```
+
+The important difference from the current 2-context RTL is that the issue logic normally examines one slot rather than scanning all slots, and the result path writes the fixed delayed slot rather than demultiplexing across arbitrary ready contexts. This sacrifices some scheduling freedom but should reduce LUT use enough to make 4, 8, or eventually 12 to 16 contexts plausible on a small device.
+
+Planned timing model:
+
+```text
+cycle k:     issue slot s operation phase p
+cycle k+1:   issue slot s+1 operation phase p or another ready phase
+cycle k+6:   multiplier result returns to delayed slot s
+cycle k+7:   adder result returns to delayed slot s
+```
+
+This is closer to a fine-grained multithreaded CPU or barrel processor than to an out-of-order core. Each slot still needs its own architectural pixel state; the optimization is not eliminating state, but replacing N-way ready scans and FP64 muxes with fixed slot rotation, narrow current-slot access, and simpler writeback. Ordered commit remains required unless the downstream protocol is changed to accept tagged pixel output.
+
+Deployment plan for this architecture:
+
+| Step | Goal |
+|---|---|
+| 4-slot ring prototype | Validate correctness and LUT scaling against generic 4ctx. |
+| 1-core or 2-core build | Measure per-worker area before replicating four workers. |
+| 4-worker 4ctx ring | First possible board test if LUT use is acceptable. |
+| 8/12/16 slots | Move toward the `1M+1A` issue limit if timing and area allow. |
+| `1M+2A` after high contexts | Evaluate only after enough contexts exist to feed an extra adder. |
+
+### 8.7 Escape Check
 
 Escape is detected with:
 
@@ -641,7 +760,7 @@ quick_esc(z_re_sq) || quick_esc(z_im_sq) || quick_esc(add_result)
 
 `quick_esc` compares the floating-point exponent against `bias + 2` and handles the exact `4.0` boundary by checking mantissa bits. Values greater than 4.0 escape. Exact 4.0 does not escape.
 
-### 8.7 Output And Backpressure
+### 8.8 Output And Backpressure
 
 When a pixel is complete, a worker waits until its per-core FIFO is not full, writes the 16-bit iteration count, and then advances to the next pixel. The raster merger drains per-core FIFOs into the shared output FIFO. `tx_ctrl` then drains the shared output FIFO to UART.
 
