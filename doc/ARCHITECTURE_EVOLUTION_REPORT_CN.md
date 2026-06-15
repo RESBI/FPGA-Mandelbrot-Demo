@@ -6,17 +6,20 @@
 
 | 项目 | 当前值 |
 |---|---:|
-| FPGA | Xilinx Zynq-7010 `xc7z010clg400-1` |
-| 系统时钟 | 100 MHz |
+| FPGA | Xilinx Kintex-7 `xc7k70tfbg676-1` |
+| 板级时钟输入 | 200 MHz 差分 `CLK_200_P/N` |
+| 内部系统时钟 | MMCM 生成的 100 MHz `sys_clk` |
 | 浮点模式 | FP64 |
 | Worker | 4 |
 | 每 worker context | 2 |
 | 调度器 | 动态空闲 core 行调度 |
 | UART | 12000000 baud fractional NCO |
+| 默认串口 | `COM9` |
+| Hardware server | `127.0.0.1:2542` |
 | Host 协议 | raster order response，当前使用 tiled response |
 | 最大已验证帧 | 1920x1080 |
-| 当前 timing | `WNS=0.285ns`, `TNS=0.000ns`, `WHS=0.021ns`, `THS=0.000ns` |
-| 当前资源 | 13917 LUTs, 14458 registers, 37 DSP48E1, 9.5 BRAM tiles |
+| 当前 XC7K70T 板级状态 | 完整 FP64 bitstream 已通过 |
+| 当前 XC7K70T timing/resource | `WNS=1.148ns`, `TNS=0.000ns`; 13726 LUTs, 14559 registers, 37 DSP48E1, 9.5 BRAM tiles |
 
 ## 初始设计思想
 

@@ -9,8 +9,63 @@ module top #(
 ) (
     input  wire uart_rx,
     output wire uart_tx,
-    input  wire sys_clk
+    input  wire CLK_200_P,
+    input  wire CLK_200_N,
+    output wire [7:0] LED
 );
+
+    wire sys_clk;
+    wire clk_200;
+    wire clk_fb;
+    wire clk_fb_unbuf;
+    wire clk_100_unbuf;
+    wire clk_locked;
+
+    IBUFDS #(
+        .DIFF_TERM("TRUE"),
+        .IBUF_LOW_PWR("FALSE"),
+        .IOSTANDARD("LVDS")
+    ) u_clk_200_ibufds (
+        .I(CLK_200_P),
+        .IB(CLK_200_N),
+        .O(clk_200)
+    );
+
+    MMCME2_BASE #(
+        .CLKIN1_PERIOD(5.000),
+        .CLKFBOUT_MULT_F(5.000),
+        .CLKOUT0_DIVIDE_F(10.000),
+        .CLKOUT0_DUTY_CYCLE(0.500)
+    ) u_clk_mmcm (
+        .CLKIN1(clk_200),
+        .CLKFBIN(clk_fb),
+        .RST(1'b0),
+        .PWRDWN(1'b0),
+        .CLKFBOUT(clk_fb_unbuf),
+        .CLKFBOUTB(),
+        .CLKOUT0(clk_100_unbuf),
+        .CLKOUT0B(),
+        .CLKOUT1(),
+        .CLKOUT1B(),
+        .CLKOUT2(),
+        .CLKOUT2B(),
+        .CLKOUT3(),
+        .CLKOUT3B(),
+        .CLKOUT4(),
+        .CLKOUT5(),
+        .CLKOUT6(),
+        .LOCKED(clk_locked)
+    );
+
+    BUFG u_sys_clk_bufg (
+        .I(clk_100_unbuf),
+        .O(sys_clk)
+    );
+
+    BUFG u_clk_fb_bufg (
+        .I(clk_fb_unbuf),
+        .O(clk_fb)
+    );
 
     // Clock enable for FP operations
     reg [`FP_CE_DIV-1:0] ce_counter;
@@ -32,11 +87,13 @@ module top #(
     wire rst;
     wire soft_reset;
     reg [7:0] soft_rst_cnt = 0;
-    assign power_on_rst = (rst_cnt < 15);
+    assign power_on_rst = !clk_locked || (rst_cnt < 15);
     assign rst = power_on_rst || (soft_rst_cnt != 0);
 
     always @(posedge sys_clk) begin
-        if (rst_cnt < 15)
+        if (!clk_locked)
+            rst_cnt <= 0;
+        else if (rst_cnt < 15)
             rst_cnt <= rst_cnt + 1;
     end
 
@@ -170,5 +227,39 @@ module top #(
         .tx_en      (tx_en),
         .tx_avail   (tx_avail)
     );
+
+    reg [31:0] heartbeat = 32'd0;
+    reg [7:0] progress = 8'd0;
+    reg rx_seen = 1'b0;
+    reg tx_seen = 1'b0;
+
+    always @(posedge sys_clk) begin
+        heartbeat <= heartbeat + 1'b1;
+
+        if (rst) begin
+            progress <= 8'd0;
+            rx_seen <= 1'b0;
+            tx_seen <= 1'b0;
+        end else begin
+            if (compute_start)
+                progress <= 8'd0;
+            else if (fifo_wr_en && !fifo_full)
+                progress <= progress + 1'b1;
+
+            if (rx_avail)
+                rx_seen <= ~rx_seen;
+            if (tx_en && tx_avail)
+                tx_seen <= ~tx_seen;
+        end
+    end
+
+    assign LED[0] = heartbeat[25];
+    assign LED[1] = rst;
+    assign LED[2] = compute_busy;
+    assign LED[3] = fifo_rd_avail;
+    assign LED[4] = rx_seen;
+    assign LED[5] = tx_seen;
+    assign LED[6] = progress[6];
+    assign LED[7] = progress[7];
 
 endmodule

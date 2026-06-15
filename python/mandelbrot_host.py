@@ -22,14 +22,13 @@ import sys
 import argparse
 import os
 
-PORT = "COM6"
+PORT = "COM9"
 BAUD = 12000000
 TIMEOUT = 180.0
 DEFAULT_DYNAMIC_OWNER_DEPTH = 4096
 DEFAULT_MAX_HOST_BYTES = 512 * 1024 * 1024
 DEFAULT_HOST_TILE_HEIGHT = 120
-DEFAULT_COMPUTE_TILE_WIDTH = 512
-DEFAULT_COMPUTE_TILE_HEIGHT = 120
+DEFAULT_COMPUTE_TILE_MAX_WIDTH = 4096
 DEFAULT_TILE_READ_TIMEOUT = 30.0
 TILE_PROGRESS_PACKET_INTERVAL = 1024
 SOFT_RESET_COMMAND = b"RST!RST!"
@@ -53,9 +52,9 @@ def configure_host_tiling(args):
     if args.tile_height <= 0:
         args.tile_height = min(args.height, DEFAULT_HOST_TILE_HEIGHT)
     if args.compute_tile_width <= 0:
-        args.compute_tile_width = min(args.tile_width, DEFAULT_COMPUTE_TILE_WIDTH)
+        args.compute_tile_width = min(args.tile_width, DEFAULT_COMPUTE_TILE_MAX_WIDTH)
     if args.compute_tile_height <= 0:
-        args.compute_tile_height = min(args.tile_height, DEFAULT_COMPUTE_TILE_HEIGHT)
+        args.compute_tile_height = args.tile_height
 
 
 def validate_request(args):
@@ -648,9 +647,9 @@ def main():
     parser.add_argument("--tile-height", type=int, default=0,
                         help=f"Host-driven request tile height. Default: min(height, {DEFAULT_HOST_TILE_HEIGHT}).")
     parser.add_argument("--compute-tile-width", type=int, default=0,
-                        help=f"Hardware compute tile width inside each host tile. Default: min(host tile width, {DEFAULT_COMPUTE_TILE_WIDTH}).")
+                        help=f"Hardware compute tile width inside each host tile. Default: min(host tile width, {DEFAULT_COMPUTE_TILE_MAX_WIDTH}).")
     parser.add_argument("--compute-tile-height", type=int, default=0,
-                        help=f"Hardware compute tile height inside each host tile. Default: min(host tile height, {DEFAULT_COMPUTE_TILE_HEIGHT}).")
+                        help="Hardware compute tile height inside each host tile. Default: host tile height.")
     parser.add_argument("--tile-retries", type=int, default=3,
                         help="Retries per hardware compute tile request")
     parser.add_argument("--tile-read-timeout", type=float, default=DEFAULT_TILE_READ_TIMEOUT,

@@ -217,7 +217,7 @@ def write_report(path, small_results, scene_results, passed_bauds):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default="COM6")
+    parser.add_argument("--port", default="COM9")
     parser.add_argument("--bauds", nargs="*", type=int, default=CANDIDATE_BAUDS)
     parser.add_argument("--out-dir", default=str(ROOT / "python" / "uart_fractional_bench"))
     parser.add_argument("--small-only", action="store_true")

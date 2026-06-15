@@ -1,4 +1,4 @@
-set part_name "xc7z010clg400-1"
+set part_name "xc7k70tfbg676-1"
 set proj_name "fp_sim"
 set proj_dir  "./fp_sim_proj"
 set rtl_dir   "./rtl"

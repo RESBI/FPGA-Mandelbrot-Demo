@@ -255,7 +255,7 @@ def summarize(results, args):
 
 def main():
     parser = argparse.ArgumentParser(description="Repeated host-tiled 1080p stability benchmark")
-    parser.add_argument("--port", default="COM6")
+    parser.add_argument("--port", default="COM9")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--tile-width", type=int, default=1920)
     parser.add_argument("--tile-height", type=int, default=120)

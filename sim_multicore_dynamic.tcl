@@ -1,4 +1,4 @@
-set part_name "xc7z010clg400-1"
+set part_name "xc7k70tfbg676-1"
 set proj_name "multicore_dynamic_sim"
 set proj_dir  "./multicore_dynamic_sim_proj"
 set rtl_dir   "./rtl"

@@ -3,14 +3,71 @@
 module uart_tx_pattern_top (
     input  wire uart_rx,
     output wire uart_tx,
-    input  wire sys_clk
+    input  wire CLK_200_P,
+    input  wire CLK_200_N,
+    output wire [7:0] LED
 );
+
+    wire sys_clk;
+    wire clk_200;
+    wire clk_fb;
+    wire clk_fb_unbuf;
+    wire clk_100_unbuf;
+    wire clk_locked;
+
+    IBUFDS #(
+        .DIFF_TERM("TRUE"),
+        .IBUF_LOW_PWR("FALSE"),
+        .IOSTANDARD("LVDS")
+    ) u_clk_200_ibufds (
+        .I(CLK_200_P),
+        .IB(CLK_200_N),
+        .O(clk_200)
+    );
+
+    MMCME2_BASE #(
+        .CLKIN1_PERIOD(5.000),
+        .CLKFBOUT_MULT_F(5.000),
+        .CLKOUT0_DIVIDE_F(10.000),
+        .CLKOUT0_DUTY_CYCLE(0.500)
+    ) u_clk_mmcm (
+        .CLKIN1(clk_200),
+        .CLKFBIN(clk_fb),
+        .RST(1'b0),
+        .PWRDWN(1'b0),
+        .CLKFBOUT(clk_fb_unbuf),
+        .CLKFBOUTB(),
+        .CLKOUT0(clk_100_unbuf),
+        .CLKOUT0B(),
+        .CLKOUT1(),
+        .CLKOUT1B(),
+        .CLKOUT2(),
+        .CLKOUT2B(),
+        .CLKOUT3(),
+        .CLKOUT3B(),
+        .CLKOUT4(),
+        .CLKOUT5(),
+        .CLKOUT6(),
+        .LOCKED(clk_locked)
+    );
+
+    BUFG u_sys_clk_bufg (
+        .I(clk_100_unbuf),
+        .O(sys_clk)
+    );
+
+    BUFG u_clk_fb_bufg (
+        .I(clk_fb_unbuf),
+        .O(clk_fb)
+    );
 
     wire [7:0] tx_data;
     wire       tx_en;
     wire       tx_avail;
 
-    uart_tx u_tx (
+    uart_tx #(
+        .CLK_HZ(100000000)
+    ) u_tx (
         .tx             (uart_tx),
         .clk            (sys_clk),
         .data           (tx_data),
@@ -84,5 +141,12 @@ module uart_tx_pattern_top (
     end
 
     wire unused_uart_rx = uart_rx;
+
+    reg [31:0] heartbeat = 32'd0;
+    always @(posedge sys_clk) begin
+        heartbeat <= heartbeat + 1'b1;
+    end
+
+    assign LED = {pattern_idx, state, clk_locked, tx_avail, heartbeat[25]};
 
 endmodule

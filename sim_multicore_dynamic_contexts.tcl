@@ -1,4 +1,4 @@
-set part_name "xc7z010clg400-1"
+set part_name "xc7k70tfbg676-1"
 set rtl_dir   "./rtl"
 
 set WORKER_CONTEXTS 4

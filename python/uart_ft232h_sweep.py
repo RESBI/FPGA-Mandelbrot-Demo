@@ -2,7 +2,7 @@
 """FT232H/FT232HL UART baud sweep helper.
 
 The script patches UART BAUD/CLOCKS_PER_BIT, builds/programs either the TX-only
-pattern design or the full Mandelbrot design, then runs a serial check on COM6.
+pattern design or the full Mandelbrot design, then runs a serial check on COM9.
 It is intentionally simple and serial: only one process owns the port at a time.
 """
 
@@ -97,7 +97,7 @@ def main():
     baud_group = ap.add_mutually_exclusive_group(required=True)
     baud_group.add_argument("--baud", type=int, help="target UART baud for fractional generator")
     baud_group.add_argument("--cpb", type=int, help="100 MHz clocks per UART bit, converted to nearest baud")
-    ap.add_argument("--port", default="COM6")
+    ap.add_argument("--port", default="COM9")
     ap.add_argument("--mode", choices=["tx", "echo", "full"], default="tx")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--no-program", action="store_true")

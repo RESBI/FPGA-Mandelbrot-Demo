@@ -1,8 +1,8 @@
-set part_name "xc7z010clg400-1"
+set part_name "xc7k70tfbg676-1"
 set proj_name "uart_tx_pattern"
 set proj_dir  "./uart_tx_pattern_proj"
 set rtl_dir   "./rtl"
-set xdc_dir   "./constraints"
+set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
 
 puts "========================================"
 puts " UART TX Pattern Build Script"
@@ -19,7 +19,7 @@ add_files -fileset sources_1 [list \
 set_property top uart_tx_pattern_top [current_fileset]
 set_property include_dirs $rtl_dir [current_fileset]
 
-add_files -fileset constrs_1 [glob $xdc_dir/*.xdc]
+add_files -fileset constrs_1 $xdc_file
 
 puts ""
 puts "--- Running Synthesis ---"

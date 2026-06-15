@@ -115,7 +115,7 @@ def small_frame(port, baud):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--baud", type=int, required=True)
-    ap.add_argument("--port", default="COM4")
+    ap.add_argument("--port", default="COM9")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--no-program", action="store_true")
     ap.add_argument("--no-test", action="store_true")

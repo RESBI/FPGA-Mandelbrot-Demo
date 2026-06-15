@@ -1,8 +1,8 @@
-set part_name "xc7z010clg400-1"
+set part_name "xc7k70tfbg676-1"
 set proj_name "mandelbrot_fp128"
 set proj_dir  "./fp128_proj"
 set rtl_dir   "./rtl"
-set xdc_dir   "./constraints"
+set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
 
 puts "========================================"
 puts " Mandelbrot FP128 Build Script"
@@ -21,7 +21,7 @@ puts "Added [llength [glob $rtl_dir/*.v]] source files"
 set_property include_dirs $rtl_dir [current_fileset]
 set_property verilog_define {FP128_MODE} [current_fileset]
 
-add_files -fileset constrs_1 [glob $xdc_dir/*.xdc]
+add_files -fileset constrs_1 $xdc_file
 puts "Added constraint files"
 
 puts ""

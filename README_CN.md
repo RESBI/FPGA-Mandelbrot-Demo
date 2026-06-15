@@ -2,29 +2,32 @@
 
 这是一个基于 FPGA 的 Mandelbrot 渲染器。PC 通过 UART 发送一次图像命令，包含中心坐标、像素步长、最大迭代次数和图像尺寸；FPGA 使用 4 个 FP64 worker 计算像素，并以 16 位迭代次数流式返回。当前默认 worker 在一个 FP64 乘法器和一个 FP64 加法器上交错执行 2 个像素上下文。
 
-详细硬件架构见 `doc/ARCHITECTURE_CN.md`，架构演进见 `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md`，worker 去气泡分析见 `doc/PIPELINE_BUBBLE_ANALYSIS_CN.md`，N-context 新旧结构对比英文主文档见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md`，中文备份见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT_CN.md`。
+详细硬件架构见 `doc/ARCHITECTURE_CN.md`，架构演进见 `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md`，worker 去气泡分析见 `doc/PIPELINE_BUBBLE_ANALYSIS_CN.md`，N-context 新旧结构对比英文主文档见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md`，中文备份见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT_CN.md`。直接 200 MHz 计算时钟尝试见 `doc/200MHZ_ATTEMPT_REPORT.md`。
 
 ## 当前默认配置
 
 | 项目 | 当前值 |
 |---|---:|
-| FPGA | Xilinx Zynq-7010 `xc7z010clg400-1` |
-| Vivado | 2020.2 |
-| 系统时钟 | 100 MHz |
+| FPGA | Xilinx Kintex-7 `xc7k70tfbg676-1` |
+| Vivado | 2020.2，安装路径 `Z:\Softwares\Xilinx` |
+| 板级时钟输入 | 200 MHz 差分 `CLK_200_P/N` |
+| 内部系统时钟 | MMCM 生成的 100 MHz `sys_clk` |
 | 浮点模式 | FP64 |
 | Mandelbrot worker | 4 |
 | 每 worker 像素上下文 | 2 |
 | 调度器 | 动态空闲 core 行调度，`SCHED_MODE=1` |
 | FP 有效频率 | 100 MHz，`FP_CE_DIV=1` |
 | UART | 12000000 baud，fractional NCO |
-| 默认串口 | `COM6` |
+| 默认串口 | `COM9` |
 | 像素格式 | little-endian `uint16` 迭代次数 |
 | 最大迭代次数 | 65535 |
 | 最大已验证帧 | 1920x1080 |
-| 当前 routed timing | `WNS=0.285ns`, `TNS=0.000ns`, `WHS=0.021ns`, `THS=0.000ns` |
-| 当前 placed utilization | `13917` LUTs, `14458` registers, `37` DSP48E1, `9.5` BRAM tiles |
+| 当前板级构建状态 | XC7K70T 完整 FP64 bitstream 已通过 |
+| Hardware server | `127.0.0.1:2542` |
+| 当前 routed timing | `WNS=1.148ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns` |
+| 当前 placed utilization | `13726` LUTs, `14559` registers, `37` DSP48E1, `9.5` BRAM tiles |
 
-当前默认 RTL 仍是 timing-clean 的 2-context worker。Generic 4/8-context scoreboard worker 以及后续 ring/lookahead 实验已放弃：它们小图行为仿真可通过，但无法在 xc7z010 上得到可布局且 timing-clean 的设计。数据见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md` / `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT_CN.md`。
+当前默认 RTL 仍是 2-context worker。本分支已从旧 Zynq-7010 平台迁移到 XC7K70T，完整 FP64 bitstream 已在新器件上构建并满足 timing。Generic 4/8-context scoreboard worker 以及后续 ring/lookahead 实验仍属于研究路径。
 
 ## 目录结构
 
@@ -33,7 +36,7 @@
 | `rtl/` | Verilog RTL 源码。 |
 | `python/` | Host 工具、benchmark、图像输出脚本。 |
 | `doc/` | 架构、设计、分析和 TODO 文档。 |
-| `constraints/` | FPGA 管脚和时钟约束。 |
+| `constraints_hvs_xc7k70t/` | XC7K70T 管脚和时钟约束。 |
 | `sim/` | Vivado testbench。 |
 | `build_fp64.tcl` | 默认 FP64 bitstream 构建脚本。 |
 | `program.tcl` | JTAG 烧录脚本。 |
@@ -51,10 +54,10 @@ vivado -mode batch -source program.tcl
 
 ## 推荐 1080p 高波特率运行方式
 
-当前默认启用 host-driven tile。如果不传 `--tile-width/--tile-height`，host 自动使用全宽、120 行高的 host stripe，并默认 `--tile-retries 3`、单次 tile 接收 read timeout 为 30 秒。每个 host stripe 内部会再拆成更小的硬件 compute tile；默认 compute tile 为 `512x120`。因此某个 packet 坏掉时，重试粒度是受影响的 compute tile，而不是整个 host stripe。1080p 推荐默认形状为 `1920x120` host stripe 加 `512x120` compute tile：
+当前默认启用 host-driven tile。如果不传 `--tile-width/--tile-height`，host 自动使用全宽、120 行高的 host stripe，并默认 `--tile-retries 3`、单次 tile 接收 read timeout 为 30 秒。默认 compute tile 等于 host tile 本身，但 compute 宽度上限为 4096。现在已有失败后 drain 串口、发送软复位 `RST!RST!`、重算该 tile 的方案，因此默认不再拆成较小 compute tile。1080p 默认形状为 `1920x120` host tile，同时也是 `1920x120` compute tile：
 
 ```bash
-python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --compute-tile-width 512 --compute-tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
+python python\mandelbrot_host.py --port COM9 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
 ```
 
 `--quiet` 下现在使用单行进度条，不再刷屏。格式为：
@@ -63,10 +66,10 @@ python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-it
 [progress] (n / total compute tile) (m / total host tile) current task
 ```
 
-失败的 compute tile 会被记录坐标、drain stale UART bytes，并默认发送 soft reset 命令 `RST!RST!`，然后只重算该 compute tile。可用 `--no-soft-reset-on-retry` 关闭自动软复位，也可以手动发送：
+失败的 compute tile 会被记录坐标、drain stale UART bytes，并默认发送 soft reset 命令 `RST!RST!`，然后重算该 compute tile。可用 `--no-soft-reset-on-retry` 关闭自动软复位，也可以手动发送：
 
 ```powershell
-python python\mandelbrot_host.py --port COM6 --soft-reset
+python python\mandelbrot_host.py --port COM9 --soft-reset
 ```
 
 如需旧的单命令整帧 response，显式传 `--full-frame`。不建议在 12 Mbaud 大帧下使用该模式。
@@ -79,18 +82,38 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 
 ## 当前资源和时序
 
+最新 1080p 六场景板级测试，12 Mbaud，默认 `1920x120` host tile，compute tile 等于 host tile：
+
+| 场景 | 状态 | FPGA 时间 | 吞吐 |
+|---|---:|---:|---:|
+| fast escape @128 | PASS | `5.127s` | `404464.49 pps` |
+| standard @64 | PASS | `4.731s` | `438328.75 pps` |
+| Seahorse zoom @512 | PASS | `19.440s` | `106668.12 pps` |
+| deep tendrils @8192 | PASS | `37.326s` | `55553.03 pps` |
+| deep mini-brot @8192 | PASS | `83.561s` | `24815.51 pps` |
+| deep Seahorse @1024 | PASS | `36.626s` | `56615.56 pps` |
+
+主要阶段性能对比：
+
+| 阶段 | 模式 | fast escape @128 | standard @64 | Seahorse @512 | deep mini-brot @8192 |
+|---|---|---:|---:|---:|---:|
+| 历史 576k 4-worker 1ctx | UART-bound baseline | `72.736s` | `72.735s` | `74.265s` | `234.231s` |
+| 12M single-burst 4-worker 2ctx | 高 baud 长 burst | `4.678s` | `4.202s` | `17.280s` | `83.428s` |
+| 12M tiled `512x120` compute | 较小 retry tile | `7.010s` | `7.374s` | `18.721s` | `84.984s` |
+| 12M tiled host tile = compute tile | 当前默认，1080p 为 `1920x120` | `5.127s` | `4.731s` | `19.440s` | `83.561s` |
+
+直接使用 200 MHz 作为完整计算时钟的尝试没有得到 timing-clean bitstream。最好的 200 MHz 尝试仍为 `WNS=-0.651ns`, `TNS=-306.186ns`，因此没有下载跑分。详见 `doc/200MHZ_ATTEMPT_REPORT.md`。
+
 | Resource | Used | Device | Utilization |
 |---|---:|---:|---:|
-| Slice LUTs | 13917 | 17600 | 79.07% |
-| LUT as Logic | 13641 | 17600 | 77.51% |
-| LUT as Memory | 276 | 6000 | 4.60% |
-| Slice Registers | 14458 | 35200 | 41.07% |
-| DSP48E1 | 37 | 80 | 46.25% |
-| Block RAM Tile | 9.5 | 60 | 15.83% |
+| Slice LUTs | 13726 | 41000 | 33.48% |
+| Slice Registers | 14559 | 82000 | 17.75% |
+| DSP48E1 | 37 | 240 | 15.42% |
+| Block RAM Tile | 9.5 | 135 | 7.04% |
 
 | Build | Scheduler | Contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|
-| `build_fp64.tcl` | dynamic rows + tiled response | 2 | `0.285ns` | `0.000ns` | `0.021ns` | `0.000ns` |
+| `build_fp64.tcl` | dynamic rows + tiled response | 2 | `1.148ns` | `0.000ns` | `0.042ns` | `0.000ns` |
 
 ## 重要限制
 
@@ -99,7 +122,7 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 | UART 长 burst | 12 Mbaud 单帧长 burst 偶发 byte slip；推荐 host tile。 |
 | FP64 实现 | IEEE-like，非完整 IEEE-754；不完整支持 NaN/Inf/denormal/rounding。 |
 | FP64 边界差异 | RTL truncation 与 Python RNE 在边界点可能不同，视觉上可接受。 |
-| 4/8ctx generic worker | 行为仿真通过，但 LUT 超量，不能在 xc7z010 部署。 |
+| 4/8ctx generic worker | 行为仿真通过，但旧 generic 实现在早期 xc7z010 目标上 LUT 超量。 |
 | 动态 owner 表 | 默认 `DYNAMIC_OWNER_DEPTH=4096`，超高帧需要重新配置。 |
 
 默认 host tile 会把逻辑大图拆成多个硬件命令，因此 4096 行限制作用于每个 tile 的高度，而不是逻辑整图高度。`--full-frame` 会恢复旧行为，此时超过 4096 行的单硬件请求仍可能 stall。
