@@ -42,7 +42,7 @@ module mandelbrot_core_worker_kctx #(
     localparam CTX_W = clog2(CONTEXTS);
 
     localparam MUL_LAT = 6;
-    localparam ADD_LAT = 7;
+    localparam ADD_LAT = 9;
 
     localparam S_IDLE                 = 5'd0;
     localparam S_INIT_START           = 5'd1;
@@ -64,6 +64,7 @@ module mandelbrot_core_worker_kctx #(
     localparam C_NEED_2X              = 4'd7;
     localparam C_NEED_NEXT_IM         = 4'd8;
     localparam C_DONE                 = 4'd9;
+    localparam C_CHECK_ITER           = 4'd10;
 
     localparam MOP_NONE               = 3'd0;
     localparam MOP_ZRSQ               = 3'd1;
@@ -100,12 +101,14 @@ module mandelbrot_core_worker_kctx #(
     reg [`FP_WIDTH-1:0] center_re, center_im, step_val;
     reg [`FP_WIDTH-1:0] c_re_start, c_im_top, row_step, row_c_im;
     reg [`FP_WIDTH-1:0] c_re_next;
+    reg [`FP_WIDTH-1:0] half_w_fp, half_h_fp, row_start_fp, row_stride_fp;
     reg [15:0] max_iter, rows, cols;
     reg [15:0] row_start, row_stride;
     reg [15:0] half_w;
     reg [15:0] launch_col;
     reg [15:0] commit_col;
     reg        c_re_add_pending;
+    reg        c_re_issue_pending;
     reg        launch_add_used;
 
     reg [3:0]  c_state [0:CONTEXTS-1];
@@ -126,6 +129,13 @@ module mandelbrot_core_worker_kctx #(
     reg        c_zrzi_done [0:CONTEXTS-1];
     reg        c_mag_issued [0:CONTEXTS-1];
     reg        c_zrzi_issued [0:CONTEXTS-1];
+    reg        c_mul_ready [0:CONTEXTS-1];
+    reg [2:0]  c_mul_op_ready [0:CONTEXTS-1];
+    reg        c_add_ready [0:CONTEXTS-1];
+    reg [3:0]  c_add_op_ready [0:CONTEXTS-1];
+    reg [`FP_WIDTH-1:0] c_add_a_ready [0:CONTEXTS-1];
+    reg [`FP_WIDTH-1:0] c_add_b_ready [0:CONTEXTS-1];
+    reg        c_add_neg_ready [0:CONTEXTS-1];
     reg        c_escape [0:CONTEXTS-1];
     reg        c_result_valid [0:CONTEXTS-1];
     reg [15:0] c_result_iter [0:CONTEXTS-1];
@@ -133,6 +143,12 @@ module mandelbrot_core_worker_kctx #(
     reg [`FP_WIDTH-1:0] mul_a, mul_b;
     reg [`FP_WIDTH-1:0] add_a, add_b;
     reg                 add_neg;
+    reg                 mul_req_valid;
+    reg [2:0]           mul_req_op;
+    reg [CTX_W-1:0]     mul_req_ctx;
+    reg                 add_req_valid;
+    reg [3:0]           add_req_op;
+    reg [CTX_W-1:0]     add_req_ctx;
 
     wire [`FP_WIDTH-1:0] mul_result;
     wire [`FP_WIDTH-1:0] add_result;
@@ -151,9 +167,6 @@ module mandelbrot_core_worker_kctx #(
     wire [3:0]       add_done_op = add_op_pipe[ADD_LAT-1];
     wire [CTX_W-1:0] add_done_ctx = add_ctx_pipe[ADD_LAT-1];
 
-    reg mag_inflight [0:CONTEXTS-1];
-    reg zrzi_inflight [0:CONTEXTS-1];
-
     integer i;
     integer j;
     integer launch_idx;
@@ -161,21 +174,7 @@ module mandelbrot_core_worker_kctx #(
     integer active_count;
     integer mul_issued;
     integer add_issued;
-
-    always @(*) begin
-        for (i = 0; i < CONTEXTS; i = i + 1) begin
-            mag_inflight[i] = 0;
-            zrzi_inflight[i] = 0;
-        end
-        for (i = 0; i < ADD_LAT; i = i + 1) begin
-            if (add_op_pipe[i] == AOP_MAG)
-                mag_inflight[add_ctx_pipe[i]] = 1;
-        end
-        for (i = 0; i < MUL_LAT; i = i + 1) begin
-            if (mul_op_pipe[i] == MOP_ZRZI)
-                zrzi_inflight[mul_ctx_pipe[i]] = 1;
-        end
-    end
+    reg [CTX_W-1:0] issue_base;
 
     function quick_esc;
         input [`FP_WIDTH-1:0] val;
@@ -233,6 +232,13 @@ module mandelbrot_core_worker_kctx #(
             launch_col <= 0;
             commit_col <= 0;
             c_re_add_pending <= 0;
+            c_re_issue_pending <= 0;
+            mul_req_valid <= 0;
+            mul_req_op <= MOP_NONE;
+            mul_req_ctx <= 0;
+            add_req_valid <= 0;
+            add_req_op <= AOP_NONE;
+            add_req_ctx <= 0;
             for (i = 0; i < MUL_LAT; i = i + 1) begin
                 mul_op_pipe[i] <= MOP_NONE;
                 mul_ctx_pipe[i] <= 0;
@@ -245,10 +251,19 @@ module mandelbrot_core_worker_kctx #(
                 c_state[i] <= C_IDLE;
                 c_active[i] <= 0;
                 c_result_valid[i] <= 0;
+                c_mul_ready[i] <= 0;
+                c_add_ready[i] <= 0;
+                c_z_re[i] <= 0;
+                c_z_im[i] <= 0;
             end
         end else if (ce) begin
             fifo_wr <= 0;
             launch_add_used = 1'b0;
+            mul_a <= {`FP_WIDTH{1'b0}};
+            mul_b <= {`FP_WIDTH{1'b0}};
+            add_a <= {`FP_WIDTH{1'b0}};
+            add_b <= {`FP_WIDTH{1'b0}};
+            add_neg <= 1'b0;
 
             for (i = MUL_LAT-1; i > 0; i = i - 1) begin
                 mul_op_pipe[i] <= mul_op_pipe[i-1];
@@ -263,10 +278,42 @@ module mandelbrot_core_worker_kctx #(
             add_op_pipe[0] <= AOP_NONE;
             add_ctx_pipe[0] <= 0;
 
+            if (mul_req_valid && mul_op_pipe[0] == MOP_NONE) begin
+                case (mul_req_op)
+                    MOP_ZRSQ: begin
+                        mul_a <= c_z_re[mul_req_ctx];
+                        mul_b <= c_z_re[mul_req_ctx];
+                    end
+                    MOP_ZISQ: begin
+                        mul_a <= c_z_im[mul_req_ctx];
+                        mul_b <= c_z_im[mul_req_ctx];
+                    end
+                    MOP_ZRZI: begin
+                        mul_a <= c_z_re[mul_req_ctx];
+                        mul_b <= c_z_im[mul_req_ctx];
+                    end
+                    default: begin end
+                endcase
+                mul_op_pipe[0] <= mul_req_op;
+                mul_ctx_pipe[0] <= mul_req_ctx;
+                mul_req_valid <= 0;
+            end
+
+            if (add_req_valid && add_op_pipe[0] == AOP_NONE) begin
+                add_a <= c_add_a_ready[add_req_ctx];
+                add_b <= c_add_b_ready[add_req_ctx];
+                add_neg <= c_add_neg_ready[add_req_ctx];
+                add_op_pipe[0] <= add_req_op;
+                add_ctx_pipe[0] <= add_req_ctx;
+                add_req_valid <= 0;
+            end
+
             if (mul_done_op != MOP_NONE) begin
                 case (mul_done_op)
                     MOP_ZRSQ: begin
                         c_z_re_sq[mul_done_ctx] <= mul_result;
+                        c_mul_op_ready[mul_done_ctx] <= MOP_ZISQ;
+                        c_mul_ready[mul_done_ctx] <= 1;
                         c_state[mul_done_ctx] <= C_NEED_ZISQ;
                     end
                     MOP_ZISQ: begin
@@ -275,6 +322,13 @@ module mandelbrot_core_worker_kctx #(
                         c_zrzi_done[mul_done_ctx] <= 0;
                         c_mag_issued[mul_done_ctx] <= 0;
                         c_zrzi_issued[mul_done_ctx] <= 0;
+                        c_mul_op_ready[mul_done_ctx] <= MOP_ZRZI;
+                        c_mul_ready[mul_done_ctx] <= 1;
+                        c_add_a_ready[mul_done_ctx] <= c_z_re_sq[mul_done_ctx];
+                        c_add_b_ready[mul_done_ctx] <= mul_result;
+                        c_add_neg_ready[mul_done_ctx] <= 0;
+                        c_add_op_ready[mul_done_ctx] <= AOP_MAG;
+                        c_add_ready[mul_done_ctx] <= 1;
                         c_state[mul_done_ctx] <= C_WAIT_MAG_ZRZI;
                     end
                     MOP_ZRZI: begin
@@ -295,7 +349,7 @@ module mandelbrot_core_worker_kctx #(
                     end
                     MOP_INIT_ROWSTEP: begin
                         row_step <= mul_result;
-                        mul_a <= int2fp(row_start);
+                        mul_a <= row_start_fp;
                         mul_b <= step_val;
                         mul_op_pipe[0] <= MOP_INIT_ROWSTART;
                     end
@@ -309,6 +363,40 @@ module mandelbrot_core_worker_kctx #(
                 endcase
             end
 
+            if (state == S_RUN) begin
+                for (i = 0; i < CONTEXTS; i = i + 1) begin
+                    if (c_active[i] && c_state[i] == C_CHECK_ITER) begin
+                        if (c_iter[i] >= max_iter) begin
+                            c_result_iter[i] <= c_iter[i];
+                            c_result_valid[i] <= 1;
+                            c_state[i] <= C_DONE;
+                        end else begin
+                            c_mul_op_ready[i] <= MOP_ZRSQ;
+                            c_mul_ready[i] <= 1;
+                            c_state[i] <= C_NEED_ZRSQ;
+                        end
+                    end
+                    if (c_active[i] && c_state[i] == C_WAIT_MAG_ZRZI && c_mag_done[i] && c_zrzi_done[i]) begin
+                        if (c_escape[i]) begin
+                            c_result_iter[i] <= c_iter[i];
+                            c_result_valid[i] <= 1;
+                            c_state[i] <= C_DONE;
+                        end else begin
+                            c_mag_issued[i] <= 0;
+                            c_zrzi_issued[i] <= 0;
+                            c_mul_op_ready[i] <= MOP_ZRZI;
+                            c_mul_ready[i] <= 1;
+                            c_add_a_ready[i] <= c_z_re_sq[i];
+                            c_add_b_ready[i] <= c_z_im_sq[i];
+                            c_add_neg_ready[i] <= 1;
+                            c_add_op_ready[i] <= AOP_SUB_RE;
+                            c_add_ready[i] <= 1;
+                            c_state[i] <= C_NEED_SUB_RE;
+                        end
+                    end
+                end
+            end
+
             if (add_done_op != AOP_NONE) begin
                 case (add_done_op)
                     AOP_MAG: begin
@@ -317,42 +405,52 @@ module mandelbrot_core_worker_kctx #(
                     end
                     AOP_SUB_RE: begin
                         c_tmp_re[add_done_ctx] <= add_result;
+                        c_add_a_ready[add_done_ctx] <= add_result;
+                        c_add_b_ready[add_done_ctx] <= c_c_re[add_done_ctx];
+                        c_add_neg_ready[add_done_ctx] <= 0;
+                        c_add_op_ready[add_done_ctx] <= AOP_NEXT_RE;
+                        c_add_ready[add_done_ctx] <= 1;
                         c_state[add_done_ctx] <= C_NEED_NEXT_RE;
                     end
                     AOP_NEXT_RE: begin
                         c_next_re[add_done_ctx] <= add_result;
+                        c_add_a_ready[add_done_ctx] <= c_z_re_z_im[add_done_ctx];
+                        c_add_b_ready[add_done_ctx] <= c_z_re_z_im[add_done_ctx];
+                        c_add_neg_ready[add_done_ctx] <= 0;
+                        c_add_op_ready[add_done_ctx] <= AOP_2X;
+                        c_add_ready[add_done_ctx] <= 1;
                         c_state[add_done_ctx] <= C_NEED_2X;
                     end
                     AOP_2X: begin
                         c_tmp_2x[add_done_ctx] <= add_result;
+                        c_add_a_ready[add_done_ctx] <= add_result;
+                        c_add_b_ready[add_done_ctx] <= c_c_im[add_done_ctx];
+                        c_add_neg_ready[add_done_ctx] <= 0;
+                        c_add_op_ready[add_done_ctx] <= AOP_NEXT_IM;
+                        c_add_ready[add_done_ctx] <= 1;
                         c_state[add_done_ctx] <= C_NEED_NEXT_IM;
                     end
                     AOP_NEXT_IM: begin
                         c_z_re[add_done_ctx] <= c_next_re[add_done_ctx];
                         c_z_im[add_done_ctx] <= add_result;
                         c_iter[add_done_ctx] <= c_iter[add_done_ctx] + 1'b1;
-                        if ((c_iter[add_done_ctx] + 1'b1) >= max_iter) begin
-                            c_result_iter[add_done_ctx] <= c_iter[add_done_ctx] + 1'b1;
-                            c_result_valid[add_done_ctx] <= 1;
-                            c_state[add_done_ctx] <= C_DONE;
-                        end else begin
-                            c_state[add_done_ctx] <= C_NEED_ZRSQ;
-                        end
+                        c_state[add_done_ctx] <= C_CHECK_ITER;
                     end
                     AOP_C_RE_NEXT: begin
                         c_re_next <= add_result;
                         c_re_add_pending <= 0;
+                        c_re_issue_pending <= 0;
                     end
                     AOP_INIT_W_SUB: begin
                         c_re_start <= add_result;
                         half_w <= (rows - 16'd1) >> 1;
-                        mul_a <= int2fp((rows - 16'd1) >> 1);
+                        mul_a <= half_h_fp;
                         mul_b <= step_val;
                         mul_op_pipe[0] <= MOP_INIT_H;
                     end
                     AOP_INIT_H_ADD: begin
                         c_im_top <= add_result;
-                        mul_a <= int2fp(row_stride);
+                        mul_a <= row_stride_fp;
                         mul_b <= step_val;
                         mul_op_pipe[0] <= MOP_INIT_ROWSTEP;
                     end
@@ -362,6 +460,7 @@ module mandelbrot_core_worker_kctx #(
                         launch_col <= 0;
                         commit_col <= 0;
                         c_re_add_pending <= 0;
+                        c_re_issue_pending <= 0;
                         state <= S_RUN;
                     end
                     default: begin end
@@ -381,6 +480,10 @@ module mandelbrot_core_worker_kctx #(
                         row_start <= row_start_in;
                         row_stride <= row_stride_in;
                         half_w <= (cols_in - 16'd1) >> 1;
+                        half_w_fp <= int2fp((cols_in - 16'd1) >> 1);
+                        half_h_fp <= int2fp((rows_in - 16'd1) >> 1);
+                        row_start_fp <= int2fp(row_start_in);
+                        row_stride_fp <= int2fp(row_stride_in);
                         busy <= 1;
                         if (row_start_in >= rows_in || rows_in == 0 || cols_in == 0)
                             state <= S_DONE;
@@ -390,7 +493,7 @@ module mandelbrot_core_worker_kctx #(
                 end
 
                 S_INIT_START: begin
-                    mul_a <= int2fp(half_w);
+                    mul_a <= half_w_fp;
                     mul_b <= step_val;
                     mul_op_pipe[0] <= MOP_INIT_W;
                     state <= S_INIT_W_CAPTURE;
@@ -439,6 +542,8 @@ module mandelbrot_core_worker_kctx #(
                             c_active[commit_idx] <= 0;
                             c_result_valid[commit_idx] <= 0;
                             c_state[commit_idx] <= C_IDLE;
+                            c_z_re[commit_idx] <= 0;
+                            c_z_im[commit_idx] <= 0;
                             commit_col <= commit_col + 1'b1;
                         end
                     end
@@ -464,118 +569,80 @@ module mandelbrot_core_worker_kctx #(
                                 c_iter[launch_idx] <= 0;
                                 c_c_re[launch_idx] <= c_re_next;
                                 c_c_im[launch_idx] <= row_c_im;
-                                c_z_re[launch_idx] <= 0;
-                                c_z_im[launch_idx] <= 0;
                                 c_mag_done[launch_idx] <= 0;
                                 c_zrzi_done[launch_idx] <= 0;
                                 c_mag_issued[launch_idx] <= 0;
                                 c_zrzi_issued[launch_idx] <= 0;
+                                c_mul_op_ready[launch_idx] <= MOP_ZRSQ;
+                                c_mul_ready[launch_idx] <= (max_iter != 0);
+                                c_add_ready[launch_idx] <= 0;
                                 c_escape[launch_idx] <= 0;
                                 c_result_valid[launch_idx] <= (max_iter == 0);
                                 c_result_iter[launch_idx] <= 0;
                                 c_state[launch_idx] <= (max_iter == 0) ? C_DONE : C_NEED_ZRSQ;
                                 launch_col <= launch_col + 1'b1;
-                                add_a <= c_re_next;
-                                add_b <= step_val;
-                                add_neg <= 0;
-                                add_op_pipe[0] <= AOP_C_RE_NEXT;
                                 c_re_add_pending <= 1;
-                                launch_add_used = 1'b1;
+                                c_re_issue_pending <= 1;
                             end
                         end
 
-                        if (mul_op_pipe[0] == MOP_NONE) begin
+                        if (mul_op_pipe[0] == MOP_NONE && !mul_req_valid) begin
                             mul_issued = 0;
+                            issue_base = launch_col[CTX_W-1:0];
                             for (j = 0; j < CONTEXTS; j = j + 1) begin
-                                i = (j + launch_col) % CONTEXTS;
-                                if (!mul_issued && c_active[i]) begin
-                                    if (c_state[i] == C_NEED_ZRSQ) begin
-                                        mul_a <= c_z_re[i];
-                                        mul_b <= c_z_re[i];
-                                        mul_op_pipe[0] <= MOP_ZRSQ;
-                                        mul_ctx_pipe[0] <= i[CTX_W-1:0];
+                                i = (j + issue_base) & (CONTEXTS - 1);
+                                if (!mul_issued && c_active[i] && c_mul_ready[i]) begin
+                                    if (c_mul_op_ready[i] == MOP_ZRSQ) begin
+                                        mul_req_valid <= 1;
+                                        mul_req_op <= MOP_ZRSQ;
+                                        mul_req_ctx <= i[CTX_W-1:0];
+                                        c_mul_ready[i] <= 0;
                                         c_state[i] <= C_IDLE;
                                         mul_issued = 1;
-                                    end else if (c_state[i] == C_NEED_ZISQ) begin
-                                        mul_a <= c_z_im[i];
-                                        mul_b <= c_z_im[i];
-                                        mul_op_pipe[0] <= MOP_ZISQ;
-                                        mul_ctx_pipe[0] <= i[CTX_W-1:0];
+                                    end else if (c_mul_op_ready[i] == MOP_ZISQ) begin
+                                        mul_req_valid <= 1;
+                                        mul_req_op <= MOP_ZISQ;
+                                        mul_req_ctx <= i[CTX_W-1:0];
+                                        c_mul_ready[i] <= 0;
                                         c_state[i] <= C_IDLE;
                                         mul_issued = 1;
-                                    end else if (c_state[i] == C_WAIT_MAG_ZRZI && !c_zrzi_done[i] && !zrzi_inflight[i]) begin
-                                        mul_a <= c_z_re[i];
-                                        mul_b <= c_z_im[i];
-                                        mul_op_pipe[0] <= MOP_ZRZI;
-                                        mul_ctx_pipe[0] <= i[CTX_W-1:0];
+                                    end else if (c_mul_op_ready[i] == MOP_ZRZI && !c_zrzi_done[i] && !c_zrzi_issued[i]) begin
+                                        mul_req_valid <= 1;
+                                        mul_req_op <= MOP_ZRZI;
+                                        mul_req_ctx <= i[CTX_W-1:0];
+                                        c_mul_ready[i] <= 0;
+                                        c_zrzi_issued[i] <= 1;
                                         mul_issued = 1;
                                     end
                                 end
                             end
                         end
 
-                        if (add_op_pipe[0] == AOP_NONE && !c_re_add_pending && !launch_add_used) begin
+                        if (add_op_pipe[0] == AOP_NONE && !add_req_valid && c_re_issue_pending) begin
+                            add_a <= c_re_next;
+                            add_b <= step_val;
+                            add_neg <= 0;
+                            add_op_pipe[0] <= AOP_C_RE_NEXT;
+                            c_re_issue_pending <= 0;
+                        end else if (add_op_pipe[0] == AOP_NONE && !add_req_valid && !c_re_add_pending && !launch_add_used) begin
                             add_issued = 0;
+                            issue_base = launch_col[CTX_W-1:0];
                             for (j = 0; j < CONTEXTS; j = j + 1) begin
-                                i = (j + launch_col) % CONTEXTS;
-                                if (!add_issued && c_active[i]) begin
-                                    if (c_state[i] == C_WAIT_MAG_ZRZI && !c_mag_done[i] && !mag_inflight[i]) begin
-                                        add_a <= c_z_re_sq[i];
-                                        add_b <= c_z_im_sq[i];
-                                        add_neg <= 0;
-                                        add_op_pipe[0] <= AOP_MAG;
-                                        add_ctx_pipe[0] <= i[CTX_W-1:0];
-                                        add_issued = 1;
-                                    end else if (c_state[i] == C_NEED_SUB_RE) begin
-                                        add_a <= c_z_re_sq[i];
-                                        add_b <= c_z_im_sq[i];
-                                        add_neg <= 1;
-                                        add_op_pipe[0] <= AOP_SUB_RE;
-                                        add_ctx_pipe[0] <= i[CTX_W-1:0];
+                                i = (j + issue_base) & (CONTEXTS - 1);
+                                if (!add_issued && c_active[i] && c_add_ready[i]) begin
+                                    add_req_valid <= 1;
+                                    add_req_op <= c_add_op_ready[i];
+                                    add_req_ctx <= i[CTX_W-1:0];
+                                    c_add_ready[i] <= 0;
+                                    if (c_add_op_ready[i] == AOP_MAG)
+                                        c_mag_issued[i] <= 1;
+                                    else
                                         c_state[i] <= C_IDLE;
-                                        add_issued = 1;
-                                    end else if (c_state[i] == C_NEED_NEXT_RE) begin
-                                        add_a <= c_tmp_re[i];
-                                        add_b <= c_c_re[i];
-                                        add_neg <= 0;
-                                        add_op_pipe[0] <= AOP_NEXT_RE;
-                                        add_ctx_pipe[0] <= i[CTX_W-1:0];
-                                        c_state[i] <= C_IDLE;
-                                        add_issued = 1;
-                                    end else if (c_state[i] == C_NEED_2X) begin
-                                        add_a <= c_z_re_z_im[i];
-                                        add_b <= c_z_re_z_im[i];
-                                        add_neg <= 0;
-                                        add_op_pipe[0] <= AOP_2X;
-                                        add_ctx_pipe[0] <= i[CTX_W-1:0];
-                                        c_state[i] <= C_IDLE;
-                                        add_issued = 1;
-                                    end else if (c_state[i] == C_NEED_NEXT_IM) begin
-                                        add_a <= c_tmp_2x[i];
-                                        add_b <= c_c_im[i];
-                                        add_neg <= 0;
-                                        add_op_pipe[0] <= AOP_NEXT_IM;
-                                        add_ctx_pipe[0] <= i[CTX_W-1:0];
-                                        c_state[i] <= C_IDLE;
-                                        add_issued = 1;
-                                    end
+                                    add_issued = 1;
                                 end
                             end
                         end
 
-                        for (i = 0; i < CONTEXTS; i = i + 1) begin
-                            if (c_active[i] && c_state[i] == C_WAIT_MAG_ZRZI && c_mag_done[i] && c_zrzi_done[i]) begin
-                                if (c_escape[i]) begin
-                                    c_result_iter[i] <= c_iter[i];
-                                    c_result_valid[i] <= 1;
-                                    c_state[i] <= C_DONE;
-                                end else begin
-                                    c_mag_issued[i] <= 0;
-                                    c_zrzi_issued[i] <= 0;
-                                    c_state[i] <= C_NEED_SUB_RE;
-                                end
-                            end
-                        end
                     end
                 end
 

@@ -1,38 +1,29 @@
 set part_name "xc7k70tfbg676-1"
-set proj_name "mandelbrot_fp64"
-set proj_dir  "./fp64_proj"
+set proj_name "mandelbrot_fp64_100mhz_ctx4"
+set proj_dir  "./fp64_100mhz_ctx4_proj"
 set rtl_dir   "./rtl"
 set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
 
 puts "========================================"
-puts " Mandelbrot FP64 Build Script"
+puts " Mandelbrot FP64 100 MHz Reference Build"
 puts " Part: $part_name"
-puts " Clocking: direct 200 MHz BUFG"
-puts " Default scheduler: dynamic idle-core rows (SCHED_MODE=1)"
+puts " Clocking: MMCM-generated 100 MHz sys_clk"
+puts " Scheduler: dynamic idle-core rows (SCHED_MODE=1)"
 puts " Worker pipeline contexts: 4"
 puts "========================================"
 
 create_project -force $proj_name $proj_dir -part $part_name
 set_property target_language Verilog [current_project]
 
-# Add all RTL files
 add_files -fileset sources_1 [glob $rtl_dir/*.v]
 set_property top top [current_fileset]
-set_property generic {CLK_HZ=200000000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=4} [current_fileset]
+set_property generic {CLK_HZ=100000000 DIRECT_200MHZ=0 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=4} [current_fileset]
 puts "Added [llength [glob $rtl_dir/*.v]] source files"
 
-# Set Verilog include path
 set_property include_dirs $rtl_dir [current_fileset]
 
 add_files -fileset constrs_1 $xdc_file
 puts "Added constraint files"
-
-set_property STEPS.SYNTH_DESIGN.ARGS.RETIMING true [get_runs synth_1]
-set_property STRATEGY Performance_Explore [get_runs impl_1]
-set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
-set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE Explore [get_runs impl_1]
-set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
-set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE Explore [get_runs impl_1]
 
 puts ""
 puts "--- Running Synthesis ---"

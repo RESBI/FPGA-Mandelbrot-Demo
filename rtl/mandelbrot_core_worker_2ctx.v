@@ -24,8 +24,8 @@ module mandelbrot_core_worker_2ctx (
 
     // Tag delay must match the real back-to-back FPU latency, not the old
     // single-context PIPE_WAIT guard time.
-    localparam MUL_LAT = 6;
-    localparam ADD_LAT = 7;
+    localparam MUL_LAT = 7;
+    localparam ADD_LAT = 9;
 
     localparam S_IDLE                 = 5'd0;
     localparam S_INIT_START           = 5'd1;

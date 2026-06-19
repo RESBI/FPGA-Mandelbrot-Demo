@@ -1,13 +1,12 @@
 `timescale 1ns / 1ps
 `include "fp_defines.vh"
 
-module tb_multicore_dynamic #(
-    parameter WORKER_CONTEXTS = 2,
+module tb_worker_2ctx #(
     parameter TEST_ROWS = 12,
-    parameter TEST_COLS = 16,
-    parameter TEST_MAX_ITER = 64,
-    parameter CORE_FIFO_DEPTH = 128,
-    parameter TIMEOUT_CYCLES = 2000000
+    parameter TEST_COLS = 160,
+    parameter TEST_MAX_ITER = 256,
+    parameter TEST_ROW_START = 0,
+    parameter TIMEOUT_CYCLES = 10000000
 ) ();
 
     reg clk = 0;
@@ -15,30 +14,18 @@ module tb_multicore_dynamic #(
     reg ce = 0;
     reg start = 0;
     reg [`FP_WIDTH-1:0] center_re, center_im, step;
-    reg [15:0] max_iter, rows, cols;
     reg fifo_full = 0;
 
     wire busy;
     wire done;
     wire [15:0] fifo_data;
     wire fifo_wr;
-    wire tx_start;
-    wire [15:0] tx_rows;
-    wire [15:0] tx_cols;
 
     integer pix;
-    integer y;
-    integer x;
     integer errors;
     reg [15:0] expected;
 
-    mandelbrot_multicore #(
-        .CORE_COUNT(4),
-        .CORE_FIFO_DEPTH(CORE_FIFO_DEPTH),
-        .SCHED_MODE(1),
-        .DYNAMIC_OWNER_DEPTH(64),
-        .WORKER_CONTEXTS(WORKER_CONTEXTS)
-    ) u_dut (
+    mandelbrot_core_worker_2ctx u_dut (
         .clk(clk),
         .rst(rst),
         .ce(ce),
@@ -48,15 +35,14 @@ module tb_multicore_dynamic #(
         .center_re_in(center_re),
         .center_im_in(center_im),
         .step_in(step),
-        .max_iter_in(max_iter),
-        .rows_in(rows),
-        .cols_in(cols),
+        .max_iter_in(TEST_MAX_ITER[15:0]),
+        .rows_in(TEST_ROWS[15:0]),
+        .cols_in(TEST_COLS[15:0]),
+        .row_start_in(TEST_ROW_START[15:0]),
+        .row_stride_in(TEST_ROWS[15:0]),
         .fifo_data(fifo_data),
         .fifo_wr(fifo_wr),
-        .fifo_full(fifo_full),
-        .tx_start(tx_start),
-        .tx_rows(tx_rows),
-        .tx_cols(tx_cols)
+        .fifo_full(fifo_full)
     );
 
     always #5 clk = ~clk;
@@ -119,9 +105,6 @@ module tb_multicore_dynamic #(
         rst = 0;
         repeat(5) @(posedge clk);
 
-        rows = TEST_ROWS;
-        cols = TEST_COLS;
-        max_iter = TEST_MAX_ITER;
         center_re = f64(-0.5);
         center_im = f64(0.0);
         step = f64(0.005);
@@ -131,14 +114,12 @@ module tb_multicore_dynamic #(
         @(negedge clk); start = 1;
         @(negedge clk); start = 0;
 
-        while (pix < rows * cols) begin
+        while (pix < TEST_COLS) begin
             @(posedge clk);
             if (fifo_wr) begin
-                y = pix / cols;
-                x = pix % cols;
-                expected = sw_iter(x, y, cols, rows, max_iter);
+                expected = sw_iter(pix, TEST_ROW_START, TEST_COLS, TEST_ROWS, TEST_MAX_ITER);
                 if (fifo_data !== expected) begin
-                    $display("FAIL dyn pix=%0d y=%0d x=%0d got=%0d expected=%0d", pix, y, x, fifo_data, expected);
+                    $display("FAIL worker2 row=%0d x=%0d got=%0d expected=%0d", TEST_ROW_START, pix, fifo_data, expected);
                     errors = errors + 1;
                 end
                 pix = pix + 1;
@@ -146,17 +127,17 @@ module tb_multicore_dynamic #(
         end
 
         if (errors != 0) begin
-            $display("=== DYNAMIC MULTICORE TEST FAIL: %0d errors ===", errors);
+            $display("=== WORKER 2CTX TEST FAIL: %0d errors ===", errors);
             $finish;
         end
 
-        $display("=== DYNAMIC MULTICORE TEST PASS: %0d pixels ===", pix);
+        $display("=== WORKER 2CTX TEST PASS: %0d pixels ===", pix);
         $finish;
     end
 
     initial begin
         repeat (TIMEOUT_CYCLES) @(posedge clk);
-        $display("=== DYNAMIC MULTICORE TEST TIMEOUT: pix=%0d expected=%0d ===", pix, rows * cols);
+        $display("=== WORKER 2CTX TEST TIMEOUT: pix=%0d expected=%0d ===", pix, TEST_COLS);
         $finish;
     end
 

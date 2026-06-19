@@ -5,7 +5,11 @@
 // parameters with Vivado generics; these macros define the source defaults.
 
 `ifndef CFG_CLK_HZ
-`define CFG_CLK_HZ 100000000
+`define CFG_CLK_HZ 200000000
+`endif
+
+`ifndef CFG_DIRECT_200MHZ
+`define CFG_DIRECT_200MHZ 1
 `endif
 
 `ifndef CFG_UART_BAUD

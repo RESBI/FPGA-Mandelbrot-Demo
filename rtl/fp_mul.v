@@ -53,19 +53,36 @@ module fp_mul (
         end
     end
 
-    localparam PROD_W = 2 * (`FP_MAN_W + 1);
-    (* mult_style = "pipe_block" *) wire [PROD_W-1:0] man_product;
-    assign man_product = full_man_a_r * full_man_b_r;
+    localparam MAN_FULL_W = `FP_MAN_W + 1;
+    localparam PART_LO_W = 26;
+    localparam PART_HI_W = MAN_FULL_W - PART_LO_W;
+    localparam PROD_W = 2 * MAN_FULL_W;
 
-    // Stage 3: register DSP output
-    reg [PROD_W-1:0]      man_product_dsp_r;
+    wire [PART_LO_W-1:0] man_a_lo = full_man_a_r[PART_LO_W-1:0];
+    wire [PART_HI_W-1:0] man_a_hi = full_man_a_r[MAN_FULL_W-1:PART_LO_W];
+    wire [PART_LO_W-1:0] man_b_lo = full_man_b_r[PART_LO_W-1:0];
+    wire [PART_HI_W-1:0] man_b_hi = full_man_b_r[MAN_FULL_W-1:PART_LO_W];
+
+    wire [(2*PART_LO_W)-1:0]       partial_ll = man_a_lo * man_b_lo;
+    wire [(PART_LO_W+PART_HI_W)-1:0] partial_lh = man_a_lo * man_b_hi;
+    wire [(PART_LO_W+PART_HI_W)-1:0] partial_hl = man_a_hi * man_b_lo;
+    wire [(2*PART_HI_W)-1:0]       partial_hh = man_a_hi * man_b_hi;
+
+    // Stage 3: register narrower partial products to break the 53x53 DSP cascade.
+    reg [(2*PART_LO_W)-1:0]       partial_ll_r;
+    reg [(PART_LO_W+PART_HI_W)-1:0] partial_lh_r;
+    reg [(PART_LO_W+PART_HI_W)-1:0] partial_hl_r;
+    reg [(2*PART_HI_W)-1:0]       partial_hh_r;
     reg                   result_sign_dsp_r;
     reg [`FP_EXP_W:0]     exp_sum_dsp_r;
     reg                   a_zero_dsp_r, b_zero_dsp_r;
 
     always @(posedge clk) begin
         if (ce) begin
-            man_product_dsp_r <= man_product;
+            partial_ll_r      <= partial_ll;
+            partial_lh_r      <= partial_lh;
+            partial_hl_r      <= partial_hl;
+            partial_hh_r      <= partial_hh;
             result_sign_dsp_r <= result_sign_man_r;
             exp_sum_dsp_r     <= exp_sum_man_r;
             a_zero_dsp_r      <= a_zero_man_r;
@@ -73,7 +90,14 @@ module fp_mul (
         end
     end
 
-    // Stage 4: register multiply result metadata with DSP output
+    wire [PROD_W-1:0] partial_ll_ext = {{(PROD_W-(2*PART_LO_W)){1'b0}}, partial_ll_r};
+    wire [PROD_W-1:0] partial_lh_ext = {{(PROD_W-(PART_LO_W+PART_HI_W)-PART_LO_W){1'b0}}, partial_lh_r, {PART_LO_W{1'b0}}};
+    wire [PROD_W-1:0] partial_hl_ext = {{(PROD_W-(PART_LO_W+PART_HI_W)-PART_LO_W){1'b0}}, partial_hl_r, {PART_LO_W{1'b0}}};
+    wire [PROD_W-1:0] partial_hh_ext = {{(PROD_W-(2*PART_HI_W)-(2*PART_LO_W)){1'b0}}, partial_hh_r, {(2*PART_LO_W){1'b0}}};
+
+    wire [PROD_W-1:0] man_product_sum = partial_ll_ext + partial_lh_ext + partial_hl_ext + partial_hh_ext;
+
+    // Stage 4: register recombined multiply result metadata with DSP output
     reg [PROD_W-1:0]      man_product_r;
     reg                   result_sign_r;
     reg [`FP_EXP_W:0]     exp_sum_r;
@@ -81,7 +105,7 @@ module fp_mul (
 
     always @(posedge clk) begin
         if (ce) begin
-            man_product_r  <= man_product_dsp_r;
+            man_product_r  <= man_product_sum;
             result_sign_r  <= result_sign_dsp_r;
             exp_sum_r      <= exp_sum_dsp_r;
             a_zero_r       <= a_zero_dsp_r;

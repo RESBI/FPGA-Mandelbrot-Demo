@@ -1,27 +1,31 @@
 set part_name "xc7k70tfbg676-1"
-set proj_name "mandelbrot_fp64"
-set proj_dir  "./fp64_proj"
+set worker_contexts 4
+
+if {$argc >= 1} {
+    set worker_contexts [lindex $argv 0]
+}
+
+set proj_name "mandelbrot_fp64_200mhz_ctx${worker_contexts}"
+set proj_dir  "./fp64_200mhz_ctx${worker_contexts}_proj"
 set rtl_dir   "./rtl"
 set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
 
 puts "========================================"
-puts " Mandelbrot FP64 Build Script"
+puts " Mandelbrot FP64 200 MHz Experiment"
 puts " Part: $part_name"
 puts " Clocking: direct 200 MHz BUFG"
-puts " Default scheduler: dynamic idle-core rows (SCHED_MODE=1)"
-puts " Worker pipeline contexts: 4"
+puts " Scheduler: dynamic idle-core rows (SCHED_MODE=1)"
+puts " Worker pipeline contexts: $worker_contexts"
 puts "========================================"
 
 create_project -force $proj_name $proj_dir -part $part_name
 set_property target_language Verilog [current_project]
 
-# Add all RTL files
 add_files -fileset sources_1 [glob $rtl_dir/*.v]
 set_property top top [current_fileset]
-set_property generic {CLK_HZ=200000000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=4} [current_fileset]
+set_property generic "CLK_HZ=200000000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=$worker_contexts" [current_fileset]
 puts "Added [llength [glob $rtl_dir/*.v]] source files"
 
-# Set Verilog include path
 set_property include_dirs $rtl_dir [current_fileset]
 
 add_files -fileset constrs_1 $xdc_file
@@ -50,15 +54,15 @@ puts "--- Running Implementation + Bitstream ---"
 launch_runs impl_1 -to_step write_bitstream -jobs 4
 wait_on_run impl_1
 
+open_run impl_1
+report_timing_summary -file $proj_dir/${proj_name}.runs/impl_1/top_timing_summary_routed.rpt
+report_timing -max_paths 25 -sort_by group -file $proj_dir/${proj_name}.runs/impl_1/top_timing_paths_routed.rpt
+report_utilization -file $proj_dir/${proj_name}.runs/impl_1/top_utilization_routed.rpt
+
 if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {
     puts "ERROR: Implementation failed"
     exit 1
 }
-
-open_run impl_1
-report_timing_summary -file $proj_dir/$proj_name.runs/impl_1/top_timing_summary_routed.rpt
-report_timing -max_paths 25 -sort_by group -file $proj_dir/$proj_name.runs/impl_1/top_timing_paths_routed.rpt
-report_utilization -file $proj_dir/$proj_name.runs/impl_1/top_utilization_routed.rpt
 
 puts "Implementation complete"
 

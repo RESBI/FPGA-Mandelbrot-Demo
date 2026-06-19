@@ -3,6 +3,8 @@
 `include "fp_defines.vh"
 
 module top #(
+    parameter CLK_HZ = `CFG_CLK_HZ,
+    parameter DIRECT_200MHZ = `CFG_DIRECT_200MHZ,
     parameter SCHED_MODE = `CFG_SCHED_MODE,
     parameter DYNAMIC_OWNER_DEPTH = `CFG_DYNAMIC_OWNER_DEPTH,
     parameter WORKER_CONTEXTS = `CFG_WORKER_CONTEXTS
@@ -15,57 +17,77 @@ module top #(
 );
 
     wire sys_clk;
-    wire clk_200;
     wire clk_fb;
     wire clk_fb_unbuf;
     wire clk_100_unbuf;
     wire clk_locked;
 
-    IBUFDS #(
-        .DIFF_TERM("TRUE"),
-        .IBUF_LOW_PWR("FALSE"),
-        .IOSTANDARD("LVDS")
-    ) u_clk_200_ibufds (
-        .I(CLK_200_P),
-        .IB(CLK_200_N),
-        .O(clk_200)
-    );
+    generate
+        if (DIRECT_200MHZ) begin : g_direct_200
+            IBUFGDS #(
+                .DIFF_TERM("TRUE"),
+                .IBUF_LOW_PWR("FALSE"),
+                .IOSTANDARD("LVDS")
+            ) u_clk_200_ibufgds (
+                .I(CLK_200_P),
+                .IB(CLK_200_N),
+                .O(sys_clk)
+            );
 
-    MMCME2_BASE #(
-        .CLKIN1_PERIOD(5.000),
-        .CLKFBOUT_MULT_F(5.000),
-        .CLKOUT0_DIVIDE_F(10.000),
-        .CLKOUT0_DUTY_CYCLE(0.500)
-    ) u_clk_mmcm (
-        .CLKIN1(clk_200),
-        .CLKFBIN(clk_fb),
-        .RST(1'b0),
-        .PWRDWN(1'b0),
-        .CLKFBOUT(clk_fb_unbuf),
-        .CLKFBOUTB(),
-        .CLKOUT0(clk_100_unbuf),
-        .CLKOUT0B(),
-        .CLKOUT1(),
-        .CLKOUT1B(),
-        .CLKOUT2(),
-        .CLKOUT2B(),
-        .CLKOUT3(),
-        .CLKOUT3B(),
-        .CLKOUT4(),
-        .CLKOUT5(),
-        .CLKOUT6(),
-        .LOCKED(clk_locked)
-    );
+            assign clk_locked = 1'b1;
+            assign clk_fb = 1'b0;
+            assign clk_fb_unbuf = 1'b0;
+            assign clk_100_unbuf = 1'b0;
+        end else begin : g_mmcm_100
+            wire clk_200;
 
-    BUFG u_sys_clk_bufg (
-        .I(clk_100_unbuf),
-        .O(sys_clk)
-    );
+            IBUFDS #(
+                .DIFF_TERM("TRUE"),
+                .IBUF_LOW_PWR("FALSE"),
+                .IOSTANDARD("LVDS")
+            ) u_clk_200_ibufds (
+                .I(CLK_200_P),
+                .IB(CLK_200_N),
+                .O(clk_200)
+            );
 
-    BUFG u_clk_fb_bufg (
-        .I(clk_fb_unbuf),
-        .O(clk_fb)
-    );
+            MMCME2_BASE #(
+                .CLKIN1_PERIOD(5.000),
+                .CLKFBOUT_MULT_F(5.000),
+                .CLKOUT0_DIVIDE_F(10.000),
+                .CLKOUT0_DUTY_CYCLE(0.500)
+            ) u_clk_mmcm (
+                .CLKIN1(clk_200),
+                .CLKFBIN(clk_fb),
+                .RST(1'b0),
+                .PWRDWN(1'b0),
+                .CLKFBOUT(clk_fb_unbuf),
+                .CLKFBOUTB(),
+                .CLKOUT0(clk_100_unbuf),
+                .CLKOUT0B(),
+                .CLKOUT1(),
+                .CLKOUT1B(),
+                .CLKOUT2(),
+                .CLKOUT2B(),
+                .CLKOUT3(),
+                .CLKOUT3B(),
+                .CLKOUT4(),
+                .CLKOUT5(),
+                .CLKOUT6(),
+                .LOCKED(clk_locked)
+            );
+
+            BUFG u_sys_clk_bufg (
+                .I(clk_100_unbuf),
+                .O(sys_clk)
+            );
+
+            BUFG u_clk_fb_bufg (
+                .I(clk_fb_unbuf),
+                .O(clk_fb)
+            );
+        end
+    endgenerate
 
     // Clock enable for FP operations
     reg [`FP_CE_DIV-1:0] ce_counter;
@@ -139,14 +161,18 @@ module top #(
     wire [15:0] tx_ctrl_cols;
     wire       tx_ctrl_done;
 
-    uart_rx u_rx (
+    uart_rx #(
+        .CLK_HZ(CLK_HZ)
+    ) u_rx (
         .rx         (uart_rx),
         .clk        (sys_clk),
         .data       (rx_data),
         .data_avail (rx_avail)
     );
 
-    uart_tx u_tx (
+    uart_tx #(
+        .CLK_HZ(CLK_HZ)
+    ) u_tx (
         .tx             (uart_tx),
         .clk            (sys_clk),
         .data           (tx_data),

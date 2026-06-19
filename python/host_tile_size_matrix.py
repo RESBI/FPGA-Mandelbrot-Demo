@@ -19,7 +19,9 @@ def parse_host_text(text, returncode, elapsed, scene, tile_w, tile_h, log_path, 
     fpga_time = None
     pps = None
     total_time = None
-    retry_events = len(re.findall(r"Tile receive failed", text))
+    failed_attempts = len(re.findall(r"compute tile receive failed", text, re.IGNORECASE))
+    recovered = [int(v) for v in re.findall(r"Recovered\s+(\d+)\s+failed compute tile attempts", text, re.IGNORECASE)]
+    retry_events = max([failed_attempts] + recovered)
     m = re.search(r"FPGA elapsed: ([0-9.]+)s \(([0-9.]+) pixels/s\)", text)
     if m:
         fpga_time = float(m.group(1))

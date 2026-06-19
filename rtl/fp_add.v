@@ -36,12 +36,35 @@ module fp_add (
 
     wire a_gt_b = (exp_a > exp_b) || ((exp_a == exp_b) && (man_ext_a >= man_ext_b));
 
-    wire                  sign_large = a_gt_b ? sign_a : sign_b;
-    wire [`FP_EXP_W-1:0]  exp_large  = a_gt_b ? exp_a  : exp_b;
-    wire [INT_W-1:0]      man_large  = a_gt_b ? man_ext_a : man_ext_b;
-    wire [`FP_EXP_W-1:0]  exp_small  = a_gt_b ? exp_b  : exp_a;
-    wire [INT_W-1:0]      man_small  = a_gt_b ? man_ext_b : man_ext_a;
-    wire                  same_sign  = ~(sign_a ^ sign_b);
+    reg                   a_gt_b_s0;
+    reg                   sign_a_s0, sign_b_s0;
+    reg [`FP_EXP_W-1:0]   exp_a_s0, exp_b_s0;
+    reg [INT_W-1:0]       man_ext_a_s0, man_ext_b_s0;
+    reg                   a_zero_s0, b_zero_s0;
+    reg [`FP_WIDTH-1:0]   a_store_s0, b_store_s0;
+
+    always @(posedge clk) begin
+        if (ce) begin
+            a_gt_b_s0     <= a_gt_b;
+            sign_a_s0     <= sign_a;
+            sign_b_s0     <= sign_b;
+            exp_a_s0      <= exp_a;
+            exp_b_s0      <= exp_b;
+            man_ext_a_s0  <= man_ext_a;
+            man_ext_b_s0  <= man_ext_b;
+            a_zero_s0     <= a_is_zero;
+            b_zero_s0     <= b_is_zero;
+            a_store_s0    <= a_r;
+            b_store_s0    <= b_r;
+        end
+    end
+
+    wire                  sign_large = a_gt_b_s0 ? sign_a_s0 : sign_b_s0;
+    wire [`FP_EXP_W-1:0]  exp_large  = a_gt_b_s0 ? exp_a_s0  : exp_b_s0;
+    wire [INT_W-1:0]      man_large  = a_gt_b_s0 ? man_ext_a_s0 : man_ext_b_s0;
+    wire [`FP_EXP_W-1:0]  exp_small  = a_gt_b_s0 ? exp_b_s0  : exp_a_s0;
+    wire [INT_W-1:0]      man_small  = a_gt_b_s0 ? man_ext_b_s0 : man_ext_a_s0;
+    wire                  same_sign  = ~(sign_a_s0 ^ sign_b_s0);
     wire [`FP_EXP_W-1:0]  diff       = exp_large - exp_small;
 
     // Stage 1: decode, compare, and select operands. Splitting this from
@@ -62,10 +85,10 @@ module fp_add (
             diff_s1      <= diff;
             sign_large_s1 <= sign_large;
             same_sign_s1 <= same_sign;
-            a_zero_s1    <= a_is_zero;
-            b_zero_s1    <= b_is_zero;
-            a_store_s1   <= a_r;
-            b_store_s1   <= b_r;
+            a_zero_s1    <= a_zero_s0;
+            b_zero_s1    <= b_zero_s0;
+            a_store_s1   <= a_store_s0;
+            b_store_s1   <= b_store_s0;
         end
     end
 
@@ -96,7 +119,8 @@ module fp_add (
         end
     end
 
-    // Stage 3: normalize + bypass with stored inputs
+    // Stage 3: prepare normalize metadata. This cuts the leading-zero scan away
+    // from the final mantissa/exponent select for 200 MHz experiments.
     wire result_is_zero_s2 = (man_result_r == 0);
     wire msb_s2 = man_result_r[INT_W];
     wire [INT_W-1:0] man_after_add_s2 = man_result_r[INT_W-1:0];
@@ -115,30 +139,56 @@ module fp_add (
         end
     end
 
+    reg [7:0]              lead_zeros_r;
+    reg                    result_is_zero_s3a;
+    reg                    msb_s3a;
+    reg [INT_W-1:0]        man_after_add_s3a;
+    reg [INT_W:0]          man_result_s3a;
+    reg [`FP_EXP_W-1:0]    exp_large_s3a;
+    reg                    sign_large_s3a;
+    reg                    a_zero_s3a, b_zero_s3a;
+    reg [`FP_WIDTH-1:0]    a_store_s3a, b_store_s3a;
+
+    always @(posedge clk) begin
+        if (ce) begin
+            lead_zeros_r      <= lead_zeros;
+            result_is_zero_s3a <= result_is_zero_s2;
+            msb_s3a           <= msb_s2;
+            man_after_add_s3a <= man_after_add_s2;
+            man_result_s3a    <= man_result_r;
+            exp_large_s3a     <= exp_large_r;
+            sign_large_s3a    <= sign_large_r;
+            a_zero_s3a        <= a_zero_r;
+            b_zero_s3a        <= b_zero_r;
+            a_store_s3a       <= a_store;
+            b_store_s3a       <= b_store;
+        end
+    end
+
     reg [`FP_MAN_W-1:0] man_final;
     reg [`FP_EXP_W-1:0] exp_final;
     reg                 sign_final;
     reg [INT_W-1:0]     man_norm;
 
     always @(*) begin
-        if (result_is_zero_s2) begin
+        if (result_is_zero_s3a) begin
             sign_final = 1'b0;
             exp_final  = 0;
             man_final  = 0;
             man_norm   = 0;
-        end else if (msb_s2) begin
-            sign_final = sign_large_r;
-            exp_final  = exp_large_r + 1;
-            man_norm   = man_result_r[INT_W:1];
-            man_final  = man_result_r[INT_W-1:2];
+        end else if (msb_s3a) begin
+            sign_final = sign_large_s3a;
+            exp_final  = exp_large_s3a + 1;
+            man_norm   = man_result_s3a[INT_W:1];
+            man_final  = man_result_s3a[INT_W-1:2];
         end else begin
-            sign_final = sign_large_r;
-            if (exp_large_r > lead_zeros) begin
-                exp_final = exp_large_r - lead_zeros;
+            sign_final = sign_large_s3a;
+            if (exp_large_s3a > lead_zeros_r) begin
+                exp_final = exp_large_s3a - lead_zeros_r;
             end else begin
                 exp_final = 0;
             end
-            man_norm = man_after_add_s2 << lead_zeros;
+            man_norm = man_after_add_s3a << lead_zeros_r;
             man_final = man_norm[INT_W-2:1];
         end
     end
@@ -155,11 +205,11 @@ module fp_add (
             man_final_r      <= man_final;
             exp_final_r      <= exp_final;
             sign_final_r     <= sign_final;
-            result_is_zero_r <= result_is_zero_s2;
-            a_zero_s3        <= a_zero_r;
-            b_zero_s3        <= b_zero_r;
-            a_store_s3       <= a_store;
-            b_store_s3       <= b_store;
+            result_is_zero_r <= result_is_zero_s3a;
+            a_zero_s3        <= a_zero_s3a;
+            b_zero_s3        <= b_zero_s3a;
+            a_store_s3       <= a_store_s3a;
+            b_store_s3       <= b_store_s3a;
         end
     end
 

@@ -23,7 +23,7 @@ SCENES_1080P = [
         "center": (1.0, 1.0),
         "step": "0.002",
         "timeout": 600,
-        "baseline_12m": 4.678,
+        "baseline_100mhz_4ctx": 4.683,
         "baseline_pps": 443288.08,
     },
     {
@@ -34,7 +34,7 @@ SCENES_1080P = [
         "center": (-0.5, 0.0),
         "step": "0.002",
         "timeout": 600,
-        "baseline_12m": 4.202,
+        "baseline_100mhz_4ctx": 5.782,
         "baseline_pps": 493434.63,
     },
     {
@@ -45,7 +45,7 @@ SCENES_1080P = [
         "center": (-0.743643887037151, 0.13182590420533),
         "step": "5e-6",
         "timeout": 900,
-        "baseline_12m": 17.280,
+        "baseline_100mhz_4ctx": 9.836,
         "baseline_pps": 120003.12,
     },
     {
@@ -56,7 +56,7 @@ SCENES_1080P = [
         "center": (-0.77568377, 0.13646737),
         "step": "1e-9",
         "timeout": 2400,
-        "baseline_12m": 33.393,
+        "baseline_100mhz_4ctx": 17.677,
         "baseline_pps": 62096.41,
     },
     {
@@ -67,7 +67,7 @@ SCENES_1080P = [
         "center": (-1.25066, 0.02012),
         "step": "1e-9",
         "timeout": 3600,
-        "baseline_12m": 83.428,
+        "baseline_100mhz_4ctx": 44.146,
         "baseline_pps": 24854.93,
     },
     {
@@ -78,7 +78,7 @@ SCENES_1080P = [
         "center": (-0.743643887037151, 0.13182590420533),
         "step": "1e-8",
         "timeout": 1200,
-        "baseline_12m": 36.480,
+        "baseline_100mhz_4ctx": 19.965,
         "baseline_pps": 56842.30,
     },
 ]
@@ -119,6 +119,10 @@ def parse_host_text(text, returncode, elapsed, scene, run_idx, log_path, output_
     # run as a transport pass when the process exits successfully and the
     # full frame was received; report exact SW match separately.
     ok = returncode == 0 and complete_frame
+    failed_attempts = len(re.findall(r"compute tile receive failed", text, re.IGNORECASE))
+    recovered = [int(v) for v in re.findall(r"Recovered\s+(\d+)\s+failed compute tile attempts", text, re.IGNORECASE)]
+    retry_events = max([failed_attempts] + recovered)
+
     return {
         "scene": scene["name"],
         "run": run_idx,
@@ -133,7 +137,7 @@ def parse_host_text(text, returncode, elapsed, scene, run_idx, log_path, output_
         "match_total": match_total,
         "match_pct": match_pct,
         "exact_match": match == match_total if match is not None else False,
-        "retry_events": len(re.findall(r"Tile receive failed", text)),
+        "retry_events": retry_events,
         "log": log_path,
         "output": output_path,
     }
@@ -218,7 +222,7 @@ def summarize(results, args):
     lines.append("")
     lines.append("## Summary")
     lines.append("")
-    lines.append("| Scene | Transport pass | Exact SW match | Retry events | Mean FPGA s | Min s | Max s | Stddev s | CV | Mean pps | vs previous 12M single-run |")
+    lines.append("| Scene | Transport pass | Exact SW match | Retry events | Mean FPGA s | Min s | Max s | Stddev s | CV | Mean pps | vs 100MHz 4ctx |")
     lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
 
     for scene in SCENES_1080P:
@@ -229,7 +233,7 @@ def summarize(results, args):
         avg = mean(times)
         sd = stdev(times)
         cv = (sd / avg * 100.0) if avg else None
-        ratio = (scene["baseline_12m"] / avg) if avg else None
+        ratio = (scene["baseline_100mhz_4ctx"] / avg) if avg else None
         exact = [r for r in passed if r["exact_match"]]
         retries = sum(r["retry_events"] for r in scene_results)
         lines.append(
