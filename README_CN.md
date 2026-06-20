@@ -1,6 +1,6 @@
 # Mandelbrot FPGA 加速器
 
-这是一个基于 FPGA 的 Mandelbrot 渲染器。PC 通过 UART 发送一次图像命令，包含中心坐标、像素步长、最大迭代次数和图像尺寸；FPGA 使用 4 个 FP64 worker 计算像素，并以 16 位迭代次数流式返回。当前默认 worker 在 direct-200MHz 时钟下，在一个 FP64 乘法器和一个 FP64 加法器上交错执行 4 个像素上下文；该默认构建已通过 timing、烧录和板级 HW/SW verify。
+这是一个基于 FPGA 的 Mandelbrot 渲染器。PC 通过 UART 发送一次图像命令，包含中心坐标、像素步长、最大迭代次数和图像尺寸；FPGA 使用 6 个 FP64 worker 计算像素，并以 16 位迭代次数流式返回。当前默认构建在 direct-200MHz 时钟下使用 6 个 worker、每 worker 4 个像素上下文，每个 worker 共享一个 FP64 乘法器和一个 FP64 加法器；该默认构建已通过 timing、烧录和 1080p 板级 benchmark。
 
 详细硬件架构见 `doc/ARCHITECTURE_CN.md`，架构演进见 `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md`，worker 去气泡分析见 `doc/PIPELINE_BUBBLE_ANALYSIS_CN.md`，N-context 新旧结构对比英文主文档见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md`，中文备份见 `doc/CONTEXT_WORKER_ARCHITECTURE_REPORT_CN.md`。直接 200 MHz 计算时钟尝试见 `doc/200MHZ_ATTEMPT_REPORT.md`。
 
@@ -14,7 +14,7 @@
 | 内部系统时钟 | direct 200 MHz，`DIRECT_200MHZ=1` |
 | 100MHz 参考构建 | `build_fp64_100mhz.tcl` |
 | 浮点模式 | FP64 |
-| Mandelbrot worker | 4 |
+| Mandelbrot worker | 6 |
 | 每 worker 像素上下文 | 4 |
 | 历史低 LUT 上下文 | 2 |
 | 调度器 | 动态空闲 core 行调度，`SCHED_MODE=1` |
@@ -26,10 +26,10 @@
 | 最大已验证帧 | 1920x1080 |
 | 当前板级构建状态 | XC7K70T 完整 FP64 bitstream 已通过 |
 | 烧录链路 | Vivado `hw_server` 在 `127.0.0.1:3122`，CH347 XVC 在 `127.0.0.1:2542` |
-| 当前 routed timing | `WNS=0.015ns`, `TNS=0.000ns`, `WHS=0.002ns`, `THS=0.000ns` |
-| 当前 placed utilization | `20288` LUTs, `17202` registers, `37` DSP48E1, `9.5` BRAM tiles |
+| 当前 routed timing | `WNS=0.003ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns` |
+| 当前 routed utilization | `29891` LUTs, `25501` registers, `97` DSP48E1, `13.5` BRAM tiles |
 
-当前默认 RTL 是 XC7K70T 上已验证的 direct-200MHz 4-context generic worker。本分支已从旧 Zynq-7010 平台迁移到 XC7K70T，完整 FP64 bitstream 已在新器件上构建、满足 timing 并通过板级验证。100MHz 4ctx 版本保留为显式参考构建。
+当前默认 RTL 是 XC7K70T 上已验证的 direct-200MHz 6-worker、4-context-per-worker 配置。本分支已从旧 Zynq-7010 平台迁移到 XC7K70T，完整 FP64 bitstream 已在新器件上构建、满足 timing、烧录并完成六场景 1080p benchmark。100MHz 4ctx 和 4-worker direct-200MHz 版本保留为显式参考点。
 
 ## 目录结构
 
@@ -84,31 +84,31 @@ python python\mandelbrot_host.py --port COM9 --soft-reset
 
 ## 当前资源和时序
 
-最新 direct-200MHz 4ctx 1080p 六场景 10 轮板级稳定性测试，12 Mbaud，默认 `1920x120` host tile，compute tile 等于 host tile：
+最新默认 direct-200MHz 6-worker 4ctx 1080p 六场景 10 轮板级稳定性测试，12 Mbaud，默认 `1920x120` host tile，compute tile 等于 host tile：
 
 | 场景 | Transport pass | Retry events | 平均 FPGA 时间 | Min | Max | CV | 平均吞吐 | 对比 100MHz 4ctx |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| fast escape @128 | `10/10` | `6` | `5.072s` | `4.424s` | `5.515s` | `10.99%` | `413592.02 pps` | `0.923x` |
-| standard @64 | `10/10` | `6` | `5.066s` | `4.416s` | `5.510s` | `11.00%` | `414046.70 pps` | `1.141x` |
-| Seahorse zoom @512 | `10/10` | `6` | `7.879s` | `6.979s` | `13.245s` | `24.98%` | `273303.15 pps` | `1.248x` |
-| deep tendrils @8192 | `10/10` | `3` | `12.820s` | `12.229s` | `14.231s` | `7.43%` | `162504.12 pps` | `1.379x` |
-| deep mini-brot @8192 | `10/10` | `2` | `31.625s` | `30.861s` | `34.700s` | `5.07%` | `65709.99 pps` | `1.396x` |
-| deep Seahorse @1024 | `10/10` | `0` | `13.886s` | `13.885s` | `13.887s` | `0.01%` | `149325.97 pps` | `1.438x` |
+| fast escape @128 | `10/10` | `2` | `4.641s` | `4.423s` | `6.592s` | `14.77%` | `453333.47 pps` | `1.009x` |
+| standard @64 | `10/10` | `2` | `4.636s` | `4.416s` | `5.515s` | `9.92%` | `450824.12 pps` | `1.247x` |
+| Seahorse zoom @512 | `10/10` | `2` | `5.715s` | `5.418s` | `6.937s` | `10.87%` | `366227.26 pps` | `1.721x` |
+| deep tendrils @8192 | `10/10` | `1` | `8.567s` | `8.409s` | `9.968s` | `5.75%` | `242675.75 pps` | `2.063x` |
+| deep mini-brot @8192 | `10/10` | `0` | `20.963s` | `20.962s` | `20.965s` | `0.00%` | `98916.27 pps` | `2.106x` |
+| deep Seahorse @1024 | `10/10` | `1` | `9.668s` | `9.511s` | `11.065s` | `5.08%` | `214934.36 pps` | `2.065x` |
 
-100MHz 4ctx 参考构建小图 gate 为 `160x120`、`--verify`、`100.00%` match，FPGA elapsed `0.091s`。当前默认 direct-200MHz 4ctx 小图 gate 同样为 `100.00%` match，FPGA elapsed `0.158s`。上表的倍数是 direct-200MHz 10 轮均值相对 100MHz 4ctx 数据（`4.683/5.782/9.836/17.677/44.146/19.965s`）计算的结果；fast escape 因 issue/retry 开销慢于 100MHz，其他场景为 `1.14x-1.44x`。
+100MHz 4ctx 参考构建小图 gate 为 `160x120`、`--verify`、`100.00%` match，FPGA elapsed `0.091s`。上表的倍数是当前默认 6-worker direct-200MHz 10 轮均值相对 100MHz 4ctx 数据（`4.683/5.782/9.836/17.677/44.146/19.965s`）计算的结果。相对上一版 4-worker direct-200MHz 默认，当前 6-worker 版本在 compute-heavy 场景提升约 `1.38x-1.51x`。
 
-直接使用 200 MHz 作为完整计算时钟的 4ctx 实验已得到有效性能点：最终 request-sliced 设计 timing-clean，`WNS=0.015ns`, `TNS=0.000ns`，并通过 `160x120` HW/SW verify 和上述 10 轮 1080p 测试。历史性能、资源、时序和阶段对比见 `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md`；direct-200MHz 细节见 `doc/200MHZ_ATTEMPT_REPORT.md`。
+直接使用 200 MHz 作为完整计算时钟的 6-worker 4ctx 设计已成为当前默认有效性能点：修复后 timing-clean，`WNS=0.003ns`, `TNS=0.000ns`，并通过烧录和上述 10 轮 1080p 测试。历史性能、资源、时序和阶段对比见 `doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md`；direct-200MHz 细节见 `doc/200MHZ_ATTEMPT_REPORT.md`，worker 数量横向对比见 `doc/WORKER_COUNT_SCALING.md`。
 
 | Resource | Used | Device | Utilization |
 |---|---:|---:|---:|
-| Slice LUTs | 20288 | 41000 | 49.48% |
-| Slice Registers | 17202 | 82000 | 20.98% |
-| DSP48E1 | 37 | 240 | 15.42% |
-| Block RAM Tile | 9.5 | 135 | 7.04% |
+| Slice LUTs | 29891 | 41000 | 72.90% |
+| Slice Registers | 25501 | 82000 | 31.10% |
+| DSP48E1 | 97 | 240 | 40.42% |
+| Block RAM Tile | 13.5 | 135 | 10.00% |
 
-| Build | Scheduler | Contexts | WNS | TNS | WHS | THS |
-|---|---|---:|---:|---:|---:|---:|
-| `build_fp64.tcl` | direct-200MHz dynamic rows + tiled response | 4 | `0.015ns` | `0.000ns` | `0.002ns` | `0.000ns` |
+| Build | Scheduler | Workers | Contexts | WNS | TNS | WHS | THS |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `build_fp64.tcl` | direct-200MHz dynamic rows + tiled response | 6 | 4 | `0.003ns` | `0.000ns` | `0.042ns` | `0.000ns` |
 
 ## 重要限制
 
@@ -117,7 +117,8 @@ python python\mandelbrot_host.py --port COM9 --soft-reset
 | UART 长 burst | 12 Mbaud 单帧长 burst 偶发 byte slip；推荐 host tile。 |
 | FP64 实现 | IEEE-like，非完整 IEEE-754；不完整支持 NaN/Inf/denormal/rounding。 |
 | FP64 边界差异 | RTL truncation 与 Python RNE 在边界点可能不同，视觉上可接受。 |
-| 4ctx generic worker | 当前默认，XC7K70T 可构建并通过板级测试。 |
+| 6-worker 4ctx 默认 | 当前默认，XC7K70T 可构建、timing-clean、可烧录并完成 1080p 六场景测试。 |
+| 4-worker 4ctx direct-200MHz | 历史低面积参考点，仍可用于面积/性能对比。 |
 | 8ctx generic worker | 行为仿真通过，但旧 generic 实现在早期 xc7z010 目标上 LUT 超量，XC7K70T 尚未作为默认候选验证。 |
 | 动态 owner 表 | 默认 `DYNAMIC_OWNER_DEPTH=4096`，超高帧需要重新配置。 |
 

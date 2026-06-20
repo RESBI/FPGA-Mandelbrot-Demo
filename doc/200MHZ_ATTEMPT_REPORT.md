@@ -14,7 +14,7 @@ Reference points:
 | 4ctx 100MHz reference | 100 MHz MMCM | `0.583ns` | `0.000ns` | `36367` | `19149` | `37` |
 | 4ctx current default | direct 200 MHz | `0.015ns` | `0.000ns` | `20288` | `17202` | `37` |
 
-The current default is the direct-200MHz 4ctx build. It was built, programmed, verified against software on a `160x120` image, and benchmarked on the six 1080p host scenes.
+This report records the direct-200MHz 4-worker 4ctx build that became the default before the later 6-worker scaling fix. It was built, programmed, verified against software on a `160x120` image, and benchmarked on the six 1080p host scenes.
 
 ## 200 MHz Test Entry
 
@@ -22,7 +22,7 @@ The direct-clock experiment is isolated from the default build:
 
 | File | Purpose |
 |---|---|
-| `build_fp64.tcl` | Current default direct-200MHz 4ctx build. |
+| `build_fp64.tcl` | Current default build; now 6-worker direct-200MHz 4ctx after the worker-count scaling fix. |
 | `build_fp64_200mhz.tcl` | Compatibility/experiment entry for direct 200 MHz projects; accepts `-tclargs 2` or `-tclargs 4` for `WORKER_CONTEXTS`. |
 | `build_fp64_100mhz.tcl` | 100MHz 4ctx reference build. |
 | `rtl/top.v` | Supports both `DIRECT_200MHZ=1` direct clocking and `DIRECT_200MHZ=0` MMCM 100MHz reference clocking. |

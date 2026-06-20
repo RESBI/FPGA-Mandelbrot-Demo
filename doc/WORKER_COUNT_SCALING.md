@@ -1,13 +1,14 @@
 # Worker Count Scaling Experiment
 
-This note records the 6-worker and 8-worker scaling attempt on the HVS `xc7k70t` board. The default architecture remains direct-200MHz, 4 workers, 4 contexts per worker.
+This note records the 6-worker and 8-worker scaling attempt on the HVS `xc7k70t` board. After the 6-worker timing fix and hardware benchmark, the default architecture is direct-200MHz, 6 workers, 4 contexts per worker.
 
 ## Build Matrix
 
 | Build | Clock | Workers | Contexts/worker | Result | Timing | Resource summary |
 |---|---:|---:|---:|---|---|---|
 | Default baseline | 200 MHz direct | 4 | 4 | Validated on board | `WNS=0.015ns`, `TNS=0.000ns` | 20288 LUT, 17202 FF, 37 DSP48E1, 9.5 BRAM tiles |
-| Worker scale candidate | 200 MHz direct | 6 | 4 | Routed but not valid for board test | `WNS=-0.165ns`, `TNS=-8.713ns` | 30301 LUT, 25282 FF, 97 DSP48E1, 13.5 BRAM tiles |
+| Worker scale candidate, original | 200 MHz direct | 6 | 4 | Routed but not valid for board test | `WNS=-0.165ns`, `TNS=-8.713ns` | 30301 LUT, 25282 FF, 97 DSP48E1, 13.5 BRAM tiles |
+| Worker scale candidate, fixed | 200 MHz direct | 6 | 4 | Bitstream generated, programmed, benchmarked | `WNS=0.003ns`, `TNS=0.000ns` | 29891 LUT, 25501 FF, 97 DSP48E1, 13.5 BRAM tiles |
 | Worker scale candidate | 200 MHz direct | 8 | 4 | Placement failed | LUT/slice packing over-utilized | 40635 synth LUT, 33366 FF, 129 DSP48E1, 17.5 BRAM tiles |
 | Worker scale fallback | 100 MHz MMCM | 6 | 4 | Bitstream generated, programmed, benchmarked | `WNS=1.586ns`, `TNS=0.000ns` | 29641 LUT, 25278 FF, 97 DSP48E1, 13.5 BRAM tiles |
 | Worker scale fallback | 100 MHz MMCM | 8 | 4 | Bitstream generated, programmed, benchmarked | `WNS=1.746ns`, `TNS=0.000ns` | 39265 LUT, 33364 FF, 129 DSP48E1, 17.5 BRAM tiles |
@@ -23,11 +24,17 @@ The dynamic multicore testbench was parameterized by `CORE_COUNT` and run for 6 
 
 ## 1080p Benchmark Results
 
-6-worker and 8-worker 100MHz were programmed successfully and benchmarked with:
+The 100MHz worker-count fallbacks were programmed successfully and benchmarked with:
 
 ```powershell
 python "python\host_tile_stability_benchmark.py" --runs 10 --tile-width 1920 --tile-height 120 --tile-retries 3 --run-tag workers6_100mhz --summary-name host_tile_stability_results_workers6_100mhz.md
 python "python\host_tile_stability_benchmark.py" --runs 10 --tile-width 1920 --tile-height 120 --tile-retries 3 --run-tag workers8_100mhz --summary-name host_tile_stability_results_workers8_100mhz.md
+```
+
+After the 6-worker 200MHz timing fix, the direct-200MHz 6-worker build was also programmed successfully and benchmarked with:
+
+```powershell
+python "python\host_tile_stability_benchmark.py" --runs 10 --tile-width 1920 --tile-height 120 --tile-retries 3 --run-tag workers6_200mhz_fixed --summary-name host_tile_stability_results_workers6_200mhz_fixed.md
 ```
 
 Result file:
@@ -35,18 +42,54 @@ Result file:
 ```text
 python/host_tile_stability_bench/host_tile_stability_results_workers6_100mhz.md
 python/host_tile_stability_bench/host_tile_stability_results_workers8_100mhz.md
+python/host_tile_stability_bench/host_tile_stability_results_workers6_200mhz_fixed.md
 ```
 
-| Scene | 4w 100MHz mean s | 6w 100MHz mean s | 8w 100MHz mean s | 6w vs 4w 100MHz | 8w vs 4w 100MHz | 4w 200MHz mean s | 6w 100MHz vs 4w 200MHz | 8w 100MHz vs 4w 200MHz |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| fast escape @128 | `4.683` | `5.027` | `5.141` | `0.932x` | `0.911x` | `5.072` | `1.009x` | `0.987x` |
-| standard @64 | `4.680` | `5.253` | `4.805` | `0.891x` | `0.974x` | `5.066` | `0.964x` | `1.054x` |
-| Seahorse zoom @512 | `9.958` | `9.672` | `7.450` | `1.030x` | `1.337x` | `7.879` | `0.815x` | `1.058x` |
-| deep tendrils @8192 | `17.923` | `16.971` | `12.660` | `1.056x` | `1.416x` | `12.820` | `0.755x` | `1.013x` |
-| deep mini-brot @8192 | `44.148` | `42.313` | `31.785` | `1.043x` | `1.389x` | `31.625` | `0.747x` | `0.995x` |
-| deep Seahorse @1024 | `19.966` | `19.070` | `14.319` | `1.047x` | `1.394x` | `13.886` | `0.728x` | `0.970x` |
+| Scene | 4w 100MHz mean s | 6w 100MHz mean s | 8w 100MHz mean s | 4w 200MHz mean s | 6w 200MHz fixed mean s | 6w 200MHz vs 4w 200MHz | 6w 200MHz vs 8w 100MHz |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| fast escape @128 | `4.683` | `5.027` | `5.141` | `5.072` | `4.641` | `1.093x` | `1.108x` |
+| standard @64 | `4.680` | `5.253` | `4.805` | `5.066` | `4.636` | `1.093x` | `1.036x` |
+| Seahorse zoom @512 | `9.958` | `9.672` | `7.450` | `7.879` | `5.715` | `1.379x` | `1.304x` |
+| deep tendrils @8192 | `17.923` | `16.971` | `12.660` | `12.820` | `8.567` | `1.496x` | `1.478x` |
+| deep mini-brot @8192 | `44.148` | `42.313` | `31.785` | `31.625` | `20.963` | `1.509x` | `1.516x` |
+| deep Seahorse @1024 | `19.966` | `19.070` | `14.319` | `13.886` | `9.668` | `1.436x` | `1.481x` |
 
-The 6-worker 100MHz result is only modestly faster than 4-worker 100MHz on compute-heavy scenes, and slower on the fast/standard scenes. The 8-worker 100MHz result improves compute-heavy scenes by about `1.39x-1.42x` over 4-worker 100MHz, but is only roughly comparable with the current 4-worker direct-200MHz default: slightly faster on Seahorse zoom and deep tendrils, essentially tied on deep mini-brot, and slower on deep Seahorse.
+The 6-worker 100MHz result is only modestly faster than 4-worker 100MHz on compute-heavy scenes, and slower on the fast/standard scenes. The 8-worker 100MHz result improves compute-heavy scenes by about `1.39x-1.42x` over 4-worker 100MHz, but is only roughly comparable with the previous 4-worker direct-200MHz default. The fixed 6-worker 200MHz result is the best measured point in this set: it beats the previous 4-worker 200MHz default by `1.38x-1.51x` on compute-heavy scenes and also beats 8-worker 100MHz by `1.30x-1.52x` on those scenes.
+
+## 6-Worker 200MHz Timing Fix
+
+The original 6-worker 200MHz build routed but failed timing:
+
+```text
+WNS=-0.165ns, TNS=-8.713ns, 168 setup failing endpoints
+```
+
+The worst path was not in the FP64 multiplier or adder datapath. It was dominated by routing in the dynamic row dispatcher:
+
+```text
+u_core/g_dynamic_sched.u_dispatch/next_row_reg[0]
+  -> u_core/g_dynamic_sched.u_dispatch/row_stride_bus_reg[*]/CE
+Data Path Delay = 4.767ns, logic = 0.944ns, route = 3.823ns (80.2%)
+```
+
+A second class of near-critical paths crossed from dispatcher row assignment into worker row-coordinate setup, and another class remained inside the k-context worker commit/update control. These paths were also route-dominated.
+
+The fix used two small RTL cuts instead of changing the compute algorithm:
+
+| Change | Reason |
+|---|---|
+| Removed the active-cycle `row_stride_bus[i*16 +: 16] <= rows` assignment from `work_dispatch_dynamic_rows` | In dynamic mode the row stride is constant for the whole frame and already written on `start`; rewriting it on each row assignment created a wide CE/control path and caused the worst timing violation. |
+| Added `S_INIT_LATCH` in `mandelbrot_core_worker_kctx` | Worker start inputs are now latched locally first; FP constants such as `row_start_fp` and `row_stride_fp` are generated in the next cycle, cutting the dispatcher-to-worker combinational path. |
+
+The post-fix validation path was:
+
+| Step | Result |
+|---|---|
+| 6-worker dynamic multicore behavioral sim | PASS, `1920` pixels |
+| 6-worker direct-200MHz implementation | Bitstream generated |
+| Post-route physopt timing | `WNS=0.003ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns` |
+| Hardware programming | PASS, `xc7k70t_0` programmed through `hw_server:3122` + CH347 XVC `2542` |
+| 1080p 10-run benchmark | PASS for all scenes |
 
 ## 8-Worker Programming Note
 
@@ -86,13 +129,14 @@ python "python\host_tile_stability_benchmark.py" --runs 10 --tile-width 1920 --t
 
 ## Conclusion
 
-Increasing worker count by instantiating more current 4-context workers is not a good direct-200MHz path on `xc7k70t`:
+Increasing worker count by instantiating more current 4-context workers now has one useful direct-200MHz point on `xc7k70t`:
 
 | Candidate | Conclusion |
 |---|---|
-| 6 workers at 200MHz | Near fit, but timing fails; not valid for board benchmark. |
+| 6 workers at 200MHz, original | Near fit, but timing failed because of route-dominated dispatcher and worker-control paths. |
+| 6 workers at 200MHz, fixed | Timing-clean and benchmarked; best measured point in this matrix. |
 | 8 workers at 200MHz | Too close to device limits; placement fails. |
-| 6 workers at 100MHz | Valid and benchmarked, but only modestly improves 100MHz compute-heavy scenes and remains slower than the 4-worker 200MHz default. |
-| 8 workers at 100MHz | Valid and benchmarked; large gain versus 4-worker 100MHz compute-heavy scenes, but only roughly comparable to the 4-worker 200MHz default. |
+| 6 workers at 100MHz | Valid and benchmarked, but only modestly improves 100MHz compute-heavy scenes and remains slower than the 6-worker 200MHz default. |
+| 8 workers at 100MHz | Valid and benchmarked; large gain versus 4-worker 100MHz compute-heavy scenes, but slower than the 6-worker 200MHz default on compute-heavy scenes. |
 
-The current direct-200MHz 4-worker default remains the best validated default because it is timing-clean at 200MHz, uses much less area than 8 workers, and is competitive with or faster than 8-worker 100MHz on the deep 1080p benchmark set.
+The fixed direct-200MHz 6-worker build is the best validated performance point so far, at the cost of significantly higher area than the previous 4-worker default: 29891 LUTs, 25501 FFs, 97 DSP48E1, and 13.5 BRAM tiles.

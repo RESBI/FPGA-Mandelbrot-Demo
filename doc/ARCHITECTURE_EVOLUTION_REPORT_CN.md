@@ -1,6 +1,6 @@
 # 架构演进与优化报告
 
-本文是 `ARCHITECTURE_EVOLUTION_REPORT.md` 的中文版本，概述项目如何从最初单核 UART renderer 演进到当前 4-worker、4-context、12 Mbaud host-tiled FP64 默认设计。
+本文是 `ARCHITECTURE_EVOLUTION_REPORT.md` 的中文版本，概述项目如何从最初单核 UART renderer 演进到当前 6-worker、4-context-per-worker、direct-200MHz、12 Mbaud host-tiled FP64 默认设计。
 
 ## 当前最终状态
 
@@ -12,7 +12,7 @@
 | 当前系统时钟 | direct 200 MHz，`DIRECT_200MHZ=1` |
 | 100MHz 参考构建 | `build_fp64_100mhz.tcl` |
 | 浮点模式 | FP64 |
-| Worker | 4 |
+| Worker | 6 |
 | 每 worker context | 4 |
 | 历史低 LUT context | 2 |
 | 调度器 | 动态空闲 core 行调度 |
@@ -22,8 +22,9 @@
 | Host 协议 | raster order response，当前使用 tiled response |
 | 最大已验证帧 | 1920x1080 |
 | 当前 XC7K70T 板级状态 | 完整 FP64 bitstream 已通过 |
-| 当前 XC7K70T timing/resource | `WNS=0.015ns`, `TNS=0.000ns`; 20288 LUTs, 17202 registers, 37 DSP48E1, 9.5 BRAM tiles |
-| direct-200MHz timing/resource | `WNS=0.015ns`, `TNS=0.000ns`; 20288 LUTs, 17202 registers, 37 DSP48E1, 9.5 BRAM tiles |
+| 当前 XC7K70T timing/resource | `WNS=0.003ns`, `TNS=0.000ns`; 29891 LUTs, 25501 registers, 97 DSP48E1, 13.5 BRAM tiles |
+| direct-200MHz 6-worker timing/resource | `WNS=0.003ns`, `TNS=0.000ns`; 29891 LUTs, 25501 registers, 97 DSP48E1, 13.5 BRAM tiles |
+| direct-200MHz 4-worker timing/resource | `WNS=0.015ns`, `TNS=0.000ns`; 20288 LUTs, 17202 registers, 37 DSP48E1, 9.5 BRAM tiles |
 | 历史 2ctx XC7K70T timing/resource | `WNS=1.148ns`, `TNS=0.000ns`; 13726 LUTs, 14559 registers, 37 DSP48E1, 9.5 BRAM tiles |
 
 ## 初始设计思想
@@ -259,7 +260,53 @@ direct-200MHz 10 轮结果：
 | deep mini-brot @8192 | `10/10` | `2` | `31.625` | `65709.99` | `1.396x` |
 | deep Seahorse @1024 | `10/10` | `0` | `13.886` | `149325.97` | `1.438x` |
 
-结论：direct-200MHz 是有效性能点，现在已作为仓库默认构建。相对 100MHz 4ctx，它在 fast escape 场景更慢，在 standard 和深场景提升 `1.14x-1.44x`。100MHz 4ctx 保留为显式参考构建。
+结论：direct-200MHz 4-worker 是有效性能点，并曾作为仓库默认构建。相对 100MHz 4ctx，它在 fast escape 场景更慢，在 standard 和深场景提升 `1.14x-1.44x`。100MHz 4ctx 保留为显式参考构建。
+
+## 阶段 14：6-worker direct-200MHz 默认点
+
+direct-200MHz 4ctx 验证后，下一步评估是否能在 XC7K70T 上复制更多当前 worker。该阶段不把参数改动直接视为有效性能点：timing-failing bitstream 不烧录，候选必须通过行为仿真、implementation timing、烧录和 1080p 六场景 benchmark。
+
+详细横向报告见 `WORKER_COUNT_SCALING.md`。
+
+worker 数量矩阵：
+
+| Build | Clock | Workers | Contexts/worker | 结果 | Timing/resource 摘要 |
+|---|---:|---:|---:|---|---|
+| 上一版默认 | direct 200MHz | 4 | 4 | 已上板验证 | `WNS=0.015ns`; 20288 LUT, 17202 FF, 37 DSP48E1, 9.5 BRAM tiles |
+| 原始 6-worker 候选 | direct 200MHz | 6 | 4 | routed 但不能作为板级测试点 | `WNS=-0.165ns`, `TNS=-8.713ns`; dispatcher/worker-control route-dominated |
+| 修复后 6-worker 候选 | direct 200MHz | 6 | 4 | timing-clean、已烧录、已 benchmark，当前默认 | `WNS=0.003ns`, `TNS=0.000ns`; 29891 LUT, 25501 FF, 97 DSP48E1, 13.5 BRAM tiles |
+| 8-worker 候选 | direct 200MHz | 8 | 4 | placement failed | LUT/slice packing 超限；40635 synth LUT, 33366 FF, 129 DSP48E1 |
+| 8-worker 参考 | 100MHz | 8 | 4 | timing-clean 且已 benchmark | 可作为参考，但 compute-heavy 场景慢于修复后 6-worker 200MHz |
+
+原始 6-worker direct-200MHz 最差路径不是 FP 算术，而是 dynamic dispatcher 到 worker 控制/坐标初始化的 route-dominated fanout。最终采用两个最小 RTL 切点：
+
+| 改动 | 目的 |
+|---|---|
+| 删除 `work_dispatch_dynamic_rows.v` active-cycle 的 `row_stride_bus` 重写 | dynamic mode 中 `row_stride_bus` 是 start 后的整帧常量，重复写入只制造长控制路径。 |
+| 在 `mandelbrot_core_worker_kctx.v` 增加 `S_INIT_LATCH` | 先本地锁存 `row_start`、`row_stride`、`rows`、`cols`，下一拍再生成 FP row-start/stride，切断 dispatcher-to-worker 转换长路径。 |
+
+修复后验证链路：
+
+| Gate | 结果 |
+|---|---|
+| 6-worker dynamic multicore 行为仿真 | PASS，`1920` pixels |
+| direct-200MHz implementation | bitstream generated |
+| post-route phys-opt timing | `WNS=0.003ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns` |
+| 烧录 | PASS |
+| 1080p 10-run benchmark | 六场景全部 PASS |
+
+6-worker 10-run 结果：
+
+| 场景 | Pass | Retry | 平均 FPGA s | 平均 pps | 对比 4w 200MHz | 对比 100MHz 4ctx |
+|---|---:|---:|---:|---:|---:|---:|
+| fast escape @128 | `10/10` | `2` | `4.641` | `453333.47` | `1.09x` | `1.009x` |
+| standard @64 | `10/10` | `2` | `4.636` | `450824.12` | `1.09x` | `1.247x` |
+| Seahorse zoom @512 | `10/10` | `2` | `5.715` | `366227.26` | `1.38x` | `1.721x` |
+| deep tendrils @8192 | `10/10` | `1` | `8.567` | `242675.75` | `1.50x` | `2.063x` |
+| deep mini-brot @8192 | `10/10` | `0` | `20.963` | `98916.27` | `1.51x` | `2.106x` |
+| deep Seahorse @1024 | `10/10` | `1` | `9.668` | `214934.36` | `1.44x` | `2.065x` |
+
+结论：修复后的 6-worker direct-200MHz 是当前默认构建，因为它 timing-clean、已上板 benchmark，并且是当前六场景 1080p 矩阵中的最佳实测性能点。上一版 4-worker direct-200MHz 保留为低面积 200MHz 参考点，100MHz 4ctx 保留为时钟参考点。
 
 ## 主要经验
 
@@ -272,8 +319,9 @@ direct-200MHz 10 轮结果：
 | 2ctx 证明了 tagged worker | 但仍远未填满 FP pipeline。 |
 | 12 Mbaud 后深场景重新 compute-sensitive | fast scenes 仍受 output/host 限制。 |
 | XC7K70T 4ctx 成为默认 | 深场景提升明显，但 `88.70%` LUT 占用说明 generic scoreboard 不适合继续放大。 |
-| direct-200MHz 已验证并成为默认 | 相对 100MHz 4ctx，非 fast 场景 `1.14x-1.44x`，fast escape 更慢。 |
+| direct-200MHz 4-worker 已验证 | 相对 100MHz 4ctx，非 fast 场景 `1.14x-1.44x`，fast escape 更慢。 |
+| 6-worker direct-200MHz 成为当前默认 | 修复 route-dominated 控制路径后 timing-clean，compute-heavy 场景相对 4-worker 200MHz 提升约 `1.38x-1.51x`。 |
 
 ## 后续方向
 
-优先级：更强传输层、packet sequence/request ID、保留 100MHz 4ctx 作为显式参考、低 LUT 8/12/16ctx worker、16ctx 后再评估第二 adder，最后才考虑更多 multiplier。当前默认是 XC7K70T direct-200MHz 4ctx；2ctx 保留为低 LUT 对照。
+优先级：更强传输层、packet sequence/request ID、保留 4-worker 200MHz 和 100MHz 4ctx 作为显式参考、研究更低 route/resource 压力的高 context 或更多 worker 结构、再评估第二 adder / 更多 multiplier。当前默认是 XC7K70T direct-200MHz 6-worker 4ctx；2ctx 和 4-worker 4ctx 保留为对照。

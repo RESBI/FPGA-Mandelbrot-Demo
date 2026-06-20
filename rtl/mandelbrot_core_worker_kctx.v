@@ -45,13 +45,14 @@ module mandelbrot_core_worker_kctx #(
     localparam ADD_LAT = 9;
 
     localparam S_IDLE                 = 5'd0;
-    localparam S_INIT_START           = 5'd1;
-    localparam S_INIT_W_CAPTURE       = 5'd2;
-    localparam S_INIT_W2_CAPTURE      = 5'd3;
-    localparam S_INIT_H_CAPTURE       = 5'd4;
-    localparam S_INIT_H2_CAPTURE      = 5'd5;
-    localparam S_INIT_ROWSTEP_MUL     = 5'd6;
-    localparam S_INIT_ROWSTART_MUL    = 5'd7;
+    localparam S_INIT_LATCH           = 5'd1;
+    localparam S_INIT_START           = 5'd2;
+    localparam S_INIT_W_CAPTURE       = 5'd3;
+    localparam S_INIT_W2_CAPTURE      = 5'd4;
+    localparam S_INIT_H_CAPTURE       = 5'd5;
+    localparam S_INIT_H2_CAPTURE      = 5'd6;
+    localparam S_INIT_ROWSTEP_MUL     = 5'd7;
+    localparam S_INIT_ROWSTART_MUL    = 5'd8;
     localparam S_DONE                 = 5'd10;
     localparam S_RUN                  = 5'd9;
 
@@ -479,17 +480,21 @@ module mandelbrot_core_worker_kctx #(
                         cols <= cols_in;
                         row_start <= row_start_in;
                         row_stride <= row_stride_in;
-                        half_w <= (cols_in - 16'd1) >> 1;
-                        half_w_fp <= int2fp((cols_in - 16'd1) >> 1);
-                        half_h_fp <= int2fp((rows_in - 16'd1) >> 1);
-                        row_start_fp <= int2fp(row_start_in);
-                        row_stride_fp <= int2fp(row_stride_in);
                         busy <= 1;
                         if (row_start_in >= rows_in || rows_in == 0 || cols_in == 0)
                             state <= S_DONE;
                         else
-                            state <= S_INIT_START;
+                            state <= S_INIT_LATCH;
                     end
+                end
+
+                S_INIT_LATCH: begin
+                    half_w <= (cols - 16'd1) >> 1;
+                    half_w_fp <= int2fp((cols - 16'd1) >> 1);
+                    half_h_fp <= int2fp((rows - 16'd1) >> 1);
+                    row_start_fp <= int2fp(row_start);
+                    row_stride_fp <= int2fp(row_stride);
+                    state <= S_INIT_START;
                 end
 
                 S_INIT_START: begin

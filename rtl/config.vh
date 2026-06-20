@@ -21,7 +21,7 @@
 `endif
 
 `ifndef CFG_CORE_COUNT
-`define CFG_CORE_COUNT 4
+`define CFG_CORE_COUNT 6
 `endif
 
 `ifndef CFG_CORE_FIFO_DEPTH

@@ -58,7 +58,6 @@ module work_dispatch_dynamic_rows #(
                     if (!assigned && !active_next[i] && !core_done_block[i] && !core_done[i] && !core_fifo_avail[i] && next_row < rows) begin
                         core_start[i] <= 1'b1;
                         row_start_bus[i*16 +: 16] <= next_row;
-                        row_stride_bus[i*16 +: 16] <= rows;
                         active_next[i] = 1'b1;
                         owner_wr <= 1'b1;
                         owner_row <= next_row;

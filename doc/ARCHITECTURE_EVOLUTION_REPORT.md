@@ -17,7 +17,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Implemented 4-core design | [MULTICORE_4CORE_ARCHITECTURE.md](MULTICORE_4CORE_ARCHITECTURE.md) | Final 4-core architecture, modular dispatch/merge boundary, validation, 1080p benchmark results. |
 | Abandoned N-context worker experiments | [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](CONTEXT_WORKER_ARCHITECTURE_REPORT.md) | Generic scoreboard 4/8ctx and ring/lookahead experiments; behavioral pass but not deployable on xc7z010. |
 | Direct 200 MHz closure | [200MHZ_ATTEMPT_REPORT.md](200MHZ_ATTEMPT_REPORT.md) | 4ctx direct-clock timing closure, functional failure analysis, request slicing, tag-latency fix, and hardware benchmark. |
-| Worker-count scaling | [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md) | 6/8-worker build, timing, 6-worker 100MHz hardware benchmark, and 8-worker XVC/JTAG blocker. |
+| Worker-count scaling | [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md) | 6/8-worker build, timing, 6-worker 200MHz timing fix, and hardware benchmark comparison. |
 | Historical notes | [DESIGN.md](DESIGN.md) | Earlier design notes and historical context. |
 
 ## Final Current State
@@ -31,6 +31,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Compute cores | 4 |
 | Worker contexts | 4 per worker |
 | Default scheduler | Dynamic idle-core rows |
+| Mandelbrot workers | 6 |
 | Effective worker rate | 200 MHz per worker, `FP_CE_DIV=1` |
 | 100MHz reference build | `build_fp64_100mhz.tcl` |
 | UART | 12000000 baud, 8N1, fractional-NCO RX/TX |
@@ -437,7 +438,7 @@ The important lesson is that dynamic row assignment targeted the wrong dominant 
 
 ### Default Dynamic + Two-Context Worker At 576000 Baud Historical Baseline
 
-The current default combines dynamic row scheduling with two pixel contexts inside each of the four workers. Each worker still shares one FP64 multiplier and one FP64 adder; the improvement comes from tagged FP writeback and context interleaving, not from adding more FP units.
+The then-current default combined dynamic row scheduling with two pixel contexts inside each of the four workers. Each worker still shared one FP64 multiplier and one FP64 adder; the improvement came from tagged FP writeback and context interleaving, not from adding more FP units.
 
 | Scene | Previous 4-Core 1ctx 576k | Default Dynamic 2ctx 576k | Throughput | Speedup |
 |---|---:|---:|---:|---:|
@@ -706,7 +707,55 @@ The final 200 MHz candidate passed progressively stronger gates:
 
 ### Architectural Decision
 
-The 200 MHz design is valid and is now the repository default. Relative to the 100MHz 4ctx data, it is slower on the fast-escape scene and faster on standard/deep scenes, with `1.14x-1.44x` improvement across the non-fast scenes in the 10-run mean. The 100MHz 4ctx build remains available as an explicit reference for shallow-scene comparisons.
+The 200 MHz 4-worker design became a valid repository default at this stage. Relative to the 100MHz 4ctx data, it was slower on the fast-escape scene and faster on standard/deep scenes, with `1.14x-1.44x` improvement across the non-fast scenes in the 10-run mean. The 100MHz 4ctx build remained available as an explicit reference for shallow-scene comparisons.
+
+## Stage 10: 6-Worker Direct-200MHz Default
+
+The next measured question was whether the direct-200MHz 4ctx worker could be replicated beyond four workers on XC7K70T. This was not treated as a parameter-only change: timing-failing bitstreams were not programmed, and a candidate had to pass behavioral simulation, implementation timing, programming, and the 1080p six-scene benchmark before becoming a valid performance point.
+
+Detailed report: [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md).
+
+### Worker Count Matrix
+
+| Build | Clock | Workers | Contexts/worker | Result | Timing/resource summary |
+|---|---:|---:|---:|---|---|
+| Previous default | direct 200MHz | 4 | 4 | Validated on board | `WNS=0.015ns`; 20288 LUT, 17202 FF, 37 DSP48E1, 9.5 BRAM tiles |
+| Original 6-worker candidate | direct 200MHz | 6 | 4 | Routed but not valid for board test | `WNS=-0.165ns`, `TNS=-8.713ns`; route-dominated dispatcher/worker-control paths |
+| Fixed 6-worker candidate | direct 200MHz | 6 | 4 | Timing-clean, programmed, benchmarked, now default | `WNS=0.003ns`, `TNS=0.000ns`; 29891 LUT, 25501 FF, 97 DSP48E1, 13.5 BRAM tiles |
+| 8-worker candidate | direct 200MHz | 8 | 4 | Placement failed | LUT/slice packing over-utilized; 40635 synth LUT, 33366 FF, 129 DSP48E1 |
+| 8-worker reference | 100MHz | 8 | 4 | Timing-clean and benchmarked | Useful comparison point, but slower than fixed 6-worker 200MHz on compute-heavy scenes |
+
+The original 6-worker direct-200MHz implementation was close enough to be worth fixing. The worst path was not an FP datapath; it was dominated by routing from the dynamic dispatcher into worker-control fanout. Two minimal RTL cuts made the build timing-clean:
+
+| Change | Purpose |
+|---|---|
+| Remove the active-cycle `row_stride_bus` rewrite in `work_dispatch_dynamic_rows.v` | `row_stride_bus` is a frame-constant in dynamic mode after start, so the repeated write only created a long control path. |
+| Add `S_INIT_LATCH` in `mandelbrot_core_worker_kctx.v` | Latch `row_start`, `row_stride`, `rows`, and `cols` locally before generating FP row-start/stride values, cutting dispatcher-to-worker conversion paths. |
+
+Validation after the fix:
+
+| Gate | Result |
+|---|---|
+| 6-worker dynamic multicore behavioral simulation | PASS, `1920` pixels |
+| Direct-200MHz implementation | Bitstream generated |
+| Post-route phys-opt timing | `WNS=0.003ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns` |
+| Board programming | PASS |
+| 1080p 10-run benchmark | PASS for all six scenes |
+
+### 6-Worker 10-Run Result
+
+| Scene | Transport pass | Retry events | Mean FPGA s | Mean pps | vs 4w 200MHz | vs 100MHz 4ctx |
+|---|---:|---:|---:|---:|---:|---:|
+| fast escape @128 | `10/10` | `2` | `4.641` | `453333.47` | `1.09x` | `1.009x` |
+| standard @64 | `10/10` | `2` | `4.636` | `450824.12` | `1.09x` | `1.247x` |
+| Seahorse zoom @512 | `10/10` | `2` | `5.715` | `366227.26` | `1.38x` | `1.721x` |
+| deep tendrils @8192 | `10/10` | `1` | `8.567` | `242675.75` | `1.50x` | `2.063x` |
+| deep mini-brot @8192 | `10/10` | `0` | `20.963` | `98916.27` | `1.51x` | `2.106x` |
+| deep Seahorse @1024 | `10/10` | `1` | `9.668` | `214934.36` | `1.44x` | `2.065x` |
+
+### Updated Default Decision
+
+The fixed 6-worker direct-200MHz build is now the repository default because it is timing-clean, hardware-benchmarked, and fastest across the measured six-scene 1080p set. The previous 4-worker direct-200MHz build remains the lower-area 200MHz reference, and the 100MHz 4ctx build remains an explicit reference for comparisons.
 
 ## Architectural Lessons
 
@@ -726,7 +775,7 @@ The true 100 MHz stage succeeded because long FP logic cones were pipelined. Rem
 
 At the 576000 baud stage, four workers were enough to push many compute-heavy scenes near the UART ceiling (~28800 pps). More workers would have consumed resources while often waiting on UART unless the scene was extremely compute-bound.
 
-At 12 Mbaud, that conclusion changes. Fast scenes are still transport-sensitive, but several deep scenes now expose compute/raster-order limits. More worker contexts, protocolized output, and recoverable packet framing become more valuable than simply adding more identical cores behind the same strict raster stream.
+At 12 Mbaud, that conclusion changes. Fast scenes are still transport-sensitive, but several deep scenes now expose compute/raster-order limits. The timing-fixed 6-worker direct-200MHz build demonstrates that modest worker replication is still valuable on XC7K70T when the route-dominated scheduler/control paths are cut carefully. However, the failed 8-worker direct-200MHz placement shows that simply adding more identical workers is near the device limit.
 
 ### Dynamic Row Scheduling Is Now The Default Scheduling Layer
 
@@ -766,10 +815,10 @@ The next major improvement should target protocol and transport before adding mo
 
 ```mermaid
 flowchart LR
-    NOW[Current 4-core raster UART] --> LINK[Higher bandwidth link]
+    NOW[Current 6-worker raster UART] --> LINK[Higher bandwidth link]
     LINK --> PROTO[Coordinate-tagged rows/tiles]
     PROTO --> SCHED[Dynamic tile scheduler]
-    SCHED --> CORES[6-8 cores if bandwidth supports it]
+    SCHED --> CORES[More workers only with lower routing/resource pressure]
 ```
 
 Recommended order:
@@ -779,10 +828,10 @@ Recommended order:
 | 1 | Add sequence numbers and true retransmission | Current `RT`/`TD`/`TE` packets detect errors, and host-driven tiling can recompute a stripe, but the FPGA still cannot retransmit one packet. |
 | 2 | Add request IDs and stronger row/tile IDs | Enables resynchronization, duplicate rejection, and out-of-order completion beyond the current raster collector. |
 | 3 | Add a higher-bandwidth transport | USB FIFO, SPI, Ethernet, or PS memory mapping would remove UART/driver burst limits. |
-| 4 | Keep XC7K70T 4ctx as the default worker and track LUT headroom carefully | Generic 4ctx is board-validated on XC7K70T, but `88.70%` LUT use leaves little headroom. |
-| 5 | Keep 100MHz 4ctx as an explicit reference build | Direct-200MHz is now default, but not universally faster. |
+| 4 | Keep 6-worker direct-200MHz as the performance default | It is the fastest timing-clean, board-benchmarked point so far. |
+| 5 | Keep 4-worker direct-200MHz and 100MHz 4ctx as explicit reference builds | They are useful lower-area and clock-reference comparison points. |
 | 6 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
-| 7 | Revisit 6 or 8 cores | Only useful after output bandwidth and scheduling improve. |
+| 7 | Revisit 8 or more workers only with lower-route-pressure structure | The direct 8-worker build already fails placement on XC7K70T. |
 | 8 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
 
 ## Summary
@@ -803,5 +852,6 @@ The project evolved through a pragmatic sequence:
 12. Add tiled response framing and host-driven 1920x120 stripe retries to make 12 Mbaud operation recoverable at tile granularity.
 13. Make the validated 4-context generic worker the XC7K70T default, confirming the context-scaling performance direction while exposing the LUT cost.
 14. Close and validate direct-200MHz 4ctx using request-sliced FPU issue and corrected tag latency.
+15. Replicate the validated 4ctx worker to six direct-200MHz workers, fix route-dominated dispatcher/worker-control timing, and make the timing-clean 6-worker result the default.
 
-The current design preserves the original host command protocol while raising the default transport to 12 Mbaud, adding packetized response parsing, and making the validated direct-200MHz 4ctx build the default. Fast 1080p scenes now reach hundreds of thousands of pixels per second. The 200MHz 4ctx default raises deep mini-brot from the 100MHz `44.146s` reference to a 10-run mean of `31.625s` (`1.396x`), while the 100MHz build remains useful for the fast-escape shallow reference. The next major architecture step is no longer another integer baud tweak; it is sequence-numbered retransmission, a stronger transport, or a lower-LUT high-context worker that keeps the 4ctx/200MHz performance direction without relying on generic wide context-array logic.
+The current design preserves the original host command protocol while raising the default transport to 12 Mbaud, adding packetized response parsing, and making the validated direct-200MHz 6-worker 4ctx build the default. Fast 1080p scenes now reach hundreds of thousands of pixels per second, and the 6-worker default raises deep mini-brot from the 100MHz `44.146s` reference to a 10-run mean of `20.963s` (`2.106x`). Relative to the previous 4-worker direct-200MHz default, the 6-worker build improves compute-heavy scenes by about `1.38x-1.51x`. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is sequence-numbered retransmission, a stronger transport, or a lower-route-pressure compute structure that preserves the 4ctx/200MHz performance direction without relying on wider generic context arrays or overfilling the device with identical workers.
