@@ -21,6 +21,7 @@ import time
 import sys
 import argparse
 import os
+import colorsys
 
 PORT = "COM9"
 BAUD = 12000000
@@ -128,21 +129,46 @@ def print_quiet_progress(done_compute, total_compute, host_index, host_total, cu
 # ============================================================
 #  Color Palette
 # ============================================================
-def make_palette(n_colors=256):
+PALETTE_CHOICES = ("classic", "fire", "ocean", "twilight", "grayscale")
+
+
+def _clamp_u8(value):
+    return max(0, min(255, int(value)))
+
+
+def make_palette(n_colors=256, scheme="classic"):
     """Generate a color palette for Mandelbrot rendering."""
     palette = []
+    denom = max(n_colors - 1, 1)
     for i in range(n_colors):
         if i == 0:
             palette.append((0, 0, 0))
         else:
-            r = int((i * 9) % 256)
-            g = int((i * 13 + 80) % 256)
-            b = int((i * 17 + 160) % 256)
+            t = i / denom
+            if scheme == "classic":
+                r = int((i * 9) % 256)
+                g = int((i * 13 + 80) % 256)
+                b = int((i * 17 + 160) % 256)
+            elif scheme == "fire":
+                r = _clamp_u8(255 * min(1.0, t * 3.0))
+                g = _clamp_u8(255 * max(0.0, min(1.0, (t - 0.20) * 2.0)))
+                b = _clamp_u8(160 * max(0.0, min(1.0, (t - 0.72) * 3.6)))
+            elif scheme == "ocean":
+                r_f, g_f, b_f = colorsys.hsv_to_rgb(0.58 + 0.12 * t, 0.85, 0.30 + 0.70 * t)
+                r, g, b = _clamp_u8(r_f * 255), _clamp_u8(g_f * 255), _clamp_u8(b_f * 255)
+            elif scheme == "twilight":
+                r_f, g_f, b_f = colorsys.hsv_to_rgb((0.78 + 0.34 * t) % 1.0, 0.70, 0.25 + 0.75 * t)
+                r, g, b = _clamp_u8(r_f * 255), _clamp_u8(g_f * 255), _clamp_u8(b_f * 255)
+            elif scheme == "grayscale":
+                level = _clamp_u8(255 * (t ** 0.55))
+                r, g, b = level, level, level
+            else:
+                raise ValueError(f"Unknown palette: {scheme}")
             palette.append((r, g, b))
     return palette
 
 
-def render_image(pixels, width, height, max_iter, output_path):
+def render_image(pixels, width, height, max_iter, output_path, palette_scheme="classic"):
     """Render pixel data to PNG image. Pixels are 16-bit iteration counts."""
     try:
         from PIL import Image
@@ -153,7 +179,7 @@ def render_image(pixels, width, height, max_iter, output_path):
     # Build palette: map 16-bit values -> RGB
     # For values > palette size, wrap with periodic mapping
     pal_size = min(2048, max_iter + 1)
-    palette = make_palette(pal_size)
+    palette = make_palette(pal_size, palette_scheme)
     img = Image.new("RGB", (width, height))
     for y in range(height):
         for x in range(width):
@@ -165,7 +191,7 @@ def render_image(pixels, width, height, max_iter, output_path):
                 color = palette[idx]
             img.putpixel((x, y), color)
     img.save(output_path)
-    print(f"Image saved to {output_path}")
+    print(f"Image saved to {output_path} (palette={palette_scheme})")
 
 
 def render_text(pixels, width, height, max_iter, output_path):
@@ -630,6 +656,8 @@ def main():
                         help="Output file path")
     parser.add_argument("--format", type=str, choices=["png", "bmp", "txt"], default="png",
                         help="Output format")
+    parser.add_argument("--palette", type=str, choices=PALETTE_CHOICES, default="classic",
+                        help="PNG/BMP color palette: classic, fire, ocean, twilight, or grayscale")
     parser.add_argument("--mode", type=str, choices=["fp64", "fp128"], default="fp64",
                         help="Precision mode")
     parser.add_argument("--verify", action="store_true",
@@ -683,6 +711,8 @@ def main():
     print(f" Step: {args.step}")
     print(f" Max iterations: {args.max_iter}")
     print(f" Image: {args.width}x{args.height}")
+    if args.format != "txt":
+        print(f" Palette: {args.palette}")
     if args.host_tiling:
         print(f" Host tiles: {args.tile_width}x{args.tile_height}")
         print(f" Compute tiles: {args.compute_tile_width}x{args.compute_tile_height}, retries={args.tile_retries}, read_timeout={args.tile_read_timeout}s")
@@ -718,7 +748,7 @@ def main():
         if args.format == "txt" or ext == ".txt":
             render_text(pixels, args.width, args.height, args.max_iter, args.output)
         else:
-            render_image(pixels, args.width, args.height, args.max_iter, args.output)
+            render_image(pixels, args.width, args.height, args.max_iter, args.output, args.palette)
         t_render = time.perf_counter()
         print(f"Render elapsed: {t_render - t_recv:.3f}s")
 

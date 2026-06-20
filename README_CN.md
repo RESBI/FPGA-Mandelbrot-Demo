@@ -56,6 +56,22 @@ vivado -mode batch -source program.tcl
 
 ## 推荐 1080p 高波特率运行方式
 
+Host PNG/BMP 输出支持 `--palette` 选择软件上色方案，不影响 FPGA 计算结果或串口协议。可选值：
+
+| Palette | 说明 |
+|---|---|
+| `classic` | 原始周期 RGB palette，默认值。 |
+| `fire` | 黑/红/黄/白 heat-map 风格，escape band 对比强。 |
+| `ocean` | 蓝/青渐变，适合冷色 deep zoom。 |
+| `twilight` | 紫色到暖色的 HSV 循环 palette。 |
+| `grayscale` | 单色亮度 ramp，适合观察结构。 |
+
+示例：
+
+```bash
+python python\mandelbrot_host.py --width 160 --height 120 --max-iter 256 --palette ocean --output python\mandelbrot_160x120_ocean.png
+```
+
 当前默认启用 host-driven tile。如果不传 `--tile-width/--tile-height`，host 自动使用全宽、120 行高的 host stripe，并默认 `--tile-retries 3`、单次 tile 接收 read timeout 为 30 秒。默认 compute tile 等于 host tile 本身，但 compute 宽度上限为 4096。现在已有失败后 drain 串口、发送软复位 `RST!RST!`、重算该 tile 的方案，因此默认不再拆成较小 compute tile。1080p 默认形状为 `1920x120` host tile，同时也是 `1920x120` compute tile：
 
 ```bash

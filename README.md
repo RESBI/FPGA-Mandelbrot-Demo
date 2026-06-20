@@ -479,6 +479,22 @@ Basic render:
 python python\mandelbrot_host.py --width 160 --height 120 --max-iter 256 --output python\mandelbrot_160x120.png
 ```
 
+Render with an alternate color palette:
+
+```bash
+python python\mandelbrot_host.py --width 160 --height 120 --max-iter 256 --palette ocean --output python\mandelbrot_160x120_ocean.png
+```
+
+Available PNG/BMP palettes:
+
+| Palette | Description |
+|---|---|
+| `classic` | Original periodic RGB palette; this remains the default. |
+| `fire` | Black-to-red/yellow/white heat-map style for high-contrast escape bands. |
+| `ocean` | Blue/cyan gradient for cooler deep-zoom images. |
+| `twilight` | Purple-to-warm cyclic HSV palette. |
+| `grayscale` | Monochrome brightness ramp, useful for checking structure without hue changes. |
+
 Render with software verification:
 
 ```bash
@@ -513,6 +529,7 @@ python python\mandelbrot_host.py --width 1920 --height 1080 --max-iter 1024 --ce
 --height H           Image height. Default: 120
 --output PATH        Output image/text path. Default: mandelbrot.png
 --format FORMAT      png, bmp, or txt. Default: png
+--palette NAME       PNG/BMP palette: classic, fire, ocean, twilight, grayscale
 --mode MODE          fp64 or fp128. Default: fp64
 --verify             Also compute software reference and compare
 --port COMx          Serial port. Default: COM9
