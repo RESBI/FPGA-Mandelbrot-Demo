@@ -1,6 +1,16 @@
 set part_name "xc7k70tfbg676-1"
-set proj_name "mandelbrot_fp64_100mhz_ctx4"
-set proj_dir  "./fp64_100mhz_ctx4_proj"
+set worker_contexts 4
+set core_count 4
+
+if {$argc >= 1} {
+    set worker_contexts [lindex $argv 0]
+}
+if {$argc >= 2} {
+    set core_count [lindex $argv 1]
+}
+
+set proj_name "mandelbrot_fp64_100mhz_c${core_count}_ctx${worker_contexts}"
+set proj_dir  "./fp64_100mhz_c${core_count}_ctx${worker_contexts}_proj"
 set rtl_dir   "./rtl"
 set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
 
@@ -9,7 +19,8 @@ puts " Mandelbrot FP64 100 MHz Reference Build"
 puts " Part: $part_name"
 puts " Clocking: MMCM-generated 100 MHz sys_clk"
 puts " Scheduler: dynamic idle-core rows (SCHED_MODE=1)"
-puts " Worker pipeline contexts: 4"
+puts " Worker pipeline contexts: $worker_contexts"
+puts " Worker count: $core_count"
 puts "========================================"
 
 create_project -force $proj_name $proj_dir -part $part_name
@@ -17,7 +28,7 @@ set_property target_language Verilog [current_project]
 
 add_files -fileset sources_1 [glob $rtl_dir/*.v]
 set_property top top [current_fileset]
-set_property generic {CLK_HZ=100000000 DIRECT_200MHZ=0 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=4} [current_fileset]
+set_property generic "CLK_HZ=100000000 DIRECT_200MHZ=0 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 CORE_COUNT=$core_count WORKER_CONTEXTS=$worker_contexts" [current_fileset]
 puts "Added [llength [glob $rtl_dir/*.v]] source files"
 
 set_property include_dirs $rtl_dir [current_fileset]

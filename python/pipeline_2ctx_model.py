@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Cycle model for a 2-context Mandelbrot worker scheduler.
+"""Cycle model for tagged multi-context Mandelbrot worker scheduling.
 
 This is a scheduling model, not a replacement RTL implementation. It uses real
 or synthetic iteration-count traces and models the current FP issue sequence with
-PIPE_WAIT latency, tagged context completion, and ordered commit by pixel_seq.
+separate MUL/ADD tag latencies, tagged context completion, and ordered commit by
+pixel_seq.
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Sequence, Tuple
 
 
-PIPE_WAIT = 10
-LATENCY = PIPE_WAIT + 1
+MUL_LAT = 6
+ADD_LAT = 9
 
 
 # Stages per non-escaping iteration. Stage 2 issues mul and add together.
@@ -37,6 +38,16 @@ def stages_for_pixel(iter_count: int, max_iter: int) -> Tuple[str, ...]:
     if iter_count >= max_iter:
         return FULL_ITER_STAGES * max_iter
     return FULL_ITER_STAGES * iter_count + ESCAPE_CHECK_STAGES
+
+
+def stage_latency(stage: str, mul_lat: int, add_lat: int) -> int:
+    if stage == "MA":
+        return max(mul_lat, add_lat)
+    if stage == "M":
+        return mul_lat
+    if stage == "A":
+        return add_lat
+    raise ValueError(f"unknown stage {stage!r}")
 
 
 def mandelbrot_trace(width: int, height: int, max_iter: int, center_re: float,
@@ -93,7 +104,9 @@ def load_context(ctx: Context, seq: int, iter_count: int, max_iter: int, cycle: 
     ctx.done_cycle = 0
 
 
-def simulate(trace: List[int], max_iter: int, contexts_count: int) -> Tuple[int, int, int]:
+def simulate(trace: List[int], max_iter: int, contexts_count: int,
+             mul_units: int = 1, add_units: int = 1,
+             mul_lat: int = MUL_LAT, add_lat: int = ADD_LAT) -> Tuple[int, int, int, int, int]:
     contexts = [Context() for _ in range(contexts_count)]
     next_assign = 0
     next_commit = 0
@@ -102,6 +115,8 @@ def simulate(trace: List[int], max_iter: int, contexts_count: int) -> Tuple[int,
     done_table = {}
     max_reorder_occupancy = 0
     commit_stall_cycles = 0
+    mul_issues = 0
+    add_issues = 0
 
     def assign_ready_contexts(now: int) -> None:
         nonlocal next_assign
@@ -113,11 +128,11 @@ def simulate(trace: List[int], max_iter: int, contexts_count: int) -> Tuple[int,
     assign_ready_contexts(cycle)
 
     while committed < len(trace):
-        mul_used = False
-        add_used = False
+        mul_used = 0
+        add_used = 0
 
         # Commit in order before issuing more work, matching an output FIFO write slot.
-        if next_commit in done_table:
+        if next_commit in done_table and done_table[next_commit] <= cycle:
             del done_table[next_commit]
             next_commit += 1
             committed += 1
@@ -130,7 +145,7 @@ def simulate(trace: List[int], max_iter: int, contexts_count: int) -> Tuple[int,
         elif done_table:
             commit_stall_cycles += 1
 
-        # Issue at most one mul and one add this cycle. A combined MA stage needs both.
+        # Issue as many independent context stages as the FP units can accept.
         for ctx in contexts:
             if not ctx.active or ctx.done or ctx.ready_cycle > cycle:
                 continue
@@ -139,54 +154,78 @@ def simulate(trace: List[int], max_iter: int, contexts_count: int) -> Tuple[int,
             stage = ctx.stages[ctx.stage_idx]
             need_m = "M" in stage
             need_a = "A" in stage
-            if (need_m and mul_used) or (need_a and add_used):
+            if (need_m and mul_used >= mul_units) or (need_a and add_used >= add_units):
                 continue
             if need_m:
-                mul_used = True
+                mul_used += 1
+                mul_issues += 1
             if need_a:
-                add_used = True
+                add_used += 1
+                add_issues += 1
             ctx.stage_idx += 1
-            ctx.ready_cycle = cycle + LATENCY
+            ctx.ready_cycle = cycle + stage_latency(stage, mul_lat, add_lat)
             if ctx.stage_idx >= len(ctx.stages):
                 ctx.done = True
                 ctx.done_cycle = ctx.ready_cycle
                 done_table[ctx.seq] = ctx.done_cycle
-            break
 
         if len(done_table) > max_reorder_occupancy:
             max_reorder_occupancy = len(done_table)
         cycle += 1
 
-    return cycle, max_reorder_occupancy, commit_stall_cycles
+    return cycle, max_reorder_occupancy, commit_stall_cycles, mul_issues, add_issues
 
 
-def summarize(name: str, trace: List[int], max_iter: int) -> None:
-    c1, r1, s1 = simulate(trace, max_iter, 1)
-    c2, r2, s2 = simulate(trace, max_iter, 2)
-    speedup = c1 / c2 if c2 else 0.0
+def parse_csv_ints(text: str) -> List[int]:
+    return [int(part) for part in text.split(",") if part.strip()]
+
+
+def summarize(name: str, trace: List[int], max_iter: int,
+              contexts_list: Sequence[int], configs: Sequence[Tuple[int, int]]) -> None:
     avg_iter = sum(trace) / len(trace)
-    print(f"{name:28s} pixels={len(trace):6d} avg_iter={avg_iter:8.2f} ", end="")
-    print(f"1ctx={c1:10d} 2ctx={c2:10d} speedup={speedup:5.2f}x ", end="")
-    print(f"reorder_max={r2:4d} commit_wait={s2:8d}")
+    baseline = simulate(trace, max_iter, 4, 1, 1)[0]
+    print(f"\n{name}  pixels={len(trace)} avg_iter={avg_iter:.2f} baseline=4ctx/1M1A {baseline} cycles")
+    print("config contexts      cycles  speedup_vs_4ctx  reorder  commit_wait  mul_util  add_util")
+    for mul_units, add_units in configs:
+        for contexts_count in contexts_list:
+            cycles, reorder, stalls, mul_issues, add_issues = simulate(
+                trace, max_iter, contexts_count, mul_units, add_units
+            )
+            speedup = baseline / cycles if cycles else 0.0
+            mul_util = mul_issues / (cycles * mul_units) if cycles else 0.0
+            add_util = add_issues / (cycles * add_units) if cycles else 0.0
+            print(f"{mul_units}M{add_units}A {contexts_count:8d} {cycles:11d} {speedup:14.2f}x "
+                  f"{reorder:8d} {stalls:12d} {mul_util:8.1%} {add_util:8.1%}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Model 1-context vs 2-context worker scheduling")
+    parser = argparse.ArgumentParser(description="Model tagged multi-context Mandelbrot worker scheduling")
     parser.add_argument("--width", type=int, default=160)
     parser.add_argument("--height", type=int, default=120)
     parser.add_argument("--max-iter", type=int, default=256)
     parser.add_argument("--center", nargs=2, type=float, default=(-0.5, 0.0))
     parser.add_argument("--step", type=float, default=0.005)
     parser.add_argument("--pixels", type=int, default=4096)
+    parser.add_argument("--contexts", default="1,2,4,8,12,16,24,32",
+                        help="comma-separated context counts to model")
+    parser.add_argument("--configs", default="1x1,1x2,2x1,2x2",
+                        help="comma-separated FP unit configs such as 1x1,1x2,2x2")
     args = parser.parse_args()
 
-    print("2-context Mandelbrot worker cycle model")
-    print(f"PIPE_WAIT={PIPE_WAIT}, modeled latency={LATENCY} cycles")
-    print("name                         pixels avg_iter      1ctx       2ctx speedup reorder commit")
+    contexts_list = parse_csv_ints(args.contexts)
+    configs = []
+    for item in args.configs.split(","):
+        left, right = item.lower().split("x")
+        configs.append((int(left), int(right)))
+
+    print("Tagged Mandelbrot worker cycle model")
+    print(f"MUL_LAT={MUL_LAT}, ADD_LAT={ADD_LAT}")
+    print(f"contexts={contexts_list}")
+    print(f"configs={['%dM%dA' % cfg for cfg in configs]}")
 
     real_trace = mandelbrot_trace(args.width, args.height, args.max_iter,
                                   args.center[0], args.center[1], args.step)
-    summarize("real-small-frame", real_trace, args.max_iter)
+    summarize("real-small-frame", real_trace, args.max_iter, contexts_list, configs)
 
     for kind in [
         "uniform-short",
@@ -195,7 +234,8 @@ def main() -> None:
         "long-head-short-tail",
         "bands",
     ]:
-        summarize(kind, synthetic_trace(kind, args.pixels, args.max_iter), args.max_iter)
+        summarize(kind, synthetic_trace(kind, args.pixels, args.max_iter),
+                  args.max_iter, contexts_list, configs)
 
 
 if __name__ == "__main__":

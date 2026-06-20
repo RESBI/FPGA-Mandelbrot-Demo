@@ -110,7 +110,7 @@ module mandelbrot_multicore #(
                     .fifo_wr      (core_fifo_wr[i]),
                     .fifo_full    (core_fifo_full[i])
                 );
-            end else if (WORKER_CONTEXTS == 4 || WORKER_CONTEXTS == 8) begin : g_worker_kctx
+            end else if (WORKER_CONTEXTS == 4 || WORKER_CONTEXTS == 8 || WORKER_CONTEXTS == 16) begin : g_worker_kctx
                 mandelbrot_core_worker_kctx #(.CONTEXTS(WORKER_CONTEXTS)) u_worker (
                     .clk          (clk),
                     .rst          (rst),

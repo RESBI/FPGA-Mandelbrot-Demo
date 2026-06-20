@@ -939,6 +939,139 @@ If `1M+1A` with roughly 16 contexts is proven and transport is no longer the bot
 
 Only after that should `2M+2A` be considered. `2M+1A` gives no modeled gain over `1M+1A` because the adder remains the bottleneck, and `2M+2A` consumes most of the remaining DSP budget on the current device for only a small gain over `1M+2A` at 16 contexts.
 
+## Current Direct-200MHz 4ctx Baseline And Simulator Accuracy
+
+This chapter is intentionally separate from the historical analysis above. It starts from the architecture that is now validated and used as the default, then discusses how accurate the C pipeline simulator is for predicting architectural changes. The focus here is not UART or baud-rate limiting. The question is whether the simulator itself is accurate enough to rank context-count and FP-unit changes.
+
+Current validated baseline:
+
+| Item | Current value |
+|---|---:|
+| Target | XC7K70T |
+| Build entry | `build_fp64.tcl` |
+| Clocking | direct 200 MHz, `DIRECT_200MHZ=1` |
+| Worker | `mandelbrot_core_worker_kctx` |
+| Workers | 4 |
+| Contexts per worker | 4 |
+| FP units per worker | 1 multiplier + 1 adder |
+| Current model latency | `MUL_LAT=6`, `ADD_LAT=9` |
+| Issue structure | request-sliced issue: select request first, drive FP operands on the next cycle |
+| Current timing | `WNS=0.015ns`, `TNS=0.000ns`, `WHS=0.002ns`, `THS=0.000ns` |
+| Current utilization | 20288 LUT, 17202 FF, 37 DSP48E1, 9.5 BRAM tiles |
+
+### Simulator Changes For Accuracy Checking
+
+The simulators now model the current baseline directly and can compare the fast aggregate model against the exact scheduler:
+
+| File | Update |
+|---|---|
+| `../python/pipeline_2ctx_model.py` | Keeps the historical filename, but now supports arbitrary context counts, separate `MUL_LAT=6` / `ADD_LAT=9`, multiple multiplier/adder counts, and speedup versus current `4ctx 1M+1A`. |
+| `../tools/pipeline_sim.c` | Defaults now match current hardware: 4 contexts, 1 multiplier, 1 adder, `ADD_LAT=9`, `MUL_LAT=6`, 200 MHz. |
+| `../tools/pipeline_sim.c --compare-models` | Runs both the exact per-stage scheduler and the fast aggregate row model, then reports fast-model cycle error. |
+
+The exact model is slower but more faithful: it simulates context assignment, per-stage readiness, FP unit contention, row scheduling, and ordered commit. The fast aggregate model is useful for full-frame sweeps, but it collapses the row into aggregate latency and issue-pressure estimates. That collapse can be optimistic when iteration counts vary strongly within a row or when ordered commit stalls dominate.
+
+### Actual Board Performance Versus Current Compute Model
+
+The current board measurements are still useful as a sanity check for scale, but not as a baud-bound correction factor. The compute-only model intentionally excludes transport, host parsing, tile retries, and packet framing. The meaningful comparison is therefore: is the model in the same order of magnitude, and which scenes are likely dominated by modelled compute?
+
+| Scene | Compute-only model, current `4ctx 1M+1A` | Current 10-run board pps | Board/model | Main limiter |
+|---|---:|---:|---:|---|
+| Fast escape @128 | `3777807` | `413592.02` | `10.9%` | output/host dominated |
+| Standard @64 | `3507484` | `414046.70` | `11.8%` | output/host dominated |
+| Seahorse zoom @512 | `502530` | `273303.15` | `54.4%` | mixed compute/output |
+| Deep tendrils @8192 | `243640` | `162504.12` | `66.7%` | mostly compute-sensitive |
+| Deep mini-brot @8192 | `97224` | `65709.99` | `67.6%` | compute-sensitive |
+| Deep Seahorse @1024 | `227948` | `149325.97` | `65.5%` | mostly compute-sensitive |
+
+The board/model ratio varies widely, so it should not be folded into the simulator as a single correction factor. Instead, use board data to choose validation scenes: deep mini-brot is the most compute-sensitive board benchmark, while Seahorse-style mixed scenes are useful for stress-testing ordered commit and model accuracy.
+
+### Exact Versus Fast Model Accuracy
+
+The exact scheduler and fast aggregate model were compared on smaller frames where exact simulation is practical.
+
+| Scene/sample | Config | Exact cycles | Fast cycles | Fast error | Reading |
+|---|---|---:|---:|---:|---|
+| Standard small, `160x120`, `max_iter=256` | `4ctx 1M+1A` | `16295836` | `15927816` | `-2.26%` | Fast model is good for this relatively smooth sample. |
+| Seahorse small, `160x120`, `max_iter=512` | `4ctx 1M+1A` | `9862976` | `7891061` | `-19.99%` | Fast model is too optimistic; mixed iteration counts and ordered commit matter. |
+| Deep mini-brot small, `160x120`, `max_iter=8192` | `4ctx 1M+1A` | `32611832` | `32612159` | `0.001%` | Fast model is excellent for highly uniform deep compute. |
+
+The sweep comparison reinforces the pattern. On an `80x60` Seahorse sample, fast aggregate error grows with context count: `4ctx 1M+1A` is `-22.3%`, `8ctx 1M+1A` is `-36.7%`, and `16ctx 1M+2A` is `-49.7%`. The fast model overestimates benefits when more contexts expose more out-of-order completion and ordered-commit stalls. On an `80x60` deep mini-brot sample, the same comparison is much better through the practical range: `4ctx 1M+1A` is `0.002%`, `8ctx 1M+1A` is `-1.93%`, `16ctx 1M+1A` is `-0.02%`, and `16ctx 1M+2A` is `-4.62%`.
+
+### Accuracy-Corrected Reading Of Future Configurations
+
+For architecture ranking, use the exact scheduler where possible and treat the fast aggregate model as an upper bound for mixed scenes.
+
+| Workload type | Recommended model | Expected reliability |
+|---|---|---|
+| Uniform deep compute, such as deep mini-brot center samples | Fast aggregate is close; exact should still be used for final small-frame checks. | High accuracy through `8ctx`/`16ctx` practical range. |
+| Smooth standard views | Fast aggregate is usually close for current `4ctx`, but exact checks are still cheap at small sizes. | Moderate to high accuracy. |
+| Seahorse/mixed escape distribution | Exact scheduler should drive conclusions. | Fast aggregate is optimistic and becomes worse as context count rises. |
+| High-context, multi-unit designs | Exact scheduler required for representative small frames. | Fast aggregate should be treated only as an issue-limit upper bound. |
+
+Using the exact scheduler on the `80x60` deep mini-brot sample gives these relative compute predictions versus current `4ctx 1M+1A`:
+
+| Configuration | Exact speedup vs current `4ctx 1M+1A` | Interpretation |
+|---|---:|---|
+| `8ctx 1M+1A` | `1.96x` | Still the best next step; fast aggregate's `2.00x` is accurate here. |
+| `16ctx 1M+1A` | `2.85x` | Strong deep-compute gain; close to aggregate prediction. |
+| `16ctx 1M+2A` | `3.81x` | Second ADD becomes useful after enough contexts, but exact is below the ideal `4.00x`. |
+| `16ctx 2M+1A` | `2.82x` | Second MUL alone remains unattractive. |
+| `16ctx 2M+2A` | `4.00x` | Useful only after enough contexts and ADD capacity. |
+
+Using the exact scheduler on the `80x60` Seahorse sample gives a more conservative view:
+
+| Configuration | Exact speedup vs current `4ctx 1M+1A` | Interpretation |
+|---|---:|---|
+| `8ctx 1M+1A` | `1.63x` | Still useful, but far below the aggregate `2.00x` upper bound. |
+| `16ctx 1M+1A` | `2.34x` | Contexts help, but ordered commit and phase imbalance reduce scaling. |
+| `16ctx 1M+2A` | `2.59x` | Second ADD helps less than aggregate predicts. |
+| `16ctx 2M+1A` | `2.34x` | Second MUL alone still does not help. |
+| `16ctx 2M+2A` | `2.62x` | Multi-unit gains are limited by scheduling/commit behavior. |
+
+The practical prediction is therefore: `8ctx 1M+1A` remains the correct next RTL target, but expected gains should be stated as workload-dependent. Deep uniform scenes may approach `2x`; mixed Seahorse-like scenes may be closer to `1.6x` in the exact scheduler. `16ctx 1M+1A` is attractive after 8ctx works, but the exact model shows why adding units before fixing context scheduling and ordered-commit behavior is risky.
+
+### Direct 8ctx/16ctx RTL Attempt
+
+The existing generic K-context worker was tried directly at 8 and 16 contexts before designing a new lower-LUT structure. This was useful as a resource/timing feasibility check, but it did not produce a board-testable bitstream.
+
+| Candidate | RTL simulation | Build result | Resource/timing result | Board benchmark |
+|---|---|---|---|---|
+| `8ctx 1M+1A`, direct 200MHz | Worker-only PASS, multicore dynamic PASS (`1920` pixels) | Bitstream generated | `31830 / 41000` Slice LUTs (`77.63%`), `24548 / 82000` registers (`29.94%`), `65 / 240` DSP48E1; post-route physopt failed timing: `WNS=-1.030ns`, `TNS=-5092.551ns`, `15701` setup failing endpoints | Not run; timing-failing bitstreams are not programmed. |
+| `16ctx 1M+1A`, direct 200MHz | Worker-only PASS, multicore dynamic PASS (`1920` pixels) | Implementation stopped before placement | Synthesized design exceeds LUT capacity: `56273 / 41000` Slice LUTs (`137.25%`), `54849 / 41000` LUT-as-logic (`133.78%`), `39215 / 82000` registers (`47.82%`), `65 / 240` DSP48E1; placer DRC `UTLZ-1` | Not run; no placeable bitstream. |
+
+This confirms the earlier architectural warning: simply widening the generic context-array scoreboard is the wrong physical shape for XC7K70T at 200MHz. The model says 8ctx should help, and the RTL simulation says the behavior is plausible, but the current implementation shape creates too much wide context/control logic for timing. The 16ctx version is beyond the LUT budget outright.
+
+The next 8ctx attempt should therefore change structure, not just parameter value. In particular, it should reduce full-context scans, wide FP64 operand muxes, and arbitrary writeback muxing. A barrel/ring slot design or a small ready-queue design is more likely to preserve the compute benefit without producing the `-1ns` class timing failure seen in the direct 8ctx build.
+
+### Compute-Only Architecture Ranking
+
+The compute-only ranking is still useful for deciding what RTL shape to build:
+
+| Change from current baseline | Compute-only result | Interpretation |
+|---|---:|---|
+| `4ctx 1M+1A` -> `8ctx 1M+1A` | about `2.00x` | Best next step if it can be made timing-clean and lower-LUT than the current generic context array. |
+| `8ctx 1M+1A` -> `16ctx 1M+1A` | about `1.42x` additional | Still useful, but approaching the single-adder issue limit. |
+| `16ctx 1M+1A` -> `16ctx 1M+2A` | about `1.40x` additional | Second adder becomes useful only once enough contexts exist to feed it. |
+| `16ctx 1M+1A` -> `16ctx 2M+1A` | no modeled gain | A second multiplier alone is blocked by the 5 ADD issues per full iteration. |
+| `16ctx 1M+2A` -> `16ctx 2M+2A` | negligible in the aggregate model | The second multiplier is still not the first extra FP unit to add. |
+
+The operation mix explains this: one non-escaping Mandelbrot iteration needs 3 multiplier issues and 5 adder issues. With many independent contexts, the single adder becomes the first hard issue bottleneck. Extra multipliers do not help until adder capacity and context count are both high enough.
+
+### Recommended Direction From The Current Baseline
+
+The next RTL experiment should not be “add a second FP unit to the current 4ctx scoreboard.” The exact-vs-fast comparison points to this order:
+
+| Priority | Direction | Reason |
+|---:|---|---|
+| 1 | Build a lower-LUT 8ctx `1M+1A` worker | Exact model still predicts useful gains, and this does not add DSPs. |
+| 2 | Preserve request slicing | Current 200MHz closure depends on not putting context select, 64-bit operand muxing, and FPU input drive in one cycle. |
+| 3 | Avoid scaling the generic context-array scoreboard directly | Wide scans, wide FP64 muxes, and arbitrary writeback muxes are the likely LUT/timing problem. |
+| 4 | Try barrel/ring slots or a small ready queue | This should reduce wide combinational selection while keeping enough independent contexts in flight. |
+| 5 | Consider 12ctx/16ctx `1M+1A` after 8ctx closes timing | Exact model predicts strong deep-scene gains but lower mixed-scene scaling. |
+| 6 | Add a second ADD before a second MUL | `1M+2A` is the first useful multi-unit extension; `2M+1A` gives no modeled gain. |
+| 7 | Keep validating exact model against board data | Do not rely on fast aggregate predictions for mixed scenes or high-context multi-unit designs. |
+
 ## Practical Recommendation
 
 Recommended priority:

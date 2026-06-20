@@ -40,6 +40,7 @@ typedef struct {
     int verbose;
     int sweep;
     int exact;
+    int compare_models;
 } options_t;
 
 typedef struct {
@@ -69,17 +70,18 @@ static void usage(const char *prog) {
     printf("  --timeout SEC         Ignored, accepted for host CLI compatibility\n");
     printf("  --verify              Ignored, accepted for host CLI compatibility\n");
     printf("\nPipeline options:\n");
-    printf("  --contexts K          Pixel contexts per worker (default: 2)\n");
+    printf("  --contexts K          Pixel contexts per worker (default: 4)\n");
     printf("  --adders A            FP adders per worker (default: 1)\n");
     printf("  --multipliers M       FP multipliers per worker (default: 1)\n");
     printf("  --workers N           Worker count (default: 4)\n");
-    printf("  --add-lat N           Adder issue-to-result latency (default: 7)\n");
+    printf("  --add-lat N           Adder issue-to-result latency (default: 9)\n");
     printf("  --mul-lat N           Multiplier issue-to-result latency (default: 6)\n");
-    printf("  --clock-hz HZ         Compute clock in Hz (default: 100000000)\n");
+    printf("  --clock-hz HZ         Compute clock in Hz (default: 200000000)\n");
     printf("  --scheduler MODE      dynamic or static row assignment (default: dynamic)\n");
     printf("  --self-test           Run iteration-count checks and exit\n");
     printf("  --sweep               Run documented K/A/M configuration sweep\n");
     printf("  --exact               Use exact per-stage scheduler; intended for small frames\n");
+    printf("  --compare-models      Run exact and fast models and report fast-model error\n");
     printf("  --verbose             Print per-worker cycle totals\n");
 }
 
@@ -112,18 +114,19 @@ static void default_options(options_t *opt) {
     opt->center_re = -0.5;
     opt->center_im = 0.0;
     opt->step = 0.005;
-    opt->contexts = 2;
+    opt->contexts = 4;
     opt->adders = 1;
     opt->multipliers = 1;
     opt->workers = 4;
-    opt->add_lat = 7;
+    opt->add_lat = 9;
     opt->mul_lat = 6;
-    opt->clock_hz = 100000000.0;
+    opt->clock_hz = 200000000.0;
     opt->scheduler = SCHED_DYNAMIC;
     opt->self_test = 0;
     opt->verbose = 0;
     opt->sweep = 0;
     opt->exact = 0;
+    opt->compare_models = 0;
 }
 
 static void parse_args(int argc, char **argv, options_t *opt) {
@@ -188,6 +191,8 @@ static void parse_args(int argc, char **argv, options_t *opt) {
             opt->sweep = 1;
         } else if (!strcmp(a, "--exact")) {
             opt->exact = 1;
+        } else if (!strcmp(a, "--compare-models")) {
+            opt->compare_models = 1;
         } else if (!strcmp(a, "--verbose")) {
             opt->verbose = 1;
         } else {
@@ -547,6 +552,11 @@ static uint64_t simulate_selected(const options_t *opt, const int *frame_iters) 
     return opt->exact ? simulate_frame_from_iters(opt, frame_iters) : simulate_frame_fast(opt, frame_iters);
 }
 
+static double percent_error(uint64_t value, uint64_t reference) {
+    if (!reference) return 0.0;
+    return 100.0 * ((double)value - (double)reference) / (double)reference;
+}
+
 static void print_result(const options_t *opt, uint64_t cycles, uint64_t iter_sum) {
     uint64_t pixels = (uint64_t)opt->width * (uint64_t)opt->height;
     double avg_iter = pixels ? (double)iter_sum / (double)pixels : 0.0;
@@ -567,6 +577,30 @@ static void print_result(const options_t *opt, uint64_t cycles, uint64_t iter_su
     printf("iterations_per_cycle=%.9f\n", iter_per_cycle);
     printf("model=%s\n", opt->exact ? "exact_stage_scheduler" : "fast_aggregate_row_model");
     printf("note=compute_only_uart_ceiling_ignored\n");
+}
+
+static void print_compare_result(const options_t *opt, const int *frame_iters, uint64_t iter_sum) {
+    options_t exact = *opt;
+    options_t fast = *opt;
+    exact.exact = 1;
+    fast.exact = 0;
+
+    uint64_t exact_cycles = simulate_frame_from_iters(&exact, frame_iters);
+    uint64_t fast_cycles = simulate_frame_fast(&fast, frame_iters);
+    uint64_t pixels = (uint64_t)opt->width * (uint64_t)opt->height;
+    double exact_pps = ((double)pixels * opt->clock_hz) / (double)exact_cycles;
+    double fast_pps = ((double)pixels * opt->clock_hz) / (double)fast_cycles;
+
+    printf("Mandelbrot compute pipeline model comparison\n");
+    printf("image=%dx%d pixels=%" PRIu64 " center=(%.17g,%.17g) step=%.17g max_iter=%d\n",
+           opt->width, opt->height, pixels, opt->center_re, opt->center_im, opt->step, opt->max_iter);
+    printf("workers=%d contexts=%d adders=%d multipliers=%d add_lat=%d mul_lat=%d scheduler=%s\n",
+           opt->workers, opt->contexts, opt->adders, opt->multipliers, opt->add_lat, opt->mul_lat,
+           opt->scheduler == SCHED_DYNAMIC ? "dynamic" : "static");
+    printf("iter_sum=%" PRIu64 "\n", iter_sum);
+    printf("exact_cycles=%" PRIu64 " exact_pps=%.3f\n", exact_cycles, exact_pps);
+    printf("fast_cycles=%" PRIu64 " fast_pps=%.3f\n", fast_cycles, fast_pps);
+    printf("fast_cycle_error_pct=%.3f\n", percent_error(fast_cycles, exact_cycles));
 }
 
 typedef struct {
@@ -599,30 +633,63 @@ static void run_sweep(const options_t *base, const int *frame_iters, uint64_t it
     uint64_t pixels = (uint64_t)base->width * (uint64_t)base->height;
     double avg_iter = pixels ? (double)iter_sum / (double)pixels : 0.0;
     uint64_t baseline_cycles = 0;
+    uint64_t current_cycles = 0;
 
     printf("Mandelbrot compute pipeline sweep\n");
     printf("image=%dx%d pixels=%" PRIu64 " center=(%.17g,%.17g) step=%.17g max_iter=%d avg_iter=%.6f\n",
            base->width, base->height, pixels, base->center_re, base->center_im,
            base->step, base->max_iter, avg_iter);
     printf("workers=%d add_lat=%d mul_lat=%d clock_hz=%.3f scheduler=%s note=compute_only_uart_ceiling_ignored\n",
-           base->workers, base->add_lat, base->mul_lat, base->clock_hz,
-           base->scheduler == SCHED_DYNAMIC ? "dynamic" : "static");
+            base->workers, base->add_lat, base->mul_lat, base->clock_hz,
+            base->scheduler == SCHED_DYNAMIC ? "dynamic" : "static");
     printf("model=%s\n", base->exact ? "exact_stage_scheduler" : "fast_aggregate_row_model");
-    printf("case,contexts,multipliers,adders,cycles,compute_pps,speedup_vs_1ctx\n");
+    options_t current = *base;
+    current.contexts = 4;
+    current.multipliers = 1;
+    current.adders = 1;
+    if (base->compare_models) current.exact = 1;
+    current_cycles = simulate_selected(&current, frame_iters);
+
+    if (base->compare_models) {
+        printf("case,contexts,multipliers,adders,exact_cycles,fast_cycles,fast_error_pct,exact_pps,fast_pps,speedup_vs_current_4ctx_1M1A_exact\n");
+    } else {
+        printf("case,contexts,multipliers,adders,cycles,compute_pps,speedup_vs_1ctx,speedup_vs_current_4ctx_1M1A\n");
+    }
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         options_t opt = *base;
         opt.contexts = cases[i].contexts;
         opt.adders = cases[i].adders;
         opt.multipliers = cases[i].multipliers;
+        if (base->compare_models) {
+            options_t exact = opt;
+            options_t fast = opt;
+            exact.exact = 1;
+            fast.exact = 0;
+            uint64_t exact_cycles = simulate_frame_from_iters(&exact, frame_iters);
+            uint64_t fast_cycles = simulate_frame_fast(&fast, frame_iters);
+            if (i == 0) baseline_cycles = exact_cycles;
+            double exact_seconds = (double)exact_cycles / opt.clock_hz;
+            double fast_seconds = (double)fast_cycles / opt.clock_hz;
+            double exact_pps = exact_seconds > 0.0 ? (double)pixels / exact_seconds : 0.0;
+            double fast_pps = fast_seconds > 0.0 ? (double)pixels / fast_seconds : 0.0;
+            double speedup_current = exact_cycles ? (double)current_cycles / (double)exact_cycles : 0.0;
+            printf("%s,%d,%d,%d,%" PRIu64 ",%" PRIu64 ",%.3f,%.3f,%.3f,%.3f\n",
+                   cases[i].name, opt.contexts, opt.multipliers, opt.adders,
+                   exact_cycles, fast_cycles, percent_error(fast_cycles, exact_cycles),
+                   exact_pps, fast_pps, speedup_current);
+            continue;
+        }
+
         uint64_t cycles = simulate_selected(&opt, frame_iters);
         if (i == 0) baseline_cycles = cycles;
         double seconds = (double)cycles / opt.clock_hz;
         double pps = seconds > 0.0 ? (double)pixels / seconds : 0.0;
         double speedup = cycles ? (double)baseline_cycles / (double)cycles : 0.0;
-        printf("%s,%d,%d,%d,%" PRIu64 ",%.3f,%.3f\n",
+        double speedup_current = cycles ? (double)current_cycles / (double)cycles : 0.0;
+        printf("%s,%d,%d,%d,%" PRIu64 ",%.3f,%.3f,%.3f\n",
                cases[i].name, opt.contexts, opt.multipliers, opt.adders,
-               cycles, pps, speedup);
+               cycles, pps, speedup, speedup_current);
     }
 }
 
@@ -635,6 +702,8 @@ int main(int argc, char **argv) {
     int *frame_iters = generate_frame_iters(&opt, &iter_sum);
     if (opt.sweep) {
         run_sweep(&opt, frame_iters, iter_sum);
+    } else if (opt.compare_models) {
+        print_compare_result(&opt, frame_iters, iter_sum);
     } else {
         uint64_t cycles = simulate_selected(&opt, frame_iters);
         print_result(&opt, cycles, iter_sum);

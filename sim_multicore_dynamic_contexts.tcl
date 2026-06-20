@@ -2,6 +2,7 @@ set part_name "xc7k70tfbg676-1"
 set rtl_dir   "./rtl"
 
 set WORKER_CONTEXTS 4
+set CORE_COUNT 4
 set TEST_ROWS 12
 set TEST_COLS 16
 set TEST_MAX_ITER 64
@@ -12,6 +13,8 @@ for {set arg_idx 0} {$arg_idx < [llength $argv]} {incr arg_idx} {
     set arg [lindex $argv $arg_idx]
     if {[string match "WORKER_CONTEXTS=*" $arg]} {
         set WORKER_CONTEXTS [string range $arg [string length "WORKER_CONTEXTS="] end]
+    } elseif {[string match "CORE_COUNT=*" $arg]} {
+        set CORE_COUNT [string range $arg [string length "CORE_COUNT="] end]
     } elseif {[string match "ROWS=*" $arg]} {
         set TEST_ROWS [string range $arg [string length "ROWS="] end]
     } elseif {[string match "COLS=*" $arg]} {
@@ -25,6 +28,9 @@ for {set arg_idx 0} {$arg_idx < [llength $argv]} {incr arg_idx} {
     } elseif {$arg == "WORKER_CONTEXTS" && $arg_idx + 1 < [llength $argv]} {
         incr arg_idx
         set WORKER_CONTEXTS [lindex $argv $arg_idx]
+    } elseif {$arg == "CORE_COUNT" && $arg_idx + 1 < [llength $argv]} {
+        incr arg_idx
+        set CORE_COUNT [lindex $argv $arg_idx]
     } elseif {$arg == "ROWS" && $arg_idx + 1 < [llength $argv]} {
         incr arg_idx
         set TEST_ROWS [lindex $argv $arg_idx]
@@ -44,26 +50,29 @@ for {set arg_idx 0} {$arg_idx < [llength $argv]} {incr arg_idx} {
         if {$positional_idx == 0} {
             set WORKER_CONTEXTS $arg
         } elseif {$positional_idx == 1} {
-            set TEST_ROWS $arg
+            set CORE_COUNT $arg
         } elseif {$positional_idx == 2} {
-            set TEST_COLS $arg
+            set TEST_ROWS $arg
         } elseif {$positional_idx == 3} {
-            set TEST_MAX_ITER $arg
+            set TEST_COLS $arg
         } elseif {$positional_idx == 4} {
-            set CORE_FIFO_DEPTH $arg
+            set TEST_MAX_ITER $arg
         } elseif {$positional_idx == 5} {
+            set CORE_FIFO_DEPTH $arg
+        } elseif {$positional_idx == 6} {
             set TIMEOUT_CYCLES $arg
         }
         incr positional_idx
     }
 }
 
-set proj_name "multicore_dynamic_ctx${WORKER_CONTEXTS}_sim"
-set proj_dir  "./multicore_dynamic_ctx${WORKER_CONTEXTS}_sim_proj"
+set proj_name "multicore_dynamic_c${CORE_COUNT}_ctx${WORKER_CONTEXTS}_sim"
+set proj_dir  "./multicore_dynamic_c${CORE_COUNT}_ctx${WORKER_CONTEXTS}_sim_proj"
 
 puts "========================================"
 puts " Dynamic multicore simulation"
 puts " WORKER_CONTEXTS=$WORKER_CONTEXTS"
+puts " CORE_COUNT=$CORE_COUNT"
 puts " ROWS=$TEST_ROWS COLS=$TEST_COLS MAX_ITER=$TEST_MAX_ITER CORE_FIFO_DEPTH=$CORE_FIFO_DEPTH"
 puts "========================================"
 
@@ -75,7 +84,7 @@ add_files -fileset sim_1 ./sim/tb_multicore_dynamic.v
 set_property include_dirs $rtl_dir [get_filesets sources_1]
 set_property include_dirs $rtl_dir [get_filesets sim_1]
 set_property top tb_multicore_dynamic [get_filesets sim_1]
-set_property generic "WORKER_CONTEXTS=$WORKER_CONTEXTS TEST_ROWS=$TEST_ROWS TEST_COLS=$TEST_COLS TEST_MAX_ITER=$TEST_MAX_ITER CORE_FIFO_DEPTH=$CORE_FIFO_DEPTH TIMEOUT_CYCLES=$TIMEOUT_CYCLES" [get_filesets sim_1]
+set_property generic "CORE_COUNT=$CORE_COUNT WORKER_CONTEXTS=$WORKER_CONTEXTS TEST_ROWS=$TEST_ROWS TEST_COLS=$TEST_COLS TEST_MAX_ITER=$TEST_MAX_ITER CORE_FIFO_DEPTH=$CORE_FIFO_DEPTH TIMEOUT_CYCLES=$TIMEOUT_CYCLES" [get_filesets sim_1]
 
 launch_simulation -simset sim_1 -mode behavioral
 restart

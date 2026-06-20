@@ -146,8 +146,9 @@ def parse_host_text(text, returncode, elapsed, scene, run_idx, log_path, output_
 def run_one(args, scene, run_idx):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     scene_slug = slug(scene["name"])
-    log_path = OUT_DIR / f"{scene_slug}_run{run_idx}.log"
-    output_path = OUT_DIR / f"{scene_slug}_run{run_idx}.png"
+    prefix = f"{args.run_tag}_" if args.run_tag else ""
+    log_path = OUT_DIR / f"{prefix}{scene_slug}_run{run_idx}.log"
+    output_path = OUT_DIR / f"{prefix}{scene_slug}_run{run_idx}.png"
     cmd = [
         sys.executable,
         str(HOST),
@@ -219,6 +220,8 @@ def summarize(results, args):
     lines.append(f"- Host tile: `{args.tile_width}x{args.tile_height}`")
     lines.append(f"- Tile retries: `{args.tile_retries}`")
     lines.append(f"- UART baud: `12000000`")
+    if args.run_tag:
+        lines.append(f"- Run tag: `{args.run_tag}`")
     lines.append("")
     lines.append("## Summary")
     lines.append("")
@@ -252,7 +255,7 @@ def summarize(results, args):
         log_rel = r["log"].relative_to(ROOT).as_posix()
         lines.append(f"| {r['scene']} | {r['run']} | {status} | {r['retry_events']} | `{fmt(r['fpga_time'])}` | `{fmt(r['pps'], 2)}` | {match} | `{log_rel}` |")
 
-    out = OUT_DIR / "host_tile_stability_results.md"
+    out = OUT_DIR / args.summary_name
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out
 
@@ -266,6 +269,8 @@ def main():
     parser.add_argument("--tile-retries", type=int, default=3)
     parser.add_argument("--extra-timeout", type=int, default=7200)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--run-tag", default="", help="Prefix logs and images to preserve earlier runs")
+    parser.add_argument("--summary-name", default="host_tile_stability_results.md", help="Markdown summary filename under the benchmark directory")
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -273,8 +278,9 @@ def main():
     for scene in SCENES_1080P:
         scene_slug = slug(scene["name"])
         for run_idx in range(1, args.runs + 1):
-            log_path = OUT_DIR / f"{scene_slug}_run{run_idx}.log"
-            output_path = OUT_DIR / f"{scene_slug}_run{run_idx}.png"
+            prefix = f"{args.run_tag}_" if args.run_tag else ""
+            log_path = OUT_DIR / f"{prefix}{scene_slug}_run{run_idx}.log"
+            output_path = OUT_DIR / f"{prefix}{scene_slug}_run{run_idx}.png"
             if args.resume and log_path.exists():
                 text = log_path.read_text(encoding="utf-8", errors="replace")
                 returncode = 1 if "Traceback (most recent call last)" in text else 0

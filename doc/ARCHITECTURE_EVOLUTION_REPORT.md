@@ -17,6 +17,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Implemented 4-core design | [MULTICORE_4CORE_ARCHITECTURE.md](MULTICORE_4CORE_ARCHITECTURE.md) | Final 4-core architecture, modular dispatch/merge boundary, validation, 1080p benchmark results. |
 | Abandoned N-context worker experiments | [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](CONTEXT_WORKER_ARCHITECTURE_REPORT.md) | Generic scoreboard 4/8ctx and ring/lookahead experiments; behavioral pass but not deployable on xc7z010. |
 | Direct 200 MHz closure | [200MHZ_ATTEMPT_REPORT.md](200MHZ_ATTEMPT_REPORT.md) | 4ctx direct-clock timing closure, functional failure analysis, request slicing, tag-latency fix, and hardware benchmark. |
+| Worker-count scaling | [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md) | 6/8-worker build, timing, 6-worker 100MHz hardware benchmark, and 8-worker XVC/JTAG blocker. |
 | Historical notes | [DESIGN.md](DESIGN.md) | Earlier design notes and historical context. |
 
 ## Final Current State

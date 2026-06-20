@@ -2,6 +2,7 @@
 `include "fp_defines.vh"
 
 module tb_multicore_dynamic #(
+    parameter CORE_COUNT = 4,
     parameter WORKER_CONTEXTS = 2,
     parameter TEST_ROWS = 12,
     parameter TEST_COLS = 16,
@@ -33,7 +34,7 @@ module tb_multicore_dynamic #(
     reg [15:0] expected;
 
     mandelbrot_multicore #(
-        .CORE_COUNT(4),
+        .CORE_COUNT(CORE_COUNT),
         .CORE_FIFO_DEPTH(CORE_FIFO_DEPTH),
         .SCHED_MODE(1),
         .DYNAMIC_OWNER_DEPTH(64),
