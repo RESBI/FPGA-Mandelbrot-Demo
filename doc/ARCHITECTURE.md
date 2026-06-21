@@ -77,6 +77,19 @@ The main modules are:
 | `fp_add` | `../rtl/fp_add.v` | Parameterized FP adder/subtractor. |
 | `queue` | `../rtl/queue.v` | Synchronous FIFO for per-core and output buffering. |
 | `tx_ctrl` | `../rtl/tx_ctrl.v` | Builds response header, drains FIFO, transmits pixels and checksum. |
+| `debug_leds` | `../rtl/debug_leds.v` | Maps internal debug/status signals to board LEDs and J1 UART activity indicators. |
+
+The debug LED mapping is intentionally isolated from `top.v` in `debug_leds.v`. The current XC7K70T build drives board LEDs `LED[3]` through `LED[14]` using the board's natural numbering, and reserves the J1 bi-color LED for UART activity:
+
+| Output | Meaning |
+|---|---|
+| `LED[3]` | Heartbeat (`heartbeat[25]`) |
+| `LED[4]` | Reset active |
+| `LED[5:12]` | Progress counter bits `[0:7]` |
+| `LED[13]` | One-cycle registered UART RX activity pulse |
+| `LED[14]` | One-cycle registered UART TX activity pulse |
+| `J1_GREEN` | Stretched UART RX activity |
+| `J1_RED` | Stretched UART TX activity |
 
 ## 3. Command And Response Protocol
 

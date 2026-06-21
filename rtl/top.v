@@ -14,7 +14,9 @@ module top #(
     output wire uart_tx,
     input  wire CLK_200_P,
     input  wire CLK_200_N,
-    output wire [7:0] LED
+    output wire [14:3] LED,
+    output wire J1_GREEN,
+    output wire J1_RED
 );
 
     wire sys_clk;
@@ -257,16 +259,19 @@ module top #(
 
     reg [31:0] heartbeat = 32'd0;
     reg [7:0] progress = 8'd0;
-    reg rx_seen = 1'b0;
-    reg tx_seen = 1'b0;
+    reg [14:3] debug_led_state = 12'd0;
+    reg debug_uart_rx_pulse = 1'b0;
+    reg debug_uart_tx_pulse = 1'b0;
+
+    wire tx_accepted = tx_en && tx_avail;
 
     always @(posedge sys_clk) begin
         heartbeat <= heartbeat + 1'b1;
+        debug_uart_rx_pulse <= 1'b0;
+        debug_uart_tx_pulse <= 1'b0;
 
         if (rst) begin
             progress <= 8'd0;
-            rx_seen <= 1'b0;
-            tx_seen <= 1'b0;
         end else begin
             if (compute_start)
                 progress <= 8'd0;
@@ -274,19 +279,34 @@ module top #(
                 progress <= progress + 1'b1;
 
             if (rx_avail)
-                rx_seen <= ~rx_seen;
-            if (tx_en && tx_avail)
-                tx_seen <= ~tx_seen;
+                debug_uart_rx_pulse <= 1'b1;
+            if (tx_accepted)
+                debug_uart_tx_pulse <= 1'b1;
         end
+
+        debug_led_state[3]  <= heartbeat[25];
+        debug_led_state[4]  <= rst;
+        debug_led_state[5]  <= progress[0];
+        debug_led_state[6]  <= progress[1];
+        debug_led_state[7]  <= progress[2];
+        debug_led_state[8]  <= progress[3];
+        debug_led_state[9]  <= progress[4];
+        debug_led_state[10] <= progress[5];
+        debug_led_state[11] <= progress[6];
+        debug_led_state[12] <= progress[7];
+        debug_led_state[13] <= debug_uart_rx_pulse;
+        debug_led_state[14] <= debug_uart_tx_pulse;
     end
 
-    assign LED[0] = heartbeat[25];
-    assign LED[1] = rst;
-    assign LED[2] = compute_busy;
-    assign LED[3] = fifo_rd_avail;
-    assign LED[4] = rx_seen;
-    assign LED[5] = tx_seen;
-    assign LED[6] = progress[6];
-    assign LED[7] = progress[7];
+    debug_leds u_debug_leds (
+        .clk           (sys_clk),
+        .rst           (rst),
+        .led_state     (debug_led_state),
+        .uart_rx_pulse (debug_uart_rx_pulse),
+        .uart_tx_pulse (debug_uart_tx_pulse),
+        .LED           (LED),
+        .J1_GREEN      (J1_GREEN),
+        .J1_RED        (J1_RED)
+    );
 
 endmodule

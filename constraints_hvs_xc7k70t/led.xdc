@@ -7,6 +7,13 @@ set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN F25} [get_ports {LED[7]}]
 set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN G25} [get_ports {LED[8]}]
 set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN E25} [get_ports {LED[9]}]
 set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN E26} [get_ports {LED[10]}]
+
+set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN J26} [get_ports {LED[11]}]
+set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN J25} [get_ports {LED[12]}]
+set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN H26} [get_ports {LED[13]}]
+set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN G26} [get_ports {LED[14]}]
+
+
 # active low
 set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN E18} [get_ports J1_GREEN]
 set_property -dict { IOSTANDARD LVCMOS33 PACKAGE_PIN E17} [get_ports J1_RED]

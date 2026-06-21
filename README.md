@@ -220,11 +220,13 @@ The current 4-context worker uses delayed operation/context tags to route FP res
 
 ### Hardware
 
+![HVS-XC7K70T-Board](doc/IMG_20260613_160513.jpg)
+
 - XC7K70T board using `xc7k70tfbg676-1` and the pins in `constraints_hvs_xc7k70t/mandelbrot_top.xdc`.
 - JTAG connection served by Vivado Hardware Server at `127.0.0.1:3122`, with the CH347 XVC target at `127.0.0.1:2542`.
 - FT232HL UART connection wired to FPGA `uart_rx=J23` and `uart_tx=H24`.
 - 200 MHz differential input clock on `CLK_200_P/N`.
-- Eight active-high LEDs available as `LED[7:0]`.
+- Twelve active-high board debug LEDs available as `LED[3]` through `LED[14]`, plus J1 bi-color LED UART activity indicators.
 
 Current pin constraints:
 
@@ -234,7 +236,21 @@ Current pin constraints:
 | `CLK_200_N` | `AB10` | `LVDS` |
 | `uart_rx` | `J23` | `LVCMOS33` |
 | `uart_tx` | `H24` | `LVCMOS33` |
-| `LED[0:7]` | `D25,C21,D26,C26,F25,G25,E25,E26` | `LVCMOS33` |
+| `LED[3:14]` | `D25,C21,D26,C26,F25,G25,E25,E26,J26,J25,H26,G26` | `LVCMOS33` |
+| `J1_GREEN` | `E18` | `LVCMOS33` |
+| `J1_RED` | `E17` | `LVCMOS33` |
+
+Debug LED planning is isolated in `rtl/debug_leds.v`, so status assignment can be changed without touching the compute or UART datapaths. The current default mapping is:
+
+| Output | Meaning |
+|---|---|
+| `LED[3]` | Heartbeat (`heartbeat[25]`) |
+| `LED[4]` | Reset active |
+| `LED[5:12]` | Progress counter bits `[0:7]` |
+| `LED[13]` | One-cycle registered UART RX activity pulse |
+| `LED[14]` | One-cycle registered UART TX activity pulse |
+| `J1_GREEN` | Stretched UART RX activity |
+| `J1_RED` | Stretched UART TX activity |
 
 If your board uses different pins, edit `constraints_hvs_xc7k70t/mandelbrot_top.xdc` before building.
 
