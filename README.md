@@ -204,7 +204,7 @@ The 2-context worker uses delayed operation/context tags to route FP results bac
 
 ### Hardware
 
-[EBAZ4205 (Zynq-7010) board I used](doc/IMG_20251019_134119.jpg)
+[EBAZ4205-Zynq-7010](doc/IMG_20251019_134119.jpg)
 
 - Xilinx Zynq-7010 board matching the pins in `constraints/constraint.xdc`.
 - JTAG connection supported by Vivado Hardware Manager.
