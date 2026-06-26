@@ -39,24 +39,59 @@ Accepted bitstream path after `build_fp64.tcl`:
 fp64_zu4ev_proj/mandelbrot_fp64.runs/impl_1/top.bit
 ```
 
-## Architecture Overview
+## System Diagram
 
 The FPGA is a streaming accelerator rather than a framebuffer renderer. The host sends one command per image or tile. The FPGA computes pixels and streams iteration counts back immediately; it does not store a full 1080p frame on chip.
 
 ```mermaid
 flowchart LR
-    PC[Host PC<br/>Python CLI] -->|UART command<br/>center, step, size, max_iter| RX[uart_rx]
-    RX --> CMD[cmd_parser]
-    CMD --> CORE[mandelbrot_multicore<br/>12 workers<br/>8 contexts each]
-    CORE --> FIFO[output queue<br/>uint16 pixels]
-    FIFO --> TXC[tx_ctrl<br/>RT/TD/TE packets]
-    TXC --> TX[uart_tx]
-    TX -->|UART tiled response| PC
+    PC[Host PC<br/>Python CLI] -->|UART command<br/>center, step, size, max_iter| RX[UART RX]
+    RX --> Parser[cmd_parser]
+    Parser -->|image parameters| Core[mandelbrot_multicore<br/>12 FP64 workers<br/>8 contexts each]
+    Core -->|raster-order uint16 stream| FIFO[queue<br/>1024 x 16-bit]
+    FIFO --> TXC[tx_ctrl]
+    TXC --> TX[UART TX]
+    TX -->|RT/TD/TE tiled response<br/>pixels + checksum| PC
 
-    CORE --> DISP[work_dispatch_dynamic_rows]
-    DISP --> W[12 x mandelbrot_core_worker_kctx]
-    W --> COLLECT[raster_collect_dynamic_rows]
-    COLLECT --> CORE
+    Core --> SCHED[dynamic row dispatcher]
+    SCHED --> W0[worker 0<br/>8 pixel contexts]
+    SCHED --> W1[worker 1<br/>8 pixel contexts]
+    SCHED --> W2[worker 2<br/>8 pixel contexts]
+    SCHED --> WN[...]
+    SCHED --> W11[worker 11<br/>8 pixel contexts]
+```
+
+## RTL Structure
+
+```mermaid
+flowchart TB
+    subgraph TOP[top.v]
+        CLK[sys_clk<br/>24.576 MHz single-ended] --> BUFG[BUFG<br/>sys_clk domain]
+        BUFG --> CE[fp_ce generator<br/>FP_CE_DIV=1]
+        RST[rst_n + reset counter]
+
+        URX[uart_rx<br/>6.144 Mbaud<br/>3-sample majority RX]
+        UTX[uart_tx<br/>6.144 Mbaud<br/>fractional NCO]
+        CMD[cmd_parser]
+        CORE[mandelbrot_multicore<br/>CFG_CORE_COUNT=12<br/>CFG_WORKER_CONTEXTS=8]
+        FIFO[queue<br/>CFG_OUTPUT_FIFO_DEPTH x 16-bit]
+        TXC[tx_ctrl<br/>RT/TD/TE tiled response]
+
+        URX --> CMD
+        CMD --> CORE
+        CE --> CORE
+        CORE --> FIFO
+        FIFO --> TXC
+        TXC --> UTX
+    end
+
+    subgraph MC[Inside mandelbrot_multicore]
+        CORE --> DISP[work_dispatch_dynamic_rows<br/>default SCHED_MODE=1]
+        CORE --> MERGE[raster_collect_dynamic_rows]
+        DISP --> WORKERS[12 x mandelbrot_core_worker_kctx]
+        WORKERS --> CFIFO[per-core FIFOs]
+        CFIFO --> MERGE
+    end
 ```
 
 The important architectural choices are:
@@ -240,3 +275,19 @@ The `14/4` experiment showed that fewer contexts plus more workers is not better
 Deep-scene exact SW match can be below 100% because FP64 boundary pixels differ slightly between the RTL arithmetic and the software reference. Transport pass and full-frame receipt are the board-level stability criteria for those views.
 
 The accepted high-baud mode requires `--tx-byte-gap 0.00005`. Without command pacing, the short host-to-FPGA command burst can be corrupted at `6.144 Mbaud`, even though echo-only tests pass.
+
+## License
+
+This project is released under the MIT License unless otherwise stated. You may use, modify, and distribute the RTL, scripts, and documentation under the terms of the MIT License.
+
+If you redistribute this project, keep the license notice and clearly mark any substantial modifications.
+
+## Software And LLM Assistance Disclosure
+
+This project was developed with software and AI-assisted engineering tools, including:
+
+- OpenCode for code editing, repository operations, and project automation.
+- DeepSeek v4 Pro for AI-assisted reasoning and implementation support.
+- GPT 5.5 for AI-assisted reasoning, documentation, debugging, and implementation support.
+
+All generated code, documentation, hardware behavior, timing closure, and board-level validation remain the responsibility of the project maintainer. The included RTL and scripts should be reviewed and tested for any target board or deployment environment.
