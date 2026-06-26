@@ -1,18 +1,21 @@
 set bit_file [lindex $argv 0]
 if {$bit_file == ""} {
-    # Auto-detect: try the common build outputs first.
-    set bit_files [glob -nocomplain "./fp64_proj/mandelbrot_fp64.runs/impl_1/*.bit"]
+    # Auto-detect: try ZU4EV build outputs first.
+    set bit_files [glob -nocomplain "./fp64_zu4ev_proj/mandelbrot_fp64.runs/impl_1/*.bit"]
     if {[llength $bit_files] == 0} {
-        set bit_files [glob -nocomplain "./fp64_dynamic_proj/mandelbrot_fp64_dynamic.runs/impl_1/*.bit"]
+        set bit_files [glob -nocomplain "./fp64_dynamic_zu4ev_proj/mandelbrot_fp64_dynamic.runs/impl_1/*.bit"]
     }
     if {[llength $bit_files] == 0} {
-        set bit_files [glob -nocomplain "./uart_echo_proj/uart_echo.runs/impl_1/*.bit"]
+        set bit_files [glob -nocomplain "./uart_echo_zu4ev_proj/uart_echo.runs/impl_1/*.bit"]
     }
     if {[llength $bit_files] == 0} {
-        set bit_files [glob -nocomplain "./uart_tx_pattern_proj/uart_tx_pattern.runs/impl_1/*.bit"]
+        set bit_files [glob -nocomplain "./uart_tx_pattern_zu4ev_proj/uart_tx_pattern.runs/impl_1/*.bit"]
     }
     if {[llength $bit_files] == 0} {
-        set bit_files [glob -nocomplain "./fp128_proj/mandelbrot_fp128.runs/impl_1/*.bit"]
+        set bit_files [glob -nocomplain "./fp128_zu4ev_proj/mandelbrot_fp128.runs/impl_1/*.bit"]
+    }
+    if {[llength $bit_files] == 0} {
+        set bit_files [glob -nocomplain "./fp64_ctx*_zu4ev_proj/mandelbrot_fp64_ctx*.runs/impl_1/*.bit"]
     }
     if {[llength $bit_files] > 0} {
         set bit_file [lindex $bit_files 0]
@@ -28,7 +31,7 @@ puts " Bitstream: $bit_file"
 puts "========================================"
 
 open_hw_manager
-connect_hw_server -url 127.0.0.1:3122 -allow_non_jtag
+connect_hw_server
 
 set hw_targets [get_hw_targets]
 if {[llength $hw_targets] == 0} {
@@ -37,7 +40,7 @@ if {[llength $hw_targets] == 0} {
     exit 1
 }
 
-open_hw_target -xvc_url 127.0.0.1:2542
+open_hw_target
 set hw_devices [get_hw_devices]
 if {[llength $hw_devices] == 0} {
     puts "ERROR: No hardware devices found"
@@ -48,13 +51,13 @@ if {[llength $hw_devices] == 0} {
 puts "Found [llength $hw_devices] device(s)"
 set hw_device ""
 foreach dev $hw_devices {
-    if {[string match "*xc7k70t*" $dev]} {
+    if {[string match "*xczu4*" $dev]} {
         set hw_device $dev
         break
     }
 }
 if {$hw_device == ""} {
-    puts "ERROR: No xc7k70t device found"
+    puts "ERROR: No xczu4 device found"
     puts "Available: $hw_devices"
     close_hw_manager
     exit 1

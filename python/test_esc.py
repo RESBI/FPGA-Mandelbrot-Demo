@@ -1,6 +1,6 @@
 import serial, struct, time
 
-s = serial.Serial('COM9', 576000, timeout=5)
+s = serial.Serial('COM6', 576000, timeout=5)
 
 # Test points that should all escape at iter=1 (|c|^2 > 4)
 tests = [(2.5, 0), (2.6, 0), (3.0, 0), (4.1, 0)]

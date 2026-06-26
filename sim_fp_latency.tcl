@@ -1,4 +1,8 @@
-set part_name "xc7k70tfbg676-1"
+if {[info exists ::env(VIVADO_PART)]} {
+    set part_name $::env(VIVADO_PART)
+} else {
+    set part_name "xczu4ev-sfvc784-1-i"
+}
 set rtl_dir   "./rtl"
 
 create_project -force fp_latency_sim ./fp_latency_sim_proj -part $part_name

@@ -1,6 +1,6 @@
 param(
     [string]$VivadoBin = "Z:\Softwares\Xilinx\Vivado\2024.2\bin",
-    [int]$Port = 3122,
+    [int]$Port = 3121,
     [string]$HostName = "127.0.0.1"
 )
 

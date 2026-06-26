@@ -30,7 +30,7 @@ def send_point(ser, cr, ci, max_iter, step):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port', default='COM9')
+    parser.add_argument('--port', default='COM6')
     parser.add_argument('--max-iter', type=int, default=256)
     parser.add_argument('--pixel', action='append', help='Image pixel as y,x for the 160x120 default view')
     args = parser.parse_args()

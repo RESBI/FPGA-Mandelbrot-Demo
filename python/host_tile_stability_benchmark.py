@@ -153,6 +153,7 @@ def run_one(args, scene, run_idx):
         sys.executable,
         str(HOST),
         "--port", args.port,
+        "--baud", str(args.baud),
         "--width", str(scene["width"]),
         "--height", str(scene["height"]),
         "--max-iter", str(scene["max_iter"]),
@@ -163,6 +164,7 @@ def run_one(args, scene, run_idx):
         "--tile-width", str(args.tile_width),
         "--tile-height", str(args.tile_height),
         "--tile-retries", str(args.tile_retries),
+        "--tx-byte-gap", str(args.tx_byte_gap),
         "--quiet",
         "--output", str(output_path),
     ]
@@ -214,12 +216,13 @@ def fmt(value, digits=3):
 
 def summarize(results, args):
     lines = []
-    lines.append("# Host-Tiled 12 Mbaud Stability Benchmark")
+    lines.append("# Host-Tiled UART Stability Benchmark")
     lines.append("")
     lines.append(f"- Runs per scene: `{args.runs}`")
     lines.append(f"- Host tile: `{args.tile_width}x{args.tile_height}`")
     lines.append(f"- Tile retries: `{args.tile_retries}`")
-    lines.append(f"- UART baud: `12000000`")
+    lines.append(f"- UART baud: `{args.baud}`")
+    lines.append(f"- TX byte gap: `{args.tx_byte_gap}` seconds")
     if args.run_tag:
         lines.append(f"- Run tag: `{args.run_tag}`")
     lines.append("")
@@ -262,11 +265,13 @@ def summarize(results, args):
 
 def main():
     parser = argparse.ArgumentParser(description="Repeated host-tiled 1080p stability benchmark")
-    parser.add_argument("--port", default="COM9")
+    parser.add_argument("--port", default="COM6")
+    parser.add_argument("--baud", type=int, default=6144000)
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--tile-width", type=int, default=1920)
     parser.add_argument("--tile-height", type=int, default=120)
     parser.add_argument("--tile-retries", type=int, default=3)
+    parser.add_argument("--tx-byte-gap", type=float, default=0.00005)
     parser.add_argument("--extra-timeout", type=int, default=7200)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run-tag", default="", help="Prefix logs and images to preserve earlier runs")

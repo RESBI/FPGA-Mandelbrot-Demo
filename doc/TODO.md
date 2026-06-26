@@ -1,18 +1,20 @@
 # TODO - Mandelbrot FPGA Accelerator
 
-This file tracks current work after the default FP64, 4-worker, dynamic-row, 12 Mbaud, tiled-response design. Historical single-core, 460800/576000 baud, and large-frame bring-up work is documented in `ARCHITECTURE_EVOLUTION_REPORT.md` and related reports.
+This file tracks current work after the VMC_RTSB ZU4EV FP64, 12-worker, 8-context, dynamic-row, 6.144 Mbaud tiled-response design. Historical single-core, XC7K70T, 460800/576000 baud, 12 Mbaud, and large-frame bring-up work is documented in `ARCHITECTURE_EVOLUTION_REPORT.md` and related reports.
 
 ## Current Default Configuration
 
 | Item | Current Value |
 |---|---:|
 | Precision | FP64 |
-| System clock | 100 MHz |
-| Worker count | 4 |
-| Worker contexts | 4 per worker |
+| FPGA target | VMC_RTSB ZU4EV, `xczu4ev-sfvc784-1-i` |
+| System clock | 24.576 MHz |
+| Worker count | 12 |
+| Worker contexts | 8 per worker |
 | Scheduler | Dynamic idle-core row scheduler |
 | Dynamic owner depth | 4096 rows per hardware command |
-| UART baudrate | 12000000 |
+| UART baudrate | 6144000 |
+| Host TX byte gap | 0.00005 s |
 | Response protocol | `RT` / `TD` / `TE` tiled response |
 | RTL response tile width | 64 columns |
 | Host tiling | Enabled by default |
@@ -20,26 +22,26 @@ This file tracks current work after the default FP64, 4-worker, dynamic-row, 12 
 | Default compute tile | host tile itself, width capped at 4096 |
 | Retry unit | One hardware compute tile |
 | Soft reset command | `RST!RST!` |
-| Default serial port | `COM9` |
+| Default serial port | `COM6` |
 
 Current default routed timing/resource snapshot:
 
 | Metric | Value |
 |---|---:|
-| WNS | 0.583 ns |
+| WNS | 25.024 ns |
 | TNS | 0.000 ns |
-| WHS | 0.039 ns |
+| WHS | 0.010 ns |
 | THS | 0.000 ns |
-| Slice LUTs | 36367 / 41000, 88.70% |
-| Slice Registers | 19149 / 82000, 23.35% |
-| DSP48E1 | 37 / 240, 15.42% |
-| Block RAM Tile | 9.5 / 135, 7.04% |
+| CLB LUTs | 84949 / 87840, 96.71% |
+| CLB Registers | 71408 / 175680, 40.65% |
+| DSPs | 121 / 728, 16.62% |
+| Block RAM Tile | 25.5 / 128, 19.92% |
 
 ## Completed Recently
 
 - Centralized RTL defaults in `../rtl/config.vh`.
 - Switched UART RX/TX to a 32-bit fractional-NCO baud generator.
-- Set current default host/RTL baudrate to 12 Mbaud.
+- Set current default host/RTL baudrate to 6.144 Mbaud with `50 us` host command byte gap.
 - Added `RT` / `TD` / `TE` tiled response framing in `../rtl/tx_ctrl.v`.
 - Added host parser support for both legacy `RK` and tiled response protocols.
 - Made host-driven tiling the default and kept `--full-frame` for the old single-command path.
@@ -53,7 +55,7 @@ Current default routed timing/resource snapshot:
 - Added `tx_ctrl` tiled response simulations for `4096x120` and host-tiled `4096x4096` behavior.
 - Added `cmd_parser` soft reset simulation.
 - Validated dynamic multicore simulation after reset changes.
-- Made the validated XC7K70T 4-context worker the default: timing clean at `WNS=0.583ns`, `160x120` verify PASS, and six 1080p scenes PASS.
+- Made the validated ZU4EV `12 workers / 8 contexts` build the default: timing clean at `WNS=25.024ns`, `160x120` verify PASS, and six 1080p scenes PASS with zero retries.
 - Documented current resource/timing, 4/8-context experiments, pipeline-bubble analysis, and Chinese documentation mirrors.
 
 ## P0 - Reliability And Correctness
@@ -128,7 +130,7 @@ Tasks:
 
 ### Better Transport Than UART
 
-12 Mbaud UART works but still has USB/driver byte-slip risk during long transfers.
+6.144 Mbaud UART works on the current board only with command-byte pacing; a stronger transport would remove the command-burst margin issue and improve payload throughput.
 
 Tasks:
 
@@ -138,7 +140,7 @@ Tasks:
 
 ### Low-LUT Higher-Context Worker
 
-Generic 4ctx now passes board validation on XC7K70T but uses `88.70%` of LUTs. Generic 8ctx exceeded xc7z010 capacity historically and should not be scaled up without a lower-LUT structure.
+Generic 8ctx now passes board validation on ZU4EV at 12 workers but uses `96.71%` of CLB LUTs. Future scaling needs a lower-LUT worker/control structure rather than simply adding more identical workers.
 
 Tasks:
 
@@ -210,19 +212,19 @@ vivado -mode batch -source sim_cmd_parser_soft_reset.tcl
 Small board smoke:
 
 ```bash
-python python\mandelbrot_host.py --verify --width 160 --height 120 --max-iter 256 --output python\verify_160x120.png
+python python\mandelbrot_host.py --port COM6 --baud 6144000 --tx-byte-gap 0.00005 --verify --width 160 --height 120 --max-iter 128 --center -0.5 0.0 --step 0.005 --tile-width 160 --tile-height 120 --output python\verify_160x120.png
 ```
 
 Recommended 1080p transport smoke:
 
 ```bash
-python python\mandelbrot_host.py --port COM9 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_transport_smoke.png
+python python\mandelbrot_host.py --port COM6 --baud 6144000 --tx-byte-gap 0.00005 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 900 --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_transport_smoke.png
 ```
 
 Large logical image smoke, no software verification:
 
 ```bash
-python python\mandelbrot_host.py --port COM9 --width 4096 --height 4096 --max-iter 8192 --center -0.743643887037151 0.13182590420533 --step 1.2e-09 --timeout 3600 --quiet --output python\hw_4096x4096_smoke.png
+python python\mandelbrot_host.py --port COM6 --baud 6144000 --tx-byte-gap 0.00005 --width 4096 --height 4096 --max-iter 8192 --center -0.743643887037151 0.13182590420533 --step 1.2e-09 --timeout 3600 --quiet --output python\hw_4096x4096_smoke.png
 ```
 
 ## Release Checklist

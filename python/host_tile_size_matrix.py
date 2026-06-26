@@ -159,7 +159,7 @@ def summarize(results):
 
 def main():
     parser = argparse.ArgumentParser(description="Host tile size matrix benchmark")
-    parser.add_argument("--port", default="COM9")
+    parser.add_argument("--port", default="COM6")
     parser.add_argument("--tile-retries", type=int, default=3)
     parser.add_argument("--extra-timeout", type=int, default=7200)
     parser.add_argument("--resume", action="store_true")

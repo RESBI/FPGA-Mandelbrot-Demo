@@ -6,7 +6,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 
 | Stage | Report | Scope |
 |---|---|---|
-| Detailed current architecture | [ARCHITECTURE.md](ARCHITECTURE.md) | Full ../RTL/software architecture, protocol, verification, timing, and current performance. |
+| Detailed current architecture | [ARCHITECTURE.md](ARCHITECTURE.md) | Current VMC_RTSB ZU4EV 24.576 MHz architecture, protocol, verification, timing, and performance. |
 | 100 MHz timing closure | [PERFORMANCE_100MHZ.md](PERFORMANCE_100MHZ.md) | FP64 pipeline changes, 50 MHz effective to true 100 MHz migration, timing and performance impact. |
 | UART baudrate optimization | [UART_BAUDRATE_BENCHMARK.md](UART_BAUDRATE_BENCHMARK.md) | CP2102 baudrate tests, 500000 baud selection, UART-limited benchmark impact. |
 | UART baudrate deep investigation | [UART_BAUDRATE_INVESTIGATION.md](UART_BAUDRATE_INVESTIGATION.md) | Raw-probe integer-divider tests, TX-only isolation, 576000 candidate. |
@@ -18,31 +18,32 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Abandoned N-context worker experiments | [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](CONTEXT_WORKER_ARCHITECTURE_REPORT.md) | Generic scoreboard 4/8ctx and ring/lookahead experiments; behavioral pass but not deployable on xc7z010. |
 | Direct 200 MHz closure | [200MHZ_ATTEMPT_REPORT.md](200MHZ_ATTEMPT_REPORT.md) | 4ctx direct-clock timing closure, functional failure analysis, request slicing, tag-latency fix, and hardware benchmark. |
 | Worker-count scaling | [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md) | 6/8-worker build, timing, 6-worker 200MHz timing fix, and hardware benchmark comparison. |
+| ZU4EV 24.576 MHz optimization | [VMC_RTSB_ZU4EV_24576_OPT_REPORT.md](VMC_RTSB_ZU4EV_24576_OPT_REPORT.md) | VMC_RTSB ZU4EV migration, UART sweep, low-clock PPC/resource search, and final six-scene benchmark. |
 | Historical notes | [DESIGN.md](DESIGN.md) | Earlier design notes and historical context. |
 
 ## Final Current State
 
 | Item | Current Value |
 |---|---:|
-| FPGA | Xilinx Kintex-7 `xc7k70tfbg676-1` |
-| Board clock input | 200 MHz differential `CLK_200_P/N` |
-| Internal system clock | Direct 200 MHz (`DIRECT_200MHZ=1`) |
+| FPGA | AMD/Xilinx Zynq UltraScale+ `xczu4ev-sfvc784-1-i` |
+| Board clock input | Single-ended `sys_clk`, `24.576 MHz` |
+| Internal system clock | Direct `24.576 MHz` BUFG |
 | Floating-point mode | FP64 |
-| Compute cores | 4 |
-| Worker contexts | 4 per worker |
+| Compute cores | 12 workers |
+| Worker contexts | 8 per worker |
 | Default scheduler | Dynamic idle-core rows |
-| Mandelbrot workers | 6 |
-| Effective worker rate | 200 MHz per worker, `FP_CE_DIV=1` |
-| 100MHz reference build | `build_fp64_100mhz.tcl` |
-| UART | 12000000 baud, 8N1, fractional-NCO RX/TX |
-| Host serial port default | `COM9` |
-| Programming link | Vivado `hw_server` at `127.0.0.1:3122`, CH347 XVC at `127.0.0.1:2542` |
+| Mandelbrot workers | 12 |
+| Effective worker rate | 24.576 MHz per worker, `FP_CE_DIV=1` |
+| Parameter sweep build | `build_fp64_zu4ev_24576_sweep.tcl` |
+| UART | 6,144,000 baud, 8N1, 50 us host TX byte gap for commands |
+| Host serial port default | `COM6` |
+| Programming link | Vivado hardware auto-connect, no XVC required |
 | Host protocol | Unchanged raster-order response stream |
 | Pixel format | 16-bit little-endian iteration count |
 | Largest validated frame | 1920x1080 |
-| Current XC7K70T board build status | Full FP64 bitstream builds cleanly |
-| Current XC7K70T timing/utilization | `WNS=0.015ns`, `TNS=0.000ns`; 20288 / 41000 Slice LUTs, 17202 / 82000 registers, 37 / 240 DSP48E1, 9.5 / 135 BRAM tiles |
-| 100MHz reference timing/utilization | `WNS=0.583ns`, `TNS=0.000ns`; 36367 / 41000 Slice LUTs, 19149 / 82000 registers, 37 / 240 DSP48E1, 9.5 / 135 BRAM tiles |
+| Current ZU4EV build status | Full FP64 bitstream builds cleanly and passes six 1080p scenes |
+| Current ZU4EV timing/utilization | `WNS=25.024ns`, `TNS=0.000ns`; 84,949 / 87,840 CLB LUTs, 71,408 / 175,680 registers, 121 / 728 DSPs, 25.5 / 128 BRAM tiles |
+| Historical XC7K70T reference | Direct-200MHz 6-worker/4-context and 100MHz 4-context results are retained below for comparison. |
 
 ## Initial Architecture Design Thinking
 
@@ -854,4 +855,91 @@ The project evolved through a pragmatic sequence:
 14. Close and validate direct-200MHz 4ctx using request-sliced FPU issue and corrected tag latency.
 15. Replicate the validated 4ctx worker to six direct-200MHz workers, fix route-dominated dispatcher/worker-control timing, and make the timing-clean 6-worker result the default.
 
-The current design preserves the original host command protocol while raising the default transport to 12 Mbaud, adding packetized response parsing, and making the validated direct-200MHz 6-worker 4ctx build the default. Fast 1080p scenes now reach hundreds of thousands of pixels per second, and the 6-worker default raises deep mini-brot from the 100MHz `44.146s` reference to a 10-run mean of `20.963s` (`2.106x`). Relative to the previous 4-worker direct-200MHz default, the 6-worker build improves compute-heavy scenes by about `1.38x-1.51x`. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is sequence-numbered retransmission, a stronger transport, or a lower-route-pressure compute structure that preserves the 4ctx/200MHz performance direction without relying on wider generic context arrays or overfilling the device with identical workers.
+## Stage 15: VMC_RTSB ZU4EV 24.576 MHz Port And Low-Clock Optimization
+
+The next board target changed the optimization problem. VMC_RTSB ZU4EV provides a single-ended `24.576 MHz` clock instead of the previous XC7K70T 200 MHz differential clock. Timing closure became easy, but raw frequency dropped by `8.138x`, so the design had to recover performance through more low-frequency parallelism and a better practical UART mode.
+
+### Board And Clock Migration
+
+The top-level clock path was simplified for the new board:
+
+| Item | Previous XC7K70T branch | Current ZU4EV branch |
+|---|---|---|
+| FPGA part | `xc7k70tfbg676-1` | `xczu4ev-sfvc784-1-i` |
+| Clock input | Differential `CLK_200_P/N` | Single-ended `sys_clk` |
+| System clock | Direct 200 MHz | Direct 24.576 MHz BUFG |
+| Constraint directory | `constraints_hvs_xc7k70t` | `constraints_vmc_rtsb_zu4ev` |
+| Programming | CH347/XVC era scripts | Vivado hardware auto-connect |
+| Host COM default | `COM9` historically | `COM6` |
+
+The accepted default is now `build_fp64.tcl`, which builds `12 workers / 8 contexts` for ZU4EV at `24.576 MHz`. Parameter sweeps use `build_fp64_zu4ev_24576_sweep.tcl`. The older `build_fp64_200mhz.tcl` remains only as a compatibility wrapper.
+
+### UART Requalification
+
+The FT232HL clock is `120 MHz` and supports fractional baud generation. The FPGA clock is `24.576 MHz`, so baud choices were screened by FPGA clocks per bit and then validated on the full Mandelbrot project body.
+
+| Baud | FPGA clocks/bit | Full project result |
+|---:|---:|---|
+| `1,536,000` | 16 | Echo bring-up passed. |
+| `3,072,000` | 8 | Full project passed small-frame and six-scene 1080p. |
+| `4,096,000` | 6 | Echo-only passed; full project without command pacing did not respond. |
+| `6,144,000` | 4 | Accepted with `50 us` host TX byte gap. |
+| `8,192,000` | 3 | Echo failed. |
+
+The high-baud root cause was not FPGA-to-host payload transmission. It was PC-to-FPGA continuous command burst reception. Echo tests sent one byte and waited for one echo, which added a large implicit gap. The real FP64 command is a 33-byte burst. A burst-capture diagnostic showed dropped/corrupted command bytes at high baud with no gap. Adding `--tx-byte-gap 0.00005` made command reception stable while preserving the full `6.144 Mbaud` payload return path.
+
+### Low-Frequency Parallelism Search
+
+The first obvious idea was to compensate for the lower clock by adding many workers. `24 workers / 8 contexts` was functionally valid in simulation but failed implementation resource DRC: LUT-as-logic demand was far above the ZU4EV limit. The accepted resource envelope became `12 workers / 8 contexts`.
+
+| Candidate | RTL simulation | Build/timing | Board result | Decision |
+|---|---|---|---|---|
+| `24 workers / 8 contexts` | PASS small simulation | Fails resource DRC | Not programmed | Rejected, LUT over-utilized. |
+| `12 workers / 8 contexts` | PASS large simulation | WNS `25.024 ns`, bitstream | Six 1080p scenes PASS, 0 retries | Accepted. |
+| `14 workers / 4 contexts` | PASS large simulation | WNS `30.896 ns`, bitstream | Six 1080p scenes PASS, one retry, slower than 12/8 | Rejected as final default. |
+
+The `14/4` candidate was important because it tested whether fewer contexts plus more workers improved pixels per cycle at low frequency. It used fewer LUTs and more DSPs than `12/8`, but it was slower across all six board scenes. The result showed that four contexts do not hide the current FP64 worker latency well enough; occupancy was more valuable than two extra under-fed workers.
+
+### Pipeline Retiming Check
+
+Worker FPU tag latencies were parameterized as `CFG_WORKER_MUL_LAT` and `CFG_WORKER_ADD_LAT` to test whether low-frequency operation could safely consume FPU results earlier.
+
+| Latency override | Large RTL result |
+|---|---|
+| `MUL_LAT=6`, `ADD_LAT=9` | PASS, accepted default. |
+| `MUL_LAT=4`, `ADD_LAT=7` | FAIL, 1902 mismatches. |
+| `MUL_LAT=5`, `ADD_LAT=8` | FAIL, 1902 mismatches. |
+| `MUL_LAT=6`, `ADD_LAT=8` | FAIL, 1902 mismatches. |
+| `MUL_LAT=5`, `ADD_LAT=9` | FAIL, 1902 mismatches. |
+
+Conclusion: the existing `fp_mul`/`fp_add` output alignment requires `6/9` tags in the accepted worker. A real latency reduction would require restructuring the FPU pipelines and adding dedicated FPU latency scoreboards, then repeating simulation/build/board validation. It was not a safe late-stage optimization.
+
+### Final ZU4EV Performance Point
+
+Accepted routed usage for `12/8 @ 24.576 MHz / 6.144 Mbaud`:
+
+| Resource/timing | Value |
+|---|---:|
+| WNS | `25.024 ns` |
+| TNS | `0.000 ns` |
+| WHS | `0.010 ns` |
+| CLB LUTs | `84,949 / 87,840 = 96.71%` |
+| LUT as Logic | `81,937 / 87,840 = 93.28%` |
+| CLB Registers | `71,408 / 175,680 = 40.65%` |
+| Block RAM Tile | `25.5 / 128 = 19.92%` |
+| DSPs | `121 / 728 = 16.62%` |
+
+Final six-scene 1080p result, all with `--verify` and `1920x120` host tiles:
+
+| Scene | Transport | Retries | FPGA s | Pixels/s |
+|---|---:|---:|---:|---:|
+| fast escape @128 | PASS | 0 | `9.587` | `216,288.01` |
+| standard @64 | PASS | 0 | `9.622` | `215,498.75` |
+| Seahorse zoom @512 | PASS | 0 | `15.192` | `136,492.42` |
+| deep tendrils @8192 | PASS | 0 | `27.377` | `75,742.33` |
+| deep mini-brot @8192 | PASS | 0 | `71.977` | `28,809.10` |
+| deep Seahorse @1024 | PASS | 0 | `31.128` | `66,614.27` |
+
+The detailed ZU4EV report is [VMC_RTSB_ZU4EV_24576_OPT_REPORT.md](VMC_RTSB_ZU4EV_24576_OPT_REPORT.md). The architecture entry point is now [ARCHITECTURE.md](ARCHITECTURE.md), which describes the current ZU4EV 24.576 MHz design rather than the historical XC7K70T direct-200MHz design.
+
+The current design preserves the original host command and raster-response contract, but the active default is now the VMC_RTSB ZU4EV `24.576 MHz` build. The accepted `12 workers / 8 contexts` point trades the old high-clock strategy for low-clock occupancy and higher worker count, while the UART path uses `6.144 Mbaud` with command-byte pacing to keep full-frame transfer reliable. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is either a stronger transport/protocol with sequence IDs and retransmission, or a lower-LUT worker/FPU structure that can improve occupancy without overfilling the ZU4EV LUT fabric.

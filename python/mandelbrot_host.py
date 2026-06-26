@@ -23,8 +23,8 @@ import argparse
 import os
 import colorsys
 
-PORT = "COM9"
-BAUD = 12000000
+PORT = "COM6"
+BAUD = 6144000
 TIMEOUT = 180.0
 DEFAULT_DYNAMIC_OWNER_DEPTH = 4096
 DEFAULT_MAX_HOST_BYTES = 512 * 1024 * 1024
@@ -36,10 +36,10 @@ SOFT_RESET_COMMAND = b"RST!RST!"
 QUIET_PROGRESS_BAR_WIDTH = 28
 
 
-def estimate_uart_seconds(width, height):
+def estimate_uart_seconds(width, height, baud=BAUD):
     # UART is 8N1, so every payload byte costs 10 serial bits.
     response_bytes = 6 + width * height * 2 + 1
-    return response_bytes * 10.0 / BAUD
+    return response_bytes * 10.0 / baud
 
 
 def configure_host_tiling(args):
@@ -61,7 +61,7 @@ def configure_host_tiling(args):
 def validate_request(args):
     pixels = args.width * args.height
     data_bytes = pixels * 2
-    est_seconds = estimate_uart_seconds(args.width, args.height)
+    est_seconds = estimate_uart_seconds(args.width, args.height, args.baud)
 
     if args.width <= 0 or args.height <= 0:
         print("ERROR: width and height must be positive")
@@ -111,7 +111,7 @@ def validate_request(args):
         print("  Use a smaller frame, implement streaming output, or pass --force-large-frame knowingly.")
         sys.exit(1)
 
-    print(f"Estimated UART payload time at {BAUD} baud: {est_seconds:.1f}s")
+    print(f"Estimated UART payload time at {args.baud} baud: {est_seconds:.1f}s")
 
 
 def print_quiet_progress(done_compute, total_compute, host_index, host_total, current_task, final=False):
@@ -238,13 +238,24 @@ def float_to_fp128(val):
 #  FPGA Communication
 # ============================================================
 class MandelbrotFPGA:
-    def __init__(self, port=PORT, baud=BAUD, timeout=TIMEOUT, verbose=True):
+    def __init__(self, port=PORT, baud=BAUD, timeout=TIMEOUT, verbose=True, tx_byte_gap=0.0):
         self.ser = serial.Serial(port, baud, timeout=timeout)
         self.verbose = verbose
+        self.tx_byte_gap = tx_byte_gap
 
     def close(self):
         if self.ser:
             self.ser.close()
+
+    def write_command_bytes(self, payload):
+        if self.tx_byte_gap > 0:
+            for byte in payload:
+                self.ser.write(bytes([byte]))
+                self.ser.flush()
+                time.sleep(self.tx_byte_gap)
+        else:
+            self.ser.write(payload)
+            self.ser.flush()
 
     def send_command(self, center_re, center_im, step, max_iter, width, height, mode='fp64'):
         precision = 0 if mode == 'fp64' else 1
@@ -278,8 +289,7 @@ class MandelbrotFPGA:
                   f"center=({center_re},{center_im}), step={step}, mode={mode}")
             print(f"Command: {len(payload)} bytes")
         self.ser.reset_input_buffer()
-        self.ser.write(payload)
-        self.ser.flush()
+        self.write_command_bytes(payload)
 
     def soft_reset(self, drain_before=True, drain_after=True):
         if drain_before:
@@ -664,8 +674,12 @@ def main():
                         help="Also compute in software and compare")
     parser.add_argument("--port", type=str, default=PORT,
                         help=f"Serial port (default: {PORT})")
+    parser.add_argument("--baud", type=int, default=BAUD,
+                        help=f"UART baud rate (default: {BAUD})")
     parser.add_argument("--timeout", type=float, default=TIMEOUT,
                         help=f"Serial timeout in seconds (default: {TIMEOUT})")
+    parser.add_argument("--tx-byte-gap", type=float, default=0.0,
+                        help="Delay in seconds between command bytes sent from host to FPGA")
     parser.add_argument("--force-large-frame", action="store_true",
                         help="Bypass host-side guards for very large frames; use only with a matching bitstream")
     parser.add_argument("--full-frame", action="store_true",
@@ -693,7 +707,7 @@ def main():
     configure_host_tiling(args)
 
     if args.soft_reset:
-        fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
+        fpga = MandelbrotFPGA(port=args.port, baud=args.baud, timeout=args.timeout, verbose=not args.quiet)
         try:
             fpga.soft_reset()
         finally:
@@ -711,6 +725,9 @@ def main():
     print(f" Step: {args.step}")
     print(f" Max iterations: {args.max_iter}")
     print(f" Image: {args.width}x{args.height}")
+    print(f" UART baud: {args.baud}")
+    if args.tx_byte_gap > 0:
+        print(f" TX byte gap: {args.tx_byte_gap}s")
     if args.format != "txt":
         print(f" Palette: {args.palette}")
     if args.host_tiling:
@@ -721,7 +738,8 @@ def main():
         print(" Host tiles: disabled (--full-frame)")
     print("=" * 50)
 
-    fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
+    fpga = MandelbrotFPGA(port=args.port, baud=args.baud, timeout=args.timeout,
+                          verbose=not args.quiet, tx_byte_gap=args.tx_byte_gap)
     try:
         total_pixels = args.width * args.height
         t0 = time.perf_counter()

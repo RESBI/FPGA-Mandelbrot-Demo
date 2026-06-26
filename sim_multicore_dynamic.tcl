@@ -1,4 +1,8 @@
-set part_name "xc7k70tfbg676-1"
+if {[info exists ::env(VIVADO_PART)]} {
+    set part_name $::env(VIVADO_PART)
+} else {
+    set part_name "xczu4ev-sfvc784-1-i"
+}
 set proj_name "multicore_dynamic_sim"
 set proj_dir  "./multicore_dynamic_sim_proj"
 set rtl_dir   "./rtl"

@@ -2,7 +2,7 @@
 """FT232H/FT232HL UART baud sweep helper.
 
 The script patches UART BAUD/CLOCKS_PER_BIT, builds/programs either the TX-only
-pattern design or the full Mandelbrot design, then runs a serial check on COM9.
+pattern design or the full Mandelbrot design, then runs a serial check on COM6.
 It is intentionally simple and serial: only one process owns the port at a time.
 """
 
@@ -14,7 +14,8 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-VIVADO = r"Z:\Softwares\Xilinx\Vivado\2020.2\bin\vivado.bat"
+VIVADO = r"Z:\Softwares\Xilinx\Vivado\2024.2\bin\vivado.bat"
+CLK_HZ = 24_576_000.0
 UART_RX = ROOT / "rtl" / "uart_rx.v"
 UART_TX = ROOT / "rtl" / "uart_tx.v"
 CONFIG = ROOT / "rtl" / "config.vh"
@@ -30,7 +31,7 @@ def patch_text(path, pattern, repl):
 
 
 def set_baud(baud):
-    approx_cpb = max(1, round(100_000_000.0 / baud))
+    approx_cpb = max(1, round(CLK_HZ / baud))
     patch_text(CONFIG, r"`define CFG_UART_BAUD \d+", f"`define CFG_UART_BAUD {baud}")
     patch_text(UART_RX, r"parameter CLOCKS_PER_BIT = CLK_HZ / BAUD|parameter CLOCKS_PER_BIT = \d+", "parameter CLOCKS_PER_BIT = CLK_HZ / BAUD")
     patch_text(UART_TX, r"parameter CLOCKS_PER_BIT = CLK_HZ / BAUD|parameter CLOCKS_PER_BIT = \d+", "parameter CLOCKS_PER_BIT = CLK_HZ / BAUD")
@@ -39,7 +40,7 @@ def set_baud(baud):
 
 
 def set_cpb(cpb):
-    baud = round(100_000_000.0 / cpb)
+    baud = round(CLK_HZ / cpb)
     return set_baud(baud)
 
 
@@ -55,21 +56,21 @@ def run(cmd, timeout):
 def build_and_program_tx():
     if run([VIVADO, "-mode", "batch", "-source", "build_uart_tx_pattern.tcl"], 600).returncode != 0:
         return False
-    bit = ROOT / "uart_tx_pattern_proj" / "uart_tx_pattern.runs" / "impl_1" / "uart_tx_pattern_top.bit"
+    bit = ROOT / "uart_tx_pattern_zu4ev_proj" / "uart_tx_pattern.runs" / "impl_1" / "uart_tx_pattern_top.bit"
     return run([VIVADO, "-mode", "batch", "-source", "program.tcl", "-tclargs", bit], 180).returncode == 0
 
 
 def build_and_program_full():
     if run([VIVADO, "-mode", "batch", "-source", "build_fp64.tcl"], 900).returncode != 0:
         return False
-    bit = ROOT / "fp64_proj" / "mandelbrot_fp64.runs" / "impl_1" / "top.bit"
+    bit = ROOT / "fp64_zu4ev_proj" / "mandelbrot_fp64.runs" / "impl_1" / "top.bit"
     return run([VIVADO, "-mode", "batch", "-source", "program.tcl", "-tclargs", bit], 180).returncode == 0
 
 
 def build_and_program_echo():
     if run([VIVADO, "-mode", "batch", "-source", "build_uart_echo.tcl"], 600).returncode != 0:
         return False
-    bit = ROOT / "uart_echo_proj" / "uart_echo.runs" / "impl_1" / "uart_echo_top.bit"
+    bit = ROOT / "uart_echo_zu4ev_proj" / "uart_echo.runs" / "impl_1" / "uart_echo_top.bit"
     return run([VIVADO, "-mode", "batch", "-source", "program.tcl", "-tclargs", bit], 180).returncode == 0
 
 
@@ -96,8 +97,8 @@ def main():
     ap = argparse.ArgumentParser()
     baud_group = ap.add_mutually_exclusive_group(required=True)
     baud_group.add_argument("--baud", type=int, help="target UART baud for fractional generator")
-    baud_group.add_argument("--cpb", type=int, help="100 MHz clocks per UART bit, converted to nearest baud")
-    ap.add_argument("--port", default="COM9")
+    baud_group.add_argument("--cpb", type=int, help="24.576 MHz clocks per UART bit, converted to nearest baud")
+    ap.add_argument("--port", default="COM6")
     ap.add_argument("--mode", choices=["tx", "echo", "full"], default="tx")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--no-program", action="store_true")
@@ -109,7 +110,7 @@ def main():
         approx_cpb = set_baud(baud)
         print(f"baud={baud} approx_integer_cpb={approx_cpb}")
     else:
-        baud = round(100_000_000.0 / args.cpb)
+        baud = round(CLK_HZ / args.cpb)
         approx_cpb = set_cpb(args.cpb)
         print(f"cpb={args.cpb} baud={baud} approx_integer_cpb={approx_cpb}")
 

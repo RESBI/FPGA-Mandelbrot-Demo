@@ -1,8 +1,8 @@
-set part_name "xc7k70tfbg676-1"
+set part_name "xczu4ev-sfvc784-1-i"
 set proj_name "mandelbrot_fp64_static"
-set proj_dir  "./fp64_static_proj"
+set proj_dir  "./fp64_static_zu4ev_proj"
 set rtl_dir   "./rtl"
-set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
+set xdc_file  "./constraints_vmc_rtsb_zu4ev/led.xdc"
 
 puts "========================================"
 puts " Mandelbrot FP64 Static Scheduler Build"
@@ -15,7 +15,7 @@ set_property target_language Verilog [current_project]
 
 add_files -fileset sources_1 [glob $rtl_dir/*.v]
 set_property top top [current_fileset]
-set_property generic {SCHED_MODE=0 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=1} [current_fileset]
+set_property generic {CLK_HZ=24576000 DIRECT_200MHZ=1 SCHED_MODE=0 DYNAMIC_OWNER_DEPTH=4096 CORE_COUNT=12 WORKER_CONTEXTS=1} [current_fileset]
 puts "Added [llength [glob $rtl_dir/*.v]] source files"
 
 set_property include_dirs $rtl_dir [current_fileset]

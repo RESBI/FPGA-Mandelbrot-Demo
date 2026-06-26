@@ -5,12 +5,10 @@ module debug_leds #(
 ) (
     input  wire        clk,
     input  wire        rst,
-    input  wire [14:3] led_state,
+    input  wire [3:2]  led_state,
     input  wire        uart_rx_pulse,
     input  wire        uart_tx_pulse,
-    output wire [14:3] LED,
-    output wire        J1_GREEN,
-    output wire        J1_RED
+    output wire [3:2]  led
 );
 
     reg [UART_STRETCH_BITS-1:0] rx_stretch = {UART_STRETCH_BITS{1'b0}};
@@ -33,10 +31,6 @@ module debug_leds #(
         end
     end
 
-    assign LED = led_state;
-
-    // J1 bi-color LED is active-low and dedicated to visible UART activity.
-    assign J1_GREEN = !(rx_stretch != 0);
-    assign J1_RED   = !(tx_stretch != 0);
+    assign led = led_state;
 
 endmodule

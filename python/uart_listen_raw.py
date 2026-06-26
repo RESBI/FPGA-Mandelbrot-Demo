@@ -9,7 +9,7 @@ import serial
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="COM9")
+    ap.add_argument("--port", default="COM6")
     ap.add_argument("--baud", type=int, required=True)
     ap.add_argument("--seconds", type=float, default=2.0)
     ap.add_argument("--max-raw", type=int, default=128)

@@ -23,12 +23,17 @@ module uart_rx #(
     reg [7:0]  data_reg = 0;
     reg        rx_sync1 = 1;
     reg        rx_sync2 = 1;
-    reg [ACC_WIDTH-1:0] baud_acc = 0;
+    reg [15:0] clk_counter = 0;
+    reg [1:0]  sample_sum = 0;
 
-    localparam [ACC_WIDTH-1:0] BAUD_INC = ((BAUD * (64'd1 << ACC_WIDTH)) + (CLK_HZ / 2)) / CLK_HZ;
-    localparam [ACC_WIDTH-1:0] HALF_BIT = (64'd1 << (ACC_WIDTH - 1));
-    wire [ACC_WIDTH:0] baud_sum = {1'b0, baud_acc} + {1'b0, BAUD_INC};
-    wire baud_tick = baud_sum[ACC_WIDTH];
+    localparam [15:0] CPB = (CLOCKS_PER_BIT < 4) ? 16'd4 : CLOCKS_PER_BIT[15:0];
+    localparam [15:0] SAMPLE0 = (CPB / 2) - 1;
+    localparam [15:0] SAMPLE1 = (CPB / 2);
+    localparam [15:0] SAMPLE2 = (CPB / 2) + 1;
+    wire sample_now = (clk_counter == SAMPLE0) || (clk_counter == SAMPLE1) || (clk_counter == SAMPLE2);
+    wire bit_done = (clk_counter == CPB - 1'b1);
+    wire [1:0] sample_sum_next = sample_sum + {1'b0, (sample_now ? rx_sync2 : 1'b0)};
+    wire majority = (sample_sum_next >= 2);
 
     always @(posedge clk) begin
         rx_sync1 <= rx;
@@ -42,30 +47,37 @@ module uart_rx #(
             STATE_IDLE: begin
                 data_avail <= 0;
                 if (start_edge) begin
-                    baud_acc <= HALF_BIT;
-                    bit_counter   <= 0;
+                    clk_counter <= 0;
+                    sample_sum <= 0;
+                    bit_counter <= 0;
                     state <= STATE_START;
                 end
             end
 
             STATE_START: begin
-                if (baud_tick) begin
-                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
-                    if (!rx_sync2) begin
+                if (sample_now)
+                    sample_sum <= sample_sum_next;
+                if (bit_done) begin
+                    clk_counter <= 0;
+                    sample_sum <= 0;
+                    if (!majority) begin
                         state <= STATE_SAMPLE;
                     end else begin
                         state <= STATE_IDLE;
                     end
                 end else begin
-                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
+                    clk_counter <= clk_counter + 1'b1;
                 end
             end
 
             STATE_SAMPLE: begin
-                if (baud_tick) begin
-                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
+                if (sample_now)
+                    sample_sum <= sample_sum_next;
+                if (bit_done) begin
+                    clk_counter <= 0;
                     if (bit_counter < 8) begin
-                        data_reg <= {rx_sync2, data_reg[7:1]};
+                        data_reg <= {majority, data_reg[7:1]};
+                        sample_sum <= 0;
                         if (bit_counter == 4'd7) begin
                             state <= STATE_STOP;
                         end else begin
@@ -75,20 +87,26 @@ module uart_rx #(
                         state <= STATE_STOP;
                     end
                 end else begin
-                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
+                    clk_counter <= clk_counter + 1'b1;
                 end
             end
 
             STATE_STOP: begin
-                if (baud_tick) begin
-                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
-                    if (rx_sync2) begin
+                if (sample_now)
+                    sample_sum <= sample_sum_next;
+                if (bit_done) begin
+                    clk_counter <= 0;
+                    sample_sum <= 0;
+                    if (majority) begin
                         data <= data_reg;
                         data_avail <= 1;
                     end
-                    state <= STATE_IDLE;
+                    bit_counter <= 0;
+                    // At high baud with no inter-byte gap, the next start edge can
+                    // arrive while this receiver is still finishing the stop bit.
+                    state <= (!rx_sync2) ? STATE_START : STATE_IDLE;
                 end else begin
-                    baud_acc <= baud_sum[ACC_WIDTH-1:0];
+                    clk_counter <= clk_counter + 1'b1;
                 end
             end
 

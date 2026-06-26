@@ -1,11 +1,11 @@
 set part_name "xczu4ev-sfvc784-1-i"
-set proj_name "uart_echo"
-set proj_dir  "./uart_echo_zu4ev_proj"
+set proj_name "uart_rx_detect"
+set proj_dir  "./uart_rx_detect_zu4ev_proj"
 set rtl_dir   "./rtl"
 set xdc_file  "./constraints_vmc_rtsb_zu4ev/led.xdc"
 
 puts "========================================"
-puts " UART Echo Build Script"
+puts " UART RX Detect Build Script"
 puts " Part: $part_name"
 puts "========================================"
 
@@ -13,11 +13,10 @@ create_project -force $proj_name $proj_dir -part $part_name
 set_property target_language Verilog [current_project]
 
 add_files -fileset sources_1 [list \
-    $rtl_dir/uart_rx.v \
     $rtl_dir/uart_tx.v \
-    $rtl_dir/uart_echo_top.v \
+    $rtl_dir/uart_rx_detect_top.v \
 ]
-set_property top uart_echo_top [current_fileset]
+set_property top uart_rx_detect_top [current_fileset]
 set_property include_dirs $rtl_dir [current_fileset]
 
 add_files -fileset constrs_1 $xdc_file

@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`include "config.vh"
 `include "fp_defines.vh"
 
 module mandelbrot_core_worker_kctx #(
@@ -41,8 +42,8 @@ module mandelbrot_core_worker_kctx #(
 
     localparam CTX_W = clog2(CONTEXTS);
 
-    localparam MUL_LAT = 6;
-    localparam ADD_LAT = 9;
+    localparam MUL_LAT = `CFG_WORKER_MUL_LAT;
+    localparam ADD_LAT = `CFG_WORKER_ADD_LAT;
 
     localparam S_IDLE                 = 5'd0;
     localparam S_INIT_LATCH           = 5'd1;

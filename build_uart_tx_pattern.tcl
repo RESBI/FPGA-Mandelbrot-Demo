@@ -1,8 +1,8 @@
-set part_name "xc7k70tfbg676-1"
+set part_name "xczu4ev-sfvc784-1-i"
 set proj_name "uart_tx_pattern"
-set proj_dir  "./uart_tx_pattern_proj"
+set proj_dir  "./uart_tx_pattern_zu4ev_proj"
 set rtl_dir   "./rtl"
-set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
+set xdc_file  "./constraints_vmc_rtsb_zu4ev/led.xdc"
 
 puts "========================================"
 puts " UART TX Pattern Build Script"

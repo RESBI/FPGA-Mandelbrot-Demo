@@ -1,16 +1,20 @@
-set part_name "xc7k70tfbg676-1"
+if {[info exists ::env(VIVADO_PART)]} {
+    set part_name $::env(VIVADO_PART)
+} else {
+    set part_name "xczu4ev-sfvc784-1-i"
+}
 set proj_name "mandelbrot_fp64"
-set proj_dir  "./fp64_proj"
+set proj_dir  "./fp64_zu4ev_proj"
 set rtl_dir   "./rtl"
-set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
+set xdc_file  "./constraints_vmc_rtsb_zu4ev/led.xdc"
 
 puts "========================================"
 puts " Mandelbrot FP64 Build Script"
 puts " Part: $part_name"
-puts " Clocking: direct 200 MHz BUFG"
+puts " Clocking: direct 24.576 MHz BUFG"
 puts " Default scheduler: dynamic idle-core rows (SCHED_MODE=1)"
-puts " Mandelbrot workers: 6"
-puts " Worker pipeline contexts: 4"
+puts " Mandelbrot workers: 12"
+puts " Worker pipeline contexts: 8"
 puts "========================================"
 
 create_project -force $proj_name $proj_dir -part $part_name
@@ -19,7 +23,7 @@ set_property target_language Verilog [current_project]
 # Add all RTL files
 add_files -fileset sources_1 [glob $rtl_dir/*.v]
 set_property top top [current_fileset]
-set_property generic {CLK_HZ=200000000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 CORE_COUNT=6 WORKER_CONTEXTS=4} [current_fileset]
+set_property generic {CLK_HZ=24576000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 CORE_COUNT=12 WORKER_CONTEXTS=8} [current_fileset]
 puts "Added [llength [glob $rtl_dir/*.v]] source files"
 
 # Set Verilog include path

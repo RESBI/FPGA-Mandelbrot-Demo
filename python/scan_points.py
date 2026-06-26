@@ -9,7 +9,7 @@ import serial
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port', default='COM9')
+    parser.add_argument('--port', default='COM6')
     parser.add_argument('--max-iter', type=int, default=128)
     parser.add_argument('--y', type=int, required=True)
     parser.add_argument('--x0', type=int, required=True)

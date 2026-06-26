@@ -8,6 +8,7 @@ module tb_multicore_dynamic #(
     parameter TEST_COLS = 16,
     parameter TEST_MAX_ITER = 64,
     parameter CORE_FIFO_DEPTH = 128,
+    parameter DYNAMIC_OWNER_DEPTH = 4096,
     parameter TIMEOUT_CYCLES = 2000000
 ) ();
 
@@ -37,7 +38,7 @@ module tb_multicore_dynamic #(
         .CORE_COUNT(CORE_COUNT),
         .CORE_FIFO_DEPTH(CORE_FIFO_DEPTH),
         .SCHED_MODE(1),
-        .DYNAMIC_OWNER_DEPTH(64),
+        .DYNAMIC_OWNER_DEPTH(DYNAMIC_OWNER_DEPTH),
         .WORKER_CONTEXTS(WORKER_CONTEXTS)
     ) u_dut (
         .clk(clk),

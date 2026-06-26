@@ -12,92 +12,27 @@ module top #(
 ) (
     input  wire uart_rx,
     output wire uart_tx,
-    input  wire CLK_200_P,
-    input  wire CLK_200_N,
-    output wire [14:3] LED,
-    output wire J1_GREEN,
-    output wire J1_RED
+    input  wire sys_clk,
+    input  wire rst_n,
+    output wire [3:2] led
 );
 
-    wire sys_clk;
-    wire clk_fb;
-    wire clk_fb_unbuf;
-    wire clk_100_unbuf;
+    wire clk;
     wire clk_locked;
 
-    generate
-        if (DIRECT_200MHZ) begin : g_direct_200
-            IBUFGDS #(
-                .DIFF_TERM("TRUE"),
-                .IBUF_LOW_PWR("FALSE"),
-                .IOSTANDARD("LVDS")
-            ) u_clk_200_ibufgds (
-                .I(CLK_200_P),
-                .IB(CLK_200_N),
-                .O(sys_clk)
-            );
+    BUFG u_sys_clk_bufg (
+        .I(sys_clk),
+        .O(clk)
+    );
 
-            assign clk_locked = 1'b1;
-            assign clk_fb = 1'b0;
-            assign clk_fb_unbuf = 1'b0;
-            assign clk_100_unbuf = 1'b0;
-        end else begin : g_mmcm_100
-            wire clk_200;
-
-            IBUFDS #(
-                .DIFF_TERM("TRUE"),
-                .IBUF_LOW_PWR("FALSE"),
-                .IOSTANDARD("LVDS")
-            ) u_clk_200_ibufds (
-                .I(CLK_200_P),
-                .IB(CLK_200_N),
-                .O(clk_200)
-            );
-
-            MMCME2_BASE #(
-                .CLKIN1_PERIOD(5.000),
-                .CLKFBOUT_MULT_F(5.000),
-                .CLKOUT0_DIVIDE_F(10.000),
-                .CLKOUT0_DUTY_CYCLE(0.500)
-            ) u_clk_mmcm (
-                .CLKIN1(clk_200),
-                .CLKFBIN(clk_fb),
-                .RST(1'b0),
-                .PWRDWN(1'b0),
-                .CLKFBOUT(clk_fb_unbuf),
-                .CLKFBOUTB(),
-                .CLKOUT0(clk_100_unbuf),
-                .CLKOUT0B(),
-                .CLKOUT1(),
-                .CLKOUT1B(),
-                .CLKOUT2(),
-                .CLKOUT2B(),
-                .CLKOUT3(),
-                .CLKOUT3B(),
-                .CLKOUT4(),
-                .CLKOUT5(),
-                .CLKOUT6(),
-                .LOCKED(clk_locked)
-            );
-
-            BUFG u_sys_clk_bufg (
-                .I(clk_100_unbuf),
-                .O(sys_clk)
-            );
-
-            BUFG u_clk_fb_bufg (
-                .I(clk_fb_unbuf),
-                .O(clk_fb)
-            );
-        end
-    endgenerate
+    assign clk_locked = 1'b1;
 
     // Clock enable for FP operations
     reg [`FP_CE_DIV-1:0] ce_counter;
     wire fp_ce;
     assign fp_ce = (`FP_CE_DIV == 1) ? 1'b1 : (ce_counter == `FP_CE_DIV - 1);
 
-    always @(posedge sys_clk) begin
+    always @(posedge clk) begin
         if (`FP_CE_DIV == 1)
             ce_counter <= 0;
         else if (ce_counter == `FP_CE_DIV - 1)
@@ -112,17 +47,17 @@ module top #(
     wire rst;
     wire soft_reset;
     reg [7:0] soft_rst_cnt = 0;
-    assign power_on_rst = !clk_locked || (rst_cnt < 15);
+    assign power_on_rst = !rst_n || !clk_locked || (rst_cnt < 15);
     assign rst = power_on_rst || (soft_rst_cnt != 0);
 
-    always @(posedge sys_clk) begin
-        if (!clk_locked)
+    always @(posedge clk) begin
+        if (!rst_n || !clk_locked)
             rst_cnt <= 0;
         else if (rst_cnt < 15)
             rst_cnt <= rst_cnt + 1;
     end
 
-    always @(posedge sys_clk) begin
+    always @(posedge clk) begin
         if (power_on_rst)
             soft_rst_cnt <= 0;
         else if (soft_reset)
@@ -168,7 +103,7 @@ module top #(
         .CLK_HZ(CLK_HZ)
     ) u_rx (
         .rx         (uart_rx),
-        .clk        (sys_clk),
+        .clk        (clk),
         .data       (rx_data),
         .data_avail (rx_avail)
     );
@@ -177,14 +112,14 @@ module top #(
         .CLK_HZ(CLK_HZ)
     ) u_tx (
         .tx             (uart_tx),
-        .clk            (sys_clk),
+        .clk            (clk),
         .data           (tx_data),
         .transmit_en    (tx_en),
         .transmit_avail (tx_avail)
     );
 
     cmd_parser u_cmd (
-        .clk            (sys_clk),
+        .clk            (clk),
         .rst            (rst),
         .rx_data        (rx_data),
         .rx_avail       (rx_avail),
@@ -207,7 +142,7 @@ module top #(
         .DYNAMIC_OWNER_DEPTH(DYNAMIC_OWNER_DEPTH),
         .WORKER_CONTEXTS(WORKER_CONTEXTS)
     ) u_core (
-        .clk            (sys_clk),
+        .clk            (clk),
         .rst            (rst),
         .ce             (fp_ce),
         .start          (compute_start),
@@ -232,7 +167,7 @@ module top #(
     assign fifo_full = !fifo_write_avail;
 
     queue #(.DEPTH(`CFG_OUTPUT_FIFO_DEPTH), .DATA_W(16)) u_fifo (
-        .clk         (sys_clk),
+        .clk         (clk),
         .rst         (rst),
         .write_avail (fifo_write_avail),
         .read_avail  (fifo_rd_avail),
@@ -243,7 +178,7 @@ module top #(
     );
 
     tx_ctrl u_txctrl (
-        .clk        (sys_clk),
+        .clk        (clk),
         .rst        (rst),
         .start      (tx_ctrl_start),
         .rows       (tx_ctrl_rows),
@@ -259,13 +194,13 @@ module top #(
 
     reg [31:0] heartbeat = 32'd0;
     reg [7:0] progress = 8'd0;
-    reg [14:3] debug_led_state = 12'd0;
+    reg [3:2] debug_led_state = 2'd0;
     reg debug_uart_rx_pulse = 1'b0;
     reg debug_uart_tx_pulse = 1'b0;
 
     wire tx_accepted = tx_en && tx_avail;
 
-    always @(posedge sys_clk) begin
+    always @(posedge clk) begin
         heartbeat <= heartbeat + 1'b1;
         debug_uart_rx_pulse <= 1'b0;
         debug_uart_tx_pulse <= 1'b0;
@@ -284,29 +219,17 @@ module top #(
                 debug_uart_tx_pulse <= 1'b1;
         end
 
-        debug_led_state[3]  <= heartbeat[25];
-        debug_led_state[4]  <= rst;
-        debug_led_state[5]  <= progress[0];
-        debug_led_state[6]  <= progress[1];
-        debug_led_state[7]  <= progress[2];
-        debug_led_state[8]  <= progress[3];
-        debug_led_state[9]  <= progress[4];
-        debug_led_state[10] <= progress[5];
-        debug_led_state[11] <= progress[6];
-        debug_led_state[12] <= progress[7];
-        debug_led_state[13] <= debug_uart_rx_pulse;
-        debug_led_state[14] <= debug_uart_tx_pulse;
+        debug_led_state[2] <= heartbeat[25];
+        debug_led_state[3] <= rst ^ progress[0];
     end
 
     debug_leds u_debug_leds (
-        .clk           (sys_clk),
+        .clk           (clk),
         .rst           (rst),
         .led_state     (debug_led_state),
         .uart_rx_pulse (debug_uart_rx_pulse),
         .uart_tx_pulse (debug_uart_tx_pulse),
-        .LED           (LED),
-        .J1_GREEN      (J1_GREEN),
-        .J1_RED        (J1_RED)
+        .led           (led)
     );
 
 endmodule
