@@ -216,6 +216,8 @@ The current 4-context worker uses delayed operation/context tags to route FP res
 
 ## Requirements
 
+![zu4ev](doc/IMG_20260613_013125.jpg)
+
 ### Hardware
 
 - VMC_RTSB ZU4EV board using `xczu4ev-sfvc784-1-i` and the current ZU4EV pins in `constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc`.
