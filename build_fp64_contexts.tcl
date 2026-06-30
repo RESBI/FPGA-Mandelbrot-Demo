@@ -1,6 +1,6 @@
 set part_name "xc7k70tfbg676-1"
 set rtl_dir   "./rtl"
-set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
+set xdc_file  "./constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc"
 
 set worker_contexts 4
 foreach arg $argv {

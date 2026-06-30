@@ -28,7 +28,7 @@ puts " Bitstream: $bit_file"
 puts "========================================"
 
 open_hw_manager
-connect_hw_server -url 127.0.0.1:3122 -allow_non_jtag
+connect_hw_server
 
 set hw_targets [get_hw_targets]
 if {[llength $hw_targets] == 0} {
@@ -37,7 +37,7 @@ if {[llength $hw_targets] == 0} {
     exit 1
 }
 
-open_hw_target -xvc_url 127.0.0.1:2542
+open_hw_target
 set hw_devices [get_hw_devices]
 if {[llength $hw_devices] == 0} {
     puts "ERROR: No hardware devices found"
@@ -48,13 +48,13 @@ if {[llength $hw_devices] == 0} {
 puts "Found [llength $hw_devices] device(s)"
 set hw_device ""
 foreach dev $hw_devices {
-    if {[string match "*xc7k70t*" $dev]} {
+    if {[string match "*xczu4*" $dev] || [string match "*xc7k70t*" $dev]} {
         set hw_device $dev
         break
     }
 }
 if {$hw_device == ""} {
-    puts "ERROR: No xc7k70t device found"
+    puts "ERROR: No supported FPGA device found"
     puts "Available: $hw_devices"
     close_hw_manager
     exit 1

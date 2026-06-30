@@ -1,4 +1,4 @@
-set part_name "xc7k70tfbg676-1"
+set part_name "xczu4ev-sfvc784-1-i"
 set worker_contexts 4
 set core_count 4
 
@@ -12,12 +12,12 @@ if {$argc >= 2} {
 set proj_name "mandelbrot_fp64_200mhz_c${core_count}_ctx${worker_contexts}"
 set proj_dir  "./fp64_200mhz_c${core_count}_ctx${worker_contexts}_proj"
 set rtl_dir   "./rtl"
-set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
+set xdc_file  "./constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc"
 
 puts "========================================"
 puts " Mandelbrot FP64 200 MHz Experiment"
 puts " Part: $part_name"
-puts " Clocking: direct 200 MHz BUFG"
+puts " Clocking: VMC_RTSB ZU4EV single-ended sys_clk at 200 MHz"
 puts " Scheduler: dynamic idle-core rows (SCHED_MODE=1)"
 puts " Worker pipeline contexts: $worker_contexts"
 puts " Worker count: $core_count"

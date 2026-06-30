@@ -77,7 +77,7 @@ def parse_response(data, expected_rows, expected_cols):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="COM9")
+    ap.add_argument("--port", default="COM6")
     ap.add_argument("--baud", type=int, required=True)
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--read-window", type=float, default=1.0)

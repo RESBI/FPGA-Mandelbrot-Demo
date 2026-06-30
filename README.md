@@ -1,8 +1,8 @@
 # Mandelbrot FPGA Accelerator
 
-FPGA-based Mandelbrot renderer with a UART host interface. The PC sends one image command containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a 6-worker FP64 engine, dynamically assigns rows to available workers, restores raster order, and streams one 16-bit iteration count per pixel. The validated default now uses six workers with four pixel contexts per worker at direct 200 MHz over one shared FP64 multiplier and one shared FP64 adder per worker.
+FPGA-based Mandelbrot renderer with a UART host interface. The PC sends one image command containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a 12-worker FP64 engine, dynamically assigns rows to available workers, restores raster order, and streams one 16-bit iteration count per pixel. The validated default now targets VMC_RTSB ZU4EV with a single-ended 200 MHz `sys_clk` on E12, using twelve workers with eight pixel contexts per worker over one shared FP64 multiplier and one shared FP64 adder per worker.
 
-For detailed hardware architecture, pipeline scheduling, timing constraints, software design, and validation notes, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the project-level evolution from the initial single-core design to the current dynamic 6-worker, 4-context direct-200MHz implementation, see [ARCHITECTURE_EVOLUTION_REPORT.md](doc/ARCHITECTURE_EVOLUTION_REPORT.md). For worker pipeline bubble analysis and N-context architecture modeling, see [PIPELINE_BUBBLE_ANALYSIS.md](doc/PIPELINE_BUBBLE_ANALYSIS.md) and [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](doc/CONTEXT_WORKER_ARCHITECTURE_REPORT.md). For the direct-200 MHz timing-closure log and validation data, see [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md) and [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
+For detailed hardware architecture, pipeline scheduling, timing constraints, software design, and validation notes, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the ZU4EV 200 MHz adaptation, UART validation, timing/resource data, and performance comparison against the older 7K70T 200 MHz points, see [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md). Historical direct-200MHz 7K70T closure details remain in [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md) and [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
 
 ## Demo Images
 
@@ -15,29 +15,29 @@ Current validated default configuration:
 
 | Item | Value |
 |---|---:|
-| FPGA target | Xilinx Kintex-7 `xc7k70tfbg676-1` |
+| FPGA target | VMC_RTSB ZU4EV, `xczu4ev-sfvc784-1-i` |
 | Vivado version used | 2024.2 or compatible |
-| Board clock input | 200 MHz differential `CLK_200_P/N` |
-| Internal system clock | Direct 200 MHz (`DIRECT_200MHZ=1`) |
-| 100 MHz reference build | `build_fp64_100mhz.tcl` |
+| Board clock input | 200 MHz single-ended `sys_clk` on E12 |
+| Internal system clock | Direct 200 MHz single clock domain |
+| Historical 7K70T builds | `200MHZ_ATTEMPT_REPORT.md`, `WORKER_COUNT_SCALING.md` |
 | Floating-point mode | FP64 |
-| Mandelbrot workers | 6 |
-| Pixel contexts per worker | 4 |
-| Lower-LUT historical worker contexts | 2 |
+| Mandelbrot workers | 12 |
+| Pixel contexts per worker | 8 |
+| Lower-LUT historical worker contexts | 2, 4 |
 | Default scheduler | Dynamic idle-core rows (`SCHED_MODE=1`) |
-| Worker context generic | `WORKER_CONTEXTS=4` |
+| Worker context generic | `WORKER_CONTEXTS=8` |
 | FP datapath effective rate | 200 MHz (`FP_CE_DIV=1`) |
 | UART baudrate | 12000000 |
-| Host serial port default | `COM9` |
+| Host serial port default | `COM6` |
 | Pixel format | `uint16` iteration count, little-endian |
 | Maximum iteration count | 65535 |
 | Largest validated frame | 1920x1080 |
-| Current board build status | XC7K70T full FP64 bitstream builds cleanly |
-| Programming link | Vivado `hw_server` at `127.0.0.1:3122`, CH347 XVC at `127.0.0.1:2542` |
-| Current routed timing | `WNS=0.003ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns` |
-| Current placed utilization | `29891` LUTs, `25501` registers, `97` DSP48E1, `13.5` BRAM tiles |
+| Current board build status | ZU4EV full FP64 bitstream builds, programs, and passes six 1080p scenes |
+| Programming link | Vivado hardware auto-connect, target device `xczu4_0` |
+| Current routed timing | `WNS=0.148ns`, `TNS=0.000ns`, `WHS=0.010ns`, `THS=0.000ns` |
+| Current routed utilization | `85171` LUTs, `71453` registers, `121` DSP48E2, `25.5` BRAM tiles |
 
-The default RTL is the 6-worker, 4-context-per-worker configuration on XC7K70T at direct 200 MHz. It builds, programs, meets timing, passes board tests, and is the best validated performance point so far. The older 4-worker direct-200MHz and 100MHz 4ctx builds remain useful references for area and shallow-scene comparisons.
+The default RTL is the 12-worker, 8-context-per-worker configuration on ZU4EV at direct 200 MHz. It builds, programs, meets timing, passes small-image HW/SW verification, and passes the six 1080p host-tiled scenes. The older 7K70T 4-worker and 6-worker direct-200MHz builds remain the most relevant historical comparison points.
 
 ## Repository Layout
 
@@ -65,8 +65,8 @@ Mandelbrot/
 │   ├── cmd_parser.v             Host command parser
 │   ├── tx_ctrl.v                Response stream controller
 │   └── queue.v                  Small synchronous FIFO
-├── constraints_hvs_xc7k70t/
-│   └── mandelbrot_top.xdc       XC7K70T clock, UART, and LED constraints
+├── constraints_vmc_rtsb_zu4ev/
+│   └── mandelbrot_top.xdc       ZU4EV 200 MHz sys_clk, UART, and LED constraints
 ├── sim/                         Testbenches
 │   ├── tb_fp.v
 │   ├── tb_core.v
@@ -95,7 +95,7 @@ Mandelbrot/
 │   ├── TILE_DESIGN_CN.md
 │   ├── TODO.md
 │   └── TODO_CN.md
-├── build_fp64.tcl               Default FP64 build, 6 workers + 4 contexts at direct 200MHz
+├── build_fp64.tcl               Default FP64 build, 12 workers + 8 contexts at direct 200MHz
 ├── build_fp64_static.tcl        Static scheduler + 1-context regression build
 ├── build_fp64_dynamic.tcl       Earlier dynamic-scheduler build script
 ├── build_fp128.tcl              FP128 Vivado build script
@@ -116,19 +116,17 @@ Mandelbrot/
 flowchart LR
     PC[Host PC<br/>Python CLI] -->|UART command<br/>center, step, size, max_iter| RX[UART RX]
     RX --> Parser[cmd_parser]
-    Parser -->|image parameters| Core[mandelbrot_multicore<br/>6 FP64 workers<br/>4 contexts each]
+    Parser -->|image parameters| Core[mandelbrot_multicore<br/>12 FP64 workers<br/>8 contexts each]
     Core -->|raster-order uint16 stream| FIFO[queue<br/>1024 x 16-bit]
     FIFO --> TXC[tx_ctrl]
     TXC --> TX[UART TX]
     TX -->|response header<br/>pixels<br/>checksum| PC
 
     Core --> SCHED[dynamic row dispatcher]
-    SCHED --> W0[worker 0<br/>4 pixel contexts]
-    SCHED --> W1[worker 1<br/>4 pixel contexts]
-    SCHED --> W2[worker 2<br/>4 pixel contexts]
-    SCHED --> W3[worker 3<br/>4 pixel contexts]
-    SCHED --> W4[worker 4<br/>4 pixel contexts]
-    SCHED --> W5[worker 5<br/>4 pixel contexts]
+    SCHED --> W0[worker 0<br/>8 pixel contexts]
+    SCHED --> W1[worker 1<br/>8 pixel contexts]
+    SCHED --> W2[worker 2<br/>8 pixel contexts]
+    SCHED --> WN[workers 3..11<br/>8 pixel contexts each]
 ```
 
 ## RTL Structure
@@ -136,14 +134,14 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph TOP[top.v]
-        CLK[CLK_200_P/N<br/>200 MHz differential] --> MMCM[MMCM<br/>100 MHz sys_clk]
-        MMCM --> CE[fp_ce generator<br/>FP_CE_DIV=1]
+        CLK[sys_clk on E12<br/>200 MHz single-ended] --> BUFG[BUFG<br/>200 MHz sys_clk]
+        BUFG --> CE[fp_ce generator<br/>FP_CE_DIV=1]
         RST[reset counter]
 
         URX[uart_rx<br/>12 Mbaud fractional NCO]
         UTX[uart_tx<br/>12 Mbaud fractional NCO]
         CMD[cmd_parser]
-        CORE[mandelbrot_multicore<br/>CFG_CORE_COUNT=6<br/>CFG_WORKER_CONTEXTS=4]
+        CORE[mandelbrot_multicore<br/>CFG_CORE_COUNT=12<br/>CFG_WORKER_CONTEXTS=8]
         FIFO[queue<br/>CFG_OUTPUT_FIFO_DEPTH x 16-bit]
         TXC[tx_ctrl]
 
@@ -158,7 +156,7 @@ flowchart TB
     subgraph MC[Inside mandelbrot_multicore]
         CORE --> DISP[work_dispatch_dynamic_rows<br/>default SCHED_MODE=1]
         CORE --> MERGE[raster_collect_dynamic_rows]
-        DISP --> WORKERS[6 x mandelbrot_core_worker_kctx]
+        DISP --> WORKERS[12 x mandelbrot_core_worker_kctx]
         WORKERS --> CFIFO[per-core FIFOs]
         CFIFO --> MERGE
     end
@@ -183,8 +181,8 @@ Worker implementation is selected by the `WORKER_CONTEXTS` generic:
 |---:|---|---|
 | `1` | `mandelbrot_core_worker` | Single-context regression worker. |
 | `2` | `mandelbrot_core_worker_2ctx` | Historical lower-LUT worker. Interleaves two pixels over one shared multiplier and one shared adder. |
-| `4` | `mandelbrot_core_worker_kctx` | Current default on XC7K70T. Interleaves four pixel contexts over one shared multiplier and one shared adder. |
-| `8` | `mandelbrot_core_worker_kctx` | Experimental synthesis path; not the validated default. |
+| `4` | `mandelbrot_core_worker_kctx` | Historical 7K70T default. Interleaves four pixel contexts over one shared multiplier and one shared adder. |
+| `8` | `mandelbrot_core_worker_kctx` | Current ZU4EV default. Interleaves eight pixel contexts over one shared multiplier and one shared adder. |
 
 ## Mandelbrot Core Pipeline
 
@@ -220,39 +218,30 @@ The current 4-context worker uses delayed operation/context tags to route FP res
 
 ### Hardware
 
-![HVS-XC7K70T-Board](doc/IMG_20260613_160513.jpg)
-
-- XC7K70T board using `xc7k70tfbg676-1` and the pins in `constraints_hvs_xc7k70t/mandelbrot_top.xdc`.
-- JTAG connection served by Vivado Hardware Server at `127.0.0.1:3122`, with the CH347 XVC target at `127.0.0.1:2542`.
-- FT232HL UART connection wired to FPGA `uart_rx=J23` and `uart_tx=H24`.
-- 200 MHz differential input clock on `CLK_200_P/N`.
-- Twelve active-high board debug LEDs available as `LED[3]` through `LED[14]`, plus J1 bi-color LED UART activity indicators.
+- VMC_RTSB ZU4EV board using `xczu4ev-sfvc784-1-i` and the current ZU4EV pins in `constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc`.
+- JTAG programming through Vivado Hardware Manager auto-connect; the programmed device appears as `xczu4_0`.
+- FT232HL UART connection wired to FPGA `uart_rx=D12` and `uart_tx=C12`.
+- 200 MHz single-ended reference clock on `sys_clk=E12`.
+- Two board LEDs are used by the current top-level as `led[2]` and `led[3]`.
 
 Current pin constraints:
 
 | Port | Package pin | I/O standard |
 |---|---|---|
-| `CLK_200_P` | `AA10` | `LVDS` |
-| `CLK_200_N` | `AB10` | `LVDS` |
-| `uart_rx` | `J23` | `LVCMOS33` |
-| `uart_tx` | `H24` | `LVCMOS33` |
-| `LED[3:14]` | `D25,C21,D26,C26,F25,G25,E25,E26,J26,J25,H26,G26` | `LVCMOS33` |
-| `J1_GREEN` | `E18` | `LVCMOS33` |
-| `J1_RED` | `E17` | `LVCMOS33` |
+| `sys_clk` | `E12` | `LVCMOS25` |
+| `uart_rx` | `D12` | `LVCMOS25` |
+| `uart_tx` | `C12` | `LVCMOS25` |
+| `led[2]` | `A11` | `LVCMOS25` |
+| `led[3]` | `A12` | `LVCMOS25` |
 
-Debug LED planning is isolated in `rtl/debug_leds.v`, so status assignment can be changed without touching the compute or UART datapaths. The current default mapping is:
+The current default LED mapping is intentionally small because two former LED pins are used by the FT232HL UART on this board revision:
 
 | Output | Meaning |
 |---|---|
-| `LED[3]` | Heartbeat (`heartbeat[25]`) |
-| `LED[4]` | Reset active |
-| `LED[5:12]` | Progress counter bits `[0:7]` |
-| `LED[13]` | One-cycle registered UART RX activity pulse |
-| `LED[14]` | One-cycle registered UART TX activity pulse |
-| `J1_GREEN` | Stretched UART RX activity |
-| `J1_RED` | Stretched UART TX activity |
+| `led[2]` | Heartbeat (`heartbeat[25]`) |
+| `led[3]` | UART RX/TX activity pulse XOR |
 
-If your board uses different pins, edit `constraints_hvs_xc7k70t/mandelbrot_top.xdc` before building.
+If your board uses different pins, edit `constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc` before building.
 
 ### Software
 
@@ -288,12 +277,12 @@ C:\Xilinx\Vivado\2024.2\bin\vivado.bat
 
 If Vivado is on your PATH, you can use `vivado`. Otherwise, call `vivado.bat` with its full path.
 
-4. Confirm the UART port. The host defaults to `COM9`.
+4. Confirm the UART port. The host defaults to `COM6`.
 
 You can override it on every command:
 
 ```bash
-python python\mandelbrot_host.py --port COM9
+python python\mandelbrot_host.py --port COM6
 ```
 
 5. Confirm baudrate. The RTL and Python host currently use `12000000` baud.
@@ -316,15 +305,15 @@ Current defaults:
 
 | Macro | Default | Used by | Purpose |
 |---|---:|---|---|
-| `CFG_CLK_HZ` | `100000000` | `uart_rx`, `uart_tx` | System clock used for fractional UART timing. |
+| `CFG_CLK_HZ` | `200000000` | `uart_rx`, `uart_tx` | System clock used for fractional UART timing. |
 | `CFG_UART_BAUD` | `12000000` | `uart_rx`, `uart_tx` | UART baudrate. Must match `python/mandelbrot_host.py` `BAUD`. |
 | `CFG_UART_ACC_WIDTH` | `32` | `uart_rx`, `uart_tx` | Fractional baud accumulator width. |
-| `CFG_CORE_COUNT` | `6` | `top`, `mandelbrot_multicore` | Number of Mandelbrot workers. |
+| `CFG_CORE_COUNT` | `12` | `top`, `mandelbrot_multicore` | Number of Mandelbrot workers. |
 | `CFG_CORE_FIFO_DEPTH` | `4096` | `top`, `mandelbrot_multicore` | Per-core result FIFO depth. |
 | `CFG_OUTPUT_FIFO_DEPTH` | `1024` | `top` | Shared output FIFO depth before `tx_ctrl`. |
 | `CFG_SCHED_MODE` | `1` | `top`, `mandelbrot_multicore` | `0` static rows, `1` dynamic idle-core rows. |
 | `CFG_DYNAMIC_OWNER_DEPTH` | `4096` | `top`, `mandelbrot_multicore` | Dynamic row-owner table depth. |
-| `CFG_WORKER_CONTEXTS` | `4` | `top`, `mandelbrot_multicore` | `1` single-context worker, `2` lower-LUT historical worker, `4` default 4-context worker. |
+| `CFG_WORKER_CONTEXTS` | `8` | `top`, `mandelbrot_multicore` | `1` single-context worker, `2`/`4` historical workers, `8` current ZU4EV default. |
 
 For the default source build, edit `rtl/config.vh` and keep the Python host in sync when changing UART baud:
 
@@ -340,7 +329,7 @@ The existing Vivado build scripts intentionally override some top-level paramete
 
 | Script | Overrides | Purpose |
 |---|---|---|
-| `build_fp64.tcl` | `CLK_HZ=200000000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 CORE_COUNT=6 WORKER_CONTEXTS=4` | Default FP64 direct-200MHz dynamic 6-worker, 4-context build. |
+| `build_fp64.tcl` | `CLK_HZ=200000000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 CORE_COUNT=12 WORKER_CONTEXTS=8` | Default FP64 direct-200MHz dynamic 12-worker, 8-context ZU4EV build. |
 | `build_fp64_100mhz.tcl` | `CLK_HZ=100000000 DIRECT_200MHZ=0 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=4` | 100MHz 4-context reference build. |
 | `build_fp64_contexts.tcl` | `SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=N` | Explicit K-context worker build for comparisons and experiments. |
 | `build_fp64_static.tcl` | `SCHED_MODE=0 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=1` | Static scheduler, single-context regression build. |
@@ -359,8 +348,8 @@ CLK_HZ=200000000
 DIRECT_200MHZ=1
 SCHED_MODE=1
 DYNAMIC_OWNER_DEPTH=4096
-WORKER_CONTEXTS=4
-CORE_COUNT=6
+WORKER_CONTEXTS=8
+CORE_COUNT=12
 ```
 
 Using Vivado on PATH:
@@ -384,7 +373,7 @@ Bitstream: ./fp64_proj/mandelbrot_fp64.runs/impl_1/top.bit
 
 ### Explicit Context-Count FP64 Builds
 
-`build_fp64_contexts.tcl` can still build a selected context count explicitly. For example, the current default 4-context configuration can also be built with:
+`build_fp64_contexts.tcl` is kept for historical comparison builds. For the current ZU4EV default, use `build_fp64.tcl`; explicit context-count scripts may still be useful when comparing lower-context worker behavior.
 
 ```bash
 vivado -mode batch -source build_fp64_contexts.tcl -tclargs 4
@@ -396,7 +385,7 @@ Expected bitstream:
 ./fp64_ctx4_proj/mandelbrot_fp64_ctx4.runs/impl_1/top.bit
 ```
 
-The normal default build is now `build_fp64.tcl`; the explicit context script is kept for controlled comparisons such as `WORKER_CONTEXTS=2` versus `WORKER_CONTEXTS=4`.
+The normal default build is now `build_fp64.tcl`; the explicit context script is kept for controlled historical comparisons such as `WORKER_CONTEXTS=2` versus `WORKER_CONTEXTS=4`.
 
 ### 100MHz FP64 Reference Build
 
@@ -548,7 +537,7 @@ python python\mandelbrot_host.py --width 1920 --height 1080 --max-iter 1024 --ce
 --palette NAME       PNG/BMP palette: classic, fire, ocean, twilight, grayscale
 --mode MODE          fp64 or fp128. Default: fp64
 --verify             Also compute software reference and compare
---port COMx          Serial port. Default: COM9
+--port COMx          Serial port. Default: COM6
 --timeout SEC        Serial timeout. Default: 180.0
 --force-large-frame  Bypass host-side large-frame guards only for matching bitstreams
 ```
@@ -644,7 +633,7 @@ The current reliable high-baud operating mode is host-driven tiling at 12000000 
 Example:
 
 ```bash
-python python\mandelbrot_host.py --port COM9 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
+python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
 ```
 
 Use `--full-frame` only when you intentionally want the older single-command full-frame response path for regression or controlled single-burst experiments.
@@ -660,34 +649,33 @@ With `--quiet`, the host now keeps a single-line progress display instead of pri
 On each failed compute tile attempt, the host drains stale UART bytes and sends a soft reset command (`RST!RST!`) unless `--no-soft-reset-on-retry` is set. The reset clears the FPGA command parser, compute engine, output FIFOs, and transmit controller, then the host recomputes only the failed compute tile. You can also issue a reset manually:
 
 ```powershell
-python python\mandelbrot_host.py --port COM9 --soft-reset
+python python\mandelbrot_host.py --port COM6 --soft-reset
 ```
 
-Latest default direct-200MHz 6-worker, 4-context 1080p host-tiled stability run at 12 Mbaud with compute tile equal to host tile (`1920x120` for 1080p), 10 fresh runs per scene:
+Latest ZU4EV direct-200MHz 12-worker, 8-context 1080p host-tiled run at 12 Mbaud with compute tile equal to host tile (`1920x120` for 1080p), one run per scene:
 
-| Scene | Transport pass | Exact SW match | Retry events | Mean FPGA Time | Min | Max | CV | Mean Throughput | vs 100MHz 4ctx |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Fast escape @128 | `10/10` | `0/10` | `2` | `4.641s` | `4.423s` | `6.592s` | `14.77%` | `453333.47 pps` | `1.009x` |
-| Standard @64 | `10/10` | `10/10` | `2` | `4.636s` | `4.416s` | `5.515s` | `9.92%` | `450824.12 pps` | `1.247x` |
-| Seahorse zoom @512 | `10/10` | `0/10` | `2` | `5.715s` | `5.418s` | `6.937s` | `10.87%` | `366227.26 pps` | `1.721x` |
-| Deep tendrils @8192 | `10/10` | `0/10` | `1` | `8.567s` | `8.409s` | `9.968s` | `5.75%` | `242675.75 pps` | `2.063x` |
-| Deep mini-brot @8192 | `10/10` | `0/10` | `0` | `20.963s` | `20.962s` | `20.965s` | `0.00%` | `98916.27 pps` | `2.106x` |
-| Deep Seahorse @1024 | `10/10` | `0/10` | `1` | `9.668s` | `9.511s` | `11.065s` | `5.08%` | `214934.36 pps` | `2.065x` |
+| Scene | Transport pass | Retry events | FPGA Time | Throughput | vs 7K70T 4w/4ctx 200MHz | vs 7K70T 6w/4ctx 200MHz |
+|---|---:|---:|---:|---:|---:|---:|
+| Fast escape @128 | `1/1` | `0` | `4.150s` | `499705.08 pps` | `1.222x` | `1.118x` |
+| Standard @64 | `1/1` | `0` | `4.143s` | `500531.67 pps` | `1.223x` | `1.119x` |
+| Seahorse zoom @512 | `1/1` | `0` | `4.289s` | `483464.75 pps` | `1.837x` | `1.333x` |
+| Deep tendrils @8192 | `1/1` | `0` | `4.418s` | `469374.80 pps` | `2.902x` | `1.939x` |
+| Deep mini-brot @8192 | `1/1` | `0` | `9.183s` | `225810.49 pps` | `3.444x` | `2.282x` |
+| Deep Seahorse @1024 | `1/1` | `0` | `4.767s` | `435016.18 pps` | `2.913x` | `2.028x` |
 
-The 100 MHz 4-context reference passed a `160x120` software-verified gate at `100.00%` match with `0.091s` FPGA elapsed. The previous 4-worker direct-200MHz bitstream passed the same gate at `100.00%` match with `0.158s` FPGA elapsed. The current default 6-worker direct-200MHz build passed behavioral simulation, timing, programming, and the 10-run hardware benchmark above. The table compares the default 6-worker direct-200MHz 10-run mean against the 100MHz 4ctx measurements (`4.683/5.782/9.836/17.677/44.146/19.965s`).
+The ZU4EV result should be compared primarily against the previous 7K70T direct-200MHz points. Both families run at 200 MHz, so the gains above come from deployable parallelism (`12 workers / 8 contexts`) and not from a higher clock. The shallow scenes improve modestly because fixed host-tile, collection, command, and UART overheads remain visible. The deep scenes improve much more because more FP pipelines stay occupied.
 
-Major historical performance points are summarized below for context. Rows are not all the same test campaign: older rows are representative historical measurements, while the final 6-worker direct-200MHz row is the latest 10-run mean. Use this table to understand architecture progression; use the current benchmark table above for the validated default result.
+Major architecture performance stages are summarized below. Rows are not all the same test campaign; use them as a compact progression map, and use the current table above for the latest validated ZU4EV point.
 
-| Version / mode | Test setup | Fast escape @128 | Standard @64 | Seahorse @512 | Deep mini-brot @8192 |
+| Version / mode | Board / clock | Fast escape @128 | Standard @64 | Seahorse @512 | Deep mini-brot @8192 |
 |---|---|---:|---:|---:|---:|
-| Historical 576k, 4-worker 1ctx | UART-bound baseline | `72.736s` | `72.735s` | `74.265s` | `234.231s` |
+| Historical 576k, 4-worker 1ctx | Early UART-bound baseline | `72.736s` | `72.735s` | `74.265s` | `234.231s` |
 | 12M single-burst, 4-worker 2ctx | High baud, monolithic response | `4.678s` | `4.202s` | `17.280s` | `83.428s` |
-| 12M tiled, 2ctx host tile = compute tile | Previous default, `1920x120` at 1080p | `5.127s` | `4.731s` | `19.440s` | `83.561s` |
-| 12M tiled, 4ctx 100MHz host tile = compute tile | 100MHz reference, `1920x120` at 1080p | `4.683s` | `5.782s` | `9.836s` | `44.146s` |
-| 12M tiled, 4-worker 4ctx direct 200MHz host tile = compute tile | Previous default, 10-run mean | `5.072s` | `5.066s` | `7.879s` | `31.625s` |
-| 12M tiled, 6-worker 4ctx direct 200MHz host tile = compute tile | Current default, timing-fixed 10-run mean | `4.641s` | `4.636s` | `5.715s` | `20.963s` |
+| 7K70T 4-worker 4ctx direct 200MHz | First validated direct-200MHz default | `5.072s` | `5.066s` | `7.879s` | `31.625s` |
+| 7K70T 6-worker 4ctx direct 200MHz | Timing-fixed worker scaling | `4.641s` | `4.636s` | `5.715s` | `20.963s` |
+| ZU4EV 12-worker 8ctx direct 200MHz | Current accepted point | `4.150s` | `4.143s` | `4.289s` | `9.183s` |
 
-The current 6-worker direct-200MHz default is the best validated point in the measured matrix. It improves the previous 4-worker direct-200MHz default by about `1.09x` on fast escape and about `1.38x-1.51x` on compute-heavy scenes. The 100MHz 4ctx build remains available as an explicit reference through `build_fp64_100mhz.tcl`. Detailed history and caveats are in [ARCHITECTURE_EVOLUTION_REPORT.md](doc/ARCHITECTURE_EVOLUTION_REPORT.md) and [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
+The current ZU4EV build is the best validated point in the measured matrix. Detailed 200MHz ZU4EV optimization data and the full six-scene comparison are in [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md). Historical 7K70T timing closure and worker-count scaling are in [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md) and [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
 
 The 4096x4096 default host-tiled path was also checked at RTL packetizer level. The simulation splits the logical image into 35 hardware responses, verifies 262144 `TD` packets and 16777216 pixels, and passes checksum and frame-boundary checks. This validates packet/count/tail behavior for the current host tiling geometry; it does not replace board-level USB-UART soak testing.
 
@@ -718,22 +706,22 @@ The FPGA FP64 engine uses truncation-rounding (round-toward-zero) while the Pyth
 
 Detailed report: [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](doc/FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md).
 
-Current XC7K70T direct-200MHz FP64 routed timing is signed off with no core multicycle exceptions:
+Current ZU4EV direct-200MHz FP64 routed timing is signed off with no core multicycle exceptions:
 
 | Build | Scheduler | Workers | Worker contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|---:|
-| `build_fp64.tcl` on `xc7k70tfbg676-1` | Dynamic idle-core rows + tiled response | 6 | 4 | `0.003ns` | `0.000ns` | `0.042ns` | `0.000ns` |
+| `build_fp64.tcl` on `xczu4ev-sfvc784-1-i` | Dynamic idle-core rows + tiled response | 12 | 8 | `0.148ns` | `0.000ns` | `0.010ns` | `0.000ns` |
 
-Latest routed utilization for the XC7K70T default direct-200MHz 6-worker, 4ctx build:
+Latest routed utilization for the ZU4EV default direct-200MHz 12-worker, 8ctx build:
 
 | Resource | Used | Device | Utilization |
 |---|---:|---:|---:|
-| Slice LUTs | 29891 | 41000 | 72.90% |
-| Slice Registers | 25501 | 82000 | 31.10% |
-| DSP48E1 | 97 | 240 | 40.42% |
-| Block RAM Tile | 13.5 | 135 | 10.00% |
+| CLB LUTs | 85171 | 87840 | 96.96% |
+| CLB Registers | 71453 | 175680 | 40.67% |
+| DSP48E2 | 121 | 728 | 16.62% |
+| Block RAM Tile | 25.5 | 128 | 19.92% |
 
-The default direct-200MHz datapath is now the validated 6-worker, 4ctx performance point. It meets timing at `WNS=0.003ns`, `TNS=0.000ns`, `WHS=0.042ns`, `THS=0.000ns`, and completed the 10-run six-scene benchmark above. Historical resource, timing, and performance comparisons are tracked in [ARCHITECTURE_EVOLUTION_REPORT.md](doc/ARCHITECTURE_EVOLUTION_REPORT.md); direct-200MHz closure details are in [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md), and worker-count scaling details are in [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
+The default direct-200MHz datapath is now the validated ZU4EV 12-worker, 8ctx performance point. It meets timing at `WNS=0.148ns`, `TNS=0.000ns`, `WHS=0.010ns`, `THS=0.000ns`, passed small-image HW/SW verification, and completed the six-scene 1080p benchmark above. Historical 7K70T resource, timing, and performance comparisons remain in [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md) and [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
 
 ## Troubleshooting
 

@@ -12,7 +12,7 @@ if {$argc >= 2} {
 set proj_name "mandelbrot_fp64_100mhz_c${core_count}_ctx${worker_contexts}"
 set proj_dir  "./fp64_100mhz_c${core_count}_ctx${worker_contexts}_proj"
 set rtl_dir   "./rtl"
-set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
+set xdc_file  "./constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc"
 
 puts "========================================"
 puts " Mandelbrot FP64 100 MHz Reference Build"

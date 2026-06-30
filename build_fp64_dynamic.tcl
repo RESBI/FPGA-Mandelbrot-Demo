@@ -2,7 +2,7 @@ set part_name "xc7k70tfbg676-1"
 set proj_name "mandelbrot_fp64_dynamic"
 set proj_dir  "./fp64_dynamic_proj"
 set rtl_dir   "./rtl"
-set xdc_file  "./constraints_hvs_xc7k70t/mandelbrot_top.xdc"
+set xdc_file  "./constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc"
 
 puts "========================================"
 puts " Mandelbrot FP64 Dynamic Scheduler Build"

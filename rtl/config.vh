@@ -21,7 +21,7 @@
 `endif
 
 `ifndef CFG_CORE_COUNT
-`define CFG_CORE_COUNT 6
+`define CFG_CORE_COUNT 12
 `endif
 
 `ifndef CFG_CORE_FIFO_DEPTH
@@ -49,7 +49,7 @@
 `endif
 
 `ifndef CFG_WORKER_CONTEXTS
-`define CFG_WORKER_CONTEXTS 4
+`define CFG_WORKER_CONTEXTS 8
 `endif
 
 `endif // CONFIG_VH

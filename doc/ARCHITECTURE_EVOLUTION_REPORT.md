@@ -1,6 +1,6 @@
 # Architecture Evolution And Optimization Report
 
-This report explains the design thinking behind the Mandelbrot FPGA accelerator and summarizes how the architecture evolved from the initial single-core UART renderer to the current 4-core FP64 implementation. Stage-specific details are intentionally linked to the focused reports instead of duplicated in full.
+This report explains the design thinking behind the Mandelbrot FPGA accelerator and summarizes how the architecture evolved from the initial single-core UART renderer to the current VMC_RTSB ZU4EV 12-worker FP64 implementation. Stage-specific details are intentionally linked to the focused reports instead of duplicated in full.
 
 ## Related Stage Reports
 
@@ -18,31 +18,32 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Abandoned N-context worker experiments | [CONTEXT_WORKER_ARCHITECTURE_REPORT.md](CONTEXT_WORKER_ARCHITECTURE_REPORT.md) | Generic scoreboard 4/8ctx and ring/lookahead experiments; behavioral pass but not deployable on xc7z010. |
 | Direct 200 MHz closure | [200MHZ_ATTEMPT_REPORT.md](200MHZ_ATTEMPT_REPORT.md) | 4ctx direct-clock timing closure, functional failure analysis, request slicing, tag-latency fix, and hardware benchmark. |
 | Worker-count scaling | [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md) | 6/8-worker build, timing, 6-worker 200MHz timing fix, and hardware benchmark comparison. |
+| ZU4EV 200 MHz optimization | [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md) | VMC_RTSB ZU4EV board adaptation, single-ended 200 MHz clocking, UART bring-up, 12-worker/8-context scaling, timing/resource data, and 1080p benchmark update. |
 | Historical notes | [DESIGN.md](DESIGN.md) | Earlier design notes and historical context. |
 
 ## Final Current State
 
 | Item | Current Value |
 |---|---:|
-| FPGA | Xilinx Kintex-7 `xc7k70tfbg676-1` |
-| Board clock input | 200 MHz differential `CLK_200_P/N` |
+| FPGA | Xilinx Zynq UltraScale+ EV `xczu4ev-sfvc784-1-i` |
+| Board clock input | 200 MHz single-ended `sys_clk` on `E12` |
 | Internal system clock | Direct 200 MHz (`DIRECT_200MHZ=1`) |
 | Floating-point mode | FP64 |
-| Compute cores | 4 |
-| Worker contexts | 4 per worker |
+| Compute cores | 12 workers |
+| Worker contexts | 8 per worker |
 | Default scheduler | Dynamic idle-core rows |
-| Mandelbrot workers | 6 |
+| Mandelbrot workers | 12 |
 | Effective worker rate | 200 MHz per worker, `FP_CE_DIV=1` |
-| 100MHz reference build | `build_fp64_100mhz.tcl` |
+| Main build | `build_fp64.tcl`, `CORE_COUNT=12`, `WORKER_CONTEXTS=8` |
 | UART | 12000000 baud, 8N1, fractional-NCO RX/TX |
-| Host serial port default | `COM9` |
-| Programming link | Vivado `hw_server` at `127.0.0.1:3122`, CH347 XVC at `127.0.0.1:2542` |
+| Host serial port default | `COM6` |
+| Programming link | Vivado hardware auto-connect, target matched by `*xczu4*` |
 | Host protocol | Unchanged raster-order response stream |
 | Pixel format | 16-bit little-endian iteration count |
 | Largest validated frame | 1920x1080 |
-| Current XC7K70T board build status | Full FP64 bitstream builds cleanly |
-| Current XC7K70T timing/utilization | `WNS=0.015ns`, `TNS=0.000ns`; 20288 / 41000 Slice LUTs, 17202 / 82000 registers, 37 / 240 DSP48E1, 9.5 / 135 BRAM tiles |
-| 100MHz reference timing/utilization | `WNS=0.583ns`, `TNS=0.000ns`; 36367 / 41000 Slice LUTs, 19149 / 82000 registers, 37 / 240 DSP48E1, 9.5 / 135 BRAM tiles |
+| Current ZU4EV board build status | Full FP64 bitstream builds cleanly |
+| Current ZU4EV timing/utilization | `WNS=0.148ns`, `TNS=0.000ns`; 85171 / 87840 CLB LUTs, 71453 / 175680 registers, 121 / 728 DSP48E2, 25.5 / 128 BRAM tiles |
+| Most relevant historical reference | XC7K70T direct-200MHz 6-worker/4-context point from [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md) |
 
 ## Initial Architecture Design Thinking
 
@@ -721,7 +722,7 @@ Detailed report: [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md).
 |---|---:|---:|---:|---|---|
 | Previous default | direct 200MHz | 4 | 4 | Validated on board | `WNS=0.015ns`; 20288 LUT, 17202 FF, 37 DSP48E1, 9.5 BRAM tiles |
 | Original 6-worker candidate | direct 200MHz | 6 | 4 | Routed but not valid for board test | `WNS=-0.165ns`, `TNS=-8.713ns`; route-dominated dispatcher/worker-control paths |
-| Fixed 6-worker candidate | direct 200MHz | 6 | 4 | Timing-clean, programmed, benchmarked, now default | `WNS=0.003ns`, `TNS=0.000ns`; 29891 LUT, 25501 FF, 97 DSP48E1, 13.5 BRAM tiles |
+| Fixed 6-worker candidate | direct 200MHz | 6 | 4 | Timing-clean, programmed, benchmarked, became the XC7K70T-stage default | `WNS=0.003ns`, `TNS=0.000ns`; 29891 LUT, 25501 FF, 97 DSP48E1, 13.5 BRAM tiles |
 | 8-worker candidate | direct 200MHz | 8 | 4 | Placement failed | LUT/slice packing over-utilized; 40635 synth LUT, 33366 FF, 129 DSP48E1 |
 | 8-worker reference | 100MHz | 8 | 4 | Timing-clean and benchmarked | Useful comparison point, but slower than fixed 6-worker 200MHz on compute-heavy scenes |
 
@@ -755,7 +756,120 @@ Validation after the fix:
 
 ### Updated Default Decision
 
-The fixed 6-worker direct-200MHz build is now the repository default because it is timing-clean, hardware-benchmarked, and fastest across the measured six-scene 1080p set. The previous 4-worker direct-200MHz build remains the lower-area 200MHz reference, and the 100MHz 4ctx build remains an explicit reference for comparisons.
+The fixed 6-worker direct-200MHz build became the repository default for the XC7K70T stage because it was timing-clean, hardware-benchmarked, and fastest across that measured six-scene 1080p set. The previous 4-worker direct-200MHz build remained the lower-area 200MHz reference, and the 100MHz 4ctx build remained an explicit reference for comparisons.
+
+## Stage 11: VMC_RTSB ZU4EV 200MHz 12-Worker/8-Context Default
+
+The next architecture step moved the validated direct-200MHz design from the XC7K70T target to the VMC_RTSB ZU4EV board and used the larger FPGA to increase both worker count and per-worker context count. This stage was not treated as a board-only port. The final accepted point changes the active platform, the constraints, the UART bring-up assumptions, the programming flow, the default worker/context parameters, and the performance baseline.
+
+Detailed report: [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md).
+
+### Board And Constraint Migration
+
+The old active target used an XC7K70T board with differential `CLK_200_P/N` and CH347/XVC-oriented programming assumptions. The current target is VMC_RTSB ZU4EV with a single-ended 200 MHz reference clock.
+
+| Area | Previous active target | Current target |
+|---|---|---|
+| FPGA part | `xc7k70tfbg676-1` | `xczu4ev-sfvc784-1-i` |
+| Clock input | Differential `CLK_200_P/N` | Single-ended `sys_clk` on `E12` |
+| Clock constraint | 200 MHz differential board clock | `create_clock -period 5.000 [get_ports sys_clk]` |
+| Main XDC directory | `constraints_hvs_xc7k70t` | `constraints_vmc_rtsb_zu4ev` |
+| Main XDC file | XC7K70T board constraints | `constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc` |
+| UART pins | Old board mapping | `uart_rx=D12`, `uart_tx=C12`, `LVCMOS25` |
+| Status LEDs | Broad XC7K70T LED/J1 mapping | `led[2]=A11`, `led[3]=A12`, `LVCMOS25` |
+| Host port | `COM9` | `COM6` |
+| Programming | XVC-specific flow | Vivado hardware auto-connect, device match `*xczu4*` |
+
+The active constraints were migrated into `constraints_vmc_rtsb_zu4ev`. The old `constraints_hvs_xc7k70t` directory is no longer referenced by active build scripts. The stale `led.xdc` content in the ZU4EV constraint area was removed because it used an old `E10` clock assumption and conflicted with the current UART pins.
+
+### Top-Level And UART Bring-Up Changes
+
+The ZU4EV top-level clocking is intentionally simpler than the old board-specific differential path:
+
+```text
+E12 sys_clk pad -> BUFG -> sys_clk_i -> UART/parser/core/FIFOs/TX
+```
+
+The UART test tops were updated before relying on hardware measurements:
+
+| Test top | Change | Board result |
+|---|---|---|
+| `rtl/uart_tx_pattern_top.v` | Single-ended `sys_clk`, `BUFG`, explicit `CLK_HZ=200000000` | Pattern `55aa00ff524b017e` received at `COM6 / 12 Mbaud`, `pattern_hits=3921` |
+| `rtl/uart_echo_top.v` | Single-ended `sys_clk`, `BUFG`, explicit `CLK_HZ=200000000` | Echo passed `32/32` trials at `COM6 / 12 Mbaud` |
+
+This avoided a common false-positive risk during board migration: testing UART with a stale MMCM/100MHz assumption while the main design uses direct 200MHz timing.
+
+### Default Architecture Change
+
+The previous best XC7K70T point was 6 workers with 4 contexts per worker at direct 200 MHz. On ZU4EV, the first buildable baseline used the same 6/4 shape to verify clocking, constraints, and part migration. The accepted performance point then doubled both worker count and contexts per worker.
+
+| Candidate | Workers | Contexts/worker | Clock | Result | Timing/resource summary |
+|---|---:|---:|---:|---|---|
+| ZU4EV baseline | 6 | 4 | 200 MHz | Sim/build passed | `WNS=0.751ns`; 30057 / 87840 LUT, 27099 / 175680 FF, 61 / 728 DSP, 13.5 / 128 BRAM |
+| ZU4EV accepted default | 12 | 8 | 200 MHz | Sim/build/program/HW benchmark passed | `WNS=0.148ns`; 85171 / 87840 LUT, 71453 / 175680 FF, 121 / 728 DSP, 25.5 / 128 BRAM |
+
+The reason for scaling contexts as well as workers is pipeline occupancy. Each worker still owns one FP64 multiplier and one FP64 adder. With `MUL_LAT=6` and `ADD_LAT=9`, more live contexts help each worker keep its shared FP pipelines busy while additional workers provide row-level parallelism.
+
+No arithmetic latency change was made in this stage:
+
+```verilog
+localparam MUL_LAT = 6;
+localparam ADD_LAT = 9;
+```
+
+The routed timing evidence did not point to a deep FP add/mul combinational cone. The accepted 12/8 worst path is route-dominated command-parameter distribution, for example from `u_cmd/step_reg` to worker-local `step_val_reg`, with about `98%` route delay and zero LUT levels. That makes the next compute optimization a fanout/routing problem, not an arithmetic pipeline-depth problem.
+
+### Simulation And Hardware Validation
+
+The scaled 12/8 candidate passed behavioral simulation before implementation:
+
+```text
+vivado.bat -mode batch -source sim_multicore_dynamic_contexts.tcl -tclargs WORKER_CONTEXTS 8 CORE_COUNT 12 ROWS 12 COLS 160 MAX_ITER 256 CORE_FIFO_DEPTH 4096 TIMEOUT_CYCLES 30000000
+=== DYNAMIC MULTICORE TEST PASS: 1920 pixels ===
+```
+
+The same behavioral workload improved materially before UART or host effects were involved:
+
+| Candidate | Workers | Contexts | Sim workload | Sim finish time | Relative speed |
+|---|---:|---:|---|---:|---:|
+| Baseline | 6 | 4 | `12x160`, `max_iter=256`, `1920 pixels` | `15.978ms` | `1.000x` |
+| Scaled | 12 | 8 | `12x160`, `max_iter=256`, `1920 pixels` | `6.300ms` | `2.536x` |
+
+The accepted bitstream was then verified on hardware with a small software-checked image:
+
+```text
+python python\mandelbrot_host.py --port COM6 --width 160 --height 120 --max-iter 256 --center -0.5 0.0 --step 0.005 --output python\hw_zu4ev_200m_c12ctx8_160x120.png --verify --quiet --timeout 60 --tile-width 160 --tile-height 120 --tile-retries 3
+FPGA elapsed: 0.058s, 332476.74 pixels/s
+HW vs SW: 19200/19200 match (100.00%)
+```
+
+### 1080p Performance Update
+
+The current ZU4EV 12-worker/8-context result was benchmarked with the same six 1080p scene set, `1920x120` host/compute tiles, and `12 Mbaud` UART. The representative summary file is `../python/host_tile_stability_bench/zu4ev200m_c12ctx8_6scene.md`.
+
+| Scene | Transport pass | Retry events | FPGA seconds | Pixels/s | vs XC7K70T 6w/4ctx 200MHz |
+|---|---:|---:|---:|---:|---:|
+| fast escape @128 | `1/1` | `0` | `4.150` | `499705.08` | `1.118x` |
+| standard @64 | `1/1` | `0` | `4.143` | `500531.67` | `1.119x` |
+| Seahorse zoom @512 | `1/1` | `0` | `4.289` | `483464.75` | `1.333x` |
+| deep tendrils @8192 | `1/1` | `0` | `4.418` | `469374.80` | `1.939x` |
+| deep mini-brot @8192 | `1/1` | `0` | `9.183` | `225810.49` | `2.282x` |
+| deep Seahorse @1024 | `1/1` | `0` | `4.767` | `435016.18` | `2.028x` |
+
+The improvement pattern is important. Fast escape and standard scenes move only modestly because UART, host parsing, response packetization, command overhead, and raster-order collection are already significant. Deep scenes improve much more because more workers and more contexts increase FP pipeline occupancy and row-level throughput.
+
+### Resource Cost And Architectural Decision
+
+The accepted ZU4EV point nearly exhausts LUT capacity while leaving DSP and BRAM capacity mostly unused:
+
+| Metric | 6w/4ctx baseline | 12w/8ctx accepted | Increase |
+|---|---:|---:|---:|
+| CLB LUTs | `30057` (`34.22%`) | `85171` (`96.96%`) | `2.83x` |
+| CLB Registers | `27099` (`15.43%`) | `71453` (`40.67%`) | `2.64x` |
+| BRAM Tiles | `13.5` (`10.55%`) | `25.5` (`19.92%`) | `1.89x` |
+| DSPs | `61` (`8.38%`) | `121` (`16.62%`) | `1.98x` |
+
+The repository default is now the ZU4EV 12-worker/8-context direct-200MHz build. It is timing-clean, passes simulation, has been programmed and verified on hardware, and improves every measured scene against the previous best 7K70T 200MHz point. Because LUT utilization is already `96.96%` and the worst path is route dominated, the next architecture step should not be naive worker replication. The next useful compute-side changes are localizing command-parameter fanout, reducing per-context LUT pressure, grouping/floorplanning workers if needed, or adding a higher-bandwidth transport so the existing compute capacity is easier to observe on fast scenes.
 
 ## Architectural Lessons
 
@@ -798,7 +912,7 @@ Why the measured speedup is effectively zero:
 | The collector still emits strict raster order | A slow earlier row can still hold the output stream even if later rows completed. |
 | High-iteration views are dominated by the worker FSM and `PIPE_WAIT=10` FP latency | Row scheduling does not increase per-worker FP issue utilization. |
 
-The architectural value is therefore not just immediate throughput. It validates that the dispatch/collection boundary can be replaced without touching UART, command parsing, FP datapaths, or host protocol, and it remains the scheduling layer used by the current 4-context default build.
+The architectural value is therefore not just immediate throughput. It validates that the dispatch/collection boundary can be replaced without touching UART, command parsing, FP datapaths, or host protocol, and it remains the scheduling layer used by the current ZU4EV 12-worker/8-context default build.
 
 Validation after adding this mode:
 
@@ -811,11 +925,12 @@ Validation after adding this mode:
 
 ## Recommended Next Evolution
 
-The next major improvement should target protocol and transport before adding more compute cores.
+The next major improvement should target routing pressure, protocol resilience, and transport bandwidth before adding more compute cores.
 
 ```mermaid
 flowchart LR
-    NOW[Current 6-worker raster UART] --> LINK[Higher bandwidth link]
+    NOW[Current ZU4EV 12w/8ctx raster UART] --> FANOUT[Reduce parameter fanout and LUT pressure]
+    FANOUT --> LINK[Higher bandwidth link]
     LINK --> PROTO[Coordinate-tagged rows/tiles]
     PROTO --> SCHED[Dynamic tile scheduler]
     SCHED --> CORES[More workers only with lower routing/resource pressure]
@@ -825,14 +940,15 @@ Recommended order:
 
 | Priority | Step | Reason |
 |---:|---|---|
-| 1 | Add sequence numbers and true retransmission | Current `RT`/`TD`/`TE` packets detect errors, and host-driven tiling can recompute a stripe, but the FPGA still cannot retransmit one packet. |
-| 2 | Add request IDs and stronger row/tile IDs | Enables resynchronization, duplicate rejection, and out-of-order completion beyond the current raster collector. |
-| 3 | Add a higher-bandwidth transport | USB FIFO, SPI, Ethernet, or PS memory mapping would remove UART/driver burst limits. |
-| 4 | Keep 6-worker direct-200MHz as the performance default | It is the fastest timing-clean, board-benchmarked point so far. |
-| 5 | Keep 4-worker direct-200MHz and 100MHz 4ctx as explicit reference builds | They are useful lower-area and clock-reference comparison points. |
-| 6 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
-| 7 | Revisit 8 or more workers only with lower-route-pressure structure | The direct 8-worker build already fails placement on XC7K70T. |
-| 8 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
+| 1 | Keep ZU4EV 12-worker/8-context direct-200MHz as the performance default | It is the fastest timing-clean, board-benchmarked point so far. |
+| 2 | Reduce command-parameter fanout and worker-local routing pressure | The accepted ZU4EV build is LUT-heavy and its worst path is route dominated, not arithmetic-depth dominated. |
+| 3 | Add sequence numbers and true retransmission | Current `RT`/`TD`/`TE` packets detect errors, and host-driven tiling can recompute a stripe, but the FPGA still cannot retransmit one packet. |
+| 4 | Add request IDs and stronger row/tile IDs | Enables resynchronization, duplicate rejection, and out-of-order completion beyond the current raster collector. |
+| 5 | Add a higher-bandwidth transport | USB FIFO, SPI, Ethernet, or PS memory mapping would remove UART/driver burst limits. |
+| 6 | Keep XC7K70T 4-worker/6-worker 200MHz and 100MHz 4ctx data as explicit historical references | They remain useful for regression and architecture comparison, but they are no longer the active default. |
+| 7 | Extend row-level dynamic scheduling to dynamic tiles | Improves load balance on localized deep zooms once output can be tagged. |
+| 8 | Revisit more workers only with lower-route-pressure structure | The current ZU4EV point already uses `96.96%` CLB LUTs. |
+| 9 | Add mathematical interior tests | Cardioid/period-2 bulb rejection can reduce compute for standard views. |
 
 ## Summary
 
@@ -852,6 +968,8 @@ The project evolved through a pragmatic sequence:
 12. Add tiled response framing and host-driven 1920x120 stripe retries to make 12 Mbaud operation recoverable at tile granularity.
 13. Make the validated 4-context generic worker the XC7K70T default, confirming the context-scaling performance direction while exposing the LUT cost.
 14. Close and validate direct-200MHz 4ctx using request-sliced FPU issue and corrected tag latency.
-15. Replicate the validated 4ctx worker to six direct-200MHz workers, fix route-dominated dispatcher/worker-control timing, and make the timing-clean 6-worker result the default.
+15. Replicate the validated 4ctx worker to six direct-200MHz workers, fix route-dominated dispatcher/worker-control timing, and make the timing-clean 6-worker XC7K70T result the default for that stage.
+16. Migrate the active target to VMC_RTSB ZU4EV with single-ended `sys_clk` on `E12`, clean ZU4EV constraints, Vivado auto-connect programming, and `COM6` host defaults.
+17. Scale the ZU4EV default to 12 workers and 8 contexts per worker, preserving `MUL_LAT=6`, `ADD_LAT=9`, direct 200MHz timing, dynamic row scheduling, and the existing UART command/response protocol.
 
-The current design preserves the original host command protocol while raising the default transport to 12 Mbaud, adding packetized response parsing, and making the validated direct-200MHz 6-worker 4ctx build the default. Fast 1080p scenes now reach hundreds of thousands of pixels per second, and the 6-worker default raises deep mini-brot from the 100MHz `44.146s` reference to a 10-run mean of `20.963s` (`2.106x`). Relative to the previous 4-worker direct-200MHz default, the 6-worker build improves compute-heavy scenes by about `1.38x-1.51x`. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is sequence-numbered retransmission, a stronger transport, or a lower-route-pressure compute structure that preserves the 4ctx/200MHz performance direction without relying on wider generic context arrays or overfilling the device with identical workers.
+The current design preserves the original host command protocol while running the active VMC_RTSB ZU4EV target at direct 200 MHz, `12 Mbaud`, 12 workers, and 8 contexts per worker. Fast 1080p scenes now reach about `500k pixels/s`, and the accepted ZU4EV default raises deep mini-brot from the previous XC7K70T 6-worker/4-context 200MHz `20.963s` mean to `9.183s` in the representative ZU4EV run (`2.282x`). Relative to the previous best 7K70T 200MHz point, the ZU4EV 12w/8ctx build improves every measured scene, with the largest gains in deep compute-heavy views. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is reducing route/fanout pressure, strengthening packet/request identity, adding true retransmission or a higher-bandwidth transport, and only then revisiting additional compute parallelism.

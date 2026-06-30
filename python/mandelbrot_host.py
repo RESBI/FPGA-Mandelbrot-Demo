@@ -23,7 +23,7 @@ import argparse
 import os
 import colorsys
 
-PORT = "COM9"
+PORT = "COM6"
 BAUD = 12000000
 TIMEOUT = 180.0
 DEFAULT_DYNAMIC_OWNER_DEPTH = 4096
