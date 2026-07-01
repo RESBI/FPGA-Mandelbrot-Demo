@@ -8,7 +8,9 @@ module top #(
     parameter SCHED_MODE = `CFG_SCHED_MODE,
     parameter DYNAMIC_OWNER_DEPTH = `CFG_DYNAMIC_OWNER_DEPTH,
     parameter CORE_COUNT = `CFG_CORE_COUNT,
-    parameter WORKER_CONTEXTS = `CFG_WORKER_CONTEXTS
+    parameter WORKER_CONTEXTS = `CFG_WORKER_CONTEXTS,
+    parameter WORKER_ADD_UNITS = `CFG_WORKER_ADD_UNITS,
+    parameter WORKER_MUL_UNITS = `CFG_WORKER_MUL_UNITS
 ) (
     input  wire uart_rx,
     output wire uart_tx,
@@ -139,7 +141,9 @@ module top #(
         .CORE_FIFO_DEPTH(`CFG_CORE_FIFO_DEPTH),
         .SCHED_MODE(SCHED_MODE),
         .DYNAMIC_OWNER_DEPTH(DYNAMIC_OWNER_DEPTH),
-        .WORKER_CONTEXTS(WORKER_CONTEXTS)
+        .WORKER_CONTEXTS(WORKER_CONTEXTS),
+        .WORKER_ADD_UNITS(WORKER_ADD_UNITS),
+        .WORKER_MUL_UNITS(WORKER_MUL_UNITS)
     ) u_core (
         .clk            (sys_clk_i),
         .rst            (rst),

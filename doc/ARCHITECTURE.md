@@ -1182,31 +1182,31 @@ At 12 Mbaud, the practical UART payload upper bound is roughly:
 Measured direct-200MHz fast-scene throughput remains below that theoretical serial payload limit because host/driver overhead, response framing, retry recovery, FIFO pacing, issue slicing, and compute start/finish overhead still matter:
 
 ```text
-1080p fast escape @128: 499705.08 pixels/s, representative single run
-1080p standard @64:    500531.67 pixels/s, representative single run
+1080p fast escape @128: 468446.75 pixels/s, 10-run mean
+1080p standard @64:    480268.18 pixels/s, 10-run mean
 ```
 
-Current direct-200MHz dynamic + 12-worker + 8-context examples at 12 Mbaud with `1920x120` host/compute tiles:
+Current direct-200MHz dynamic + 12-worker + 8-context 10-run examples at 12 Mbaud with `1920x120` host/compute tiles:
 
 | Case | FPGA Time | Throughput | Main limiter |
 |---|---:|---:|---|
-| `1080p Seahorse zoom @512` | `4.289s` | `483464.75 pps` | Mixed compute/output |
-| `1080p deep tendrils @8192` | `4.418s` | `469374.80 pps` | Mostly compute |
-| `1080p deep minibrot @8192` | `9.183s` | `225810.49 pps` | Compute-bound |
-| `1080p deep Seahorse @1024` | `4.767s` | `435016.18 pps` | Mostly compute |
+| `1080p Seahorse zoom @512` | `4.499s` | `467436.73 pps` | Mixed compute/output |
+| `1080p deep tendrils @8192` | `4.739s` | `441838.90 pps` | Mostly compute |
+| `1080p deep minibrot @8192` | `10.146s` | `206484.60 pps` | Compute-bound |
+| `1080p deep Seahorse @1024` | `4.967s` | `420129.06 pps` | Mostly compute |
 
 Fast escape and standard views are transport/host/issue-overhead sensitive. The current ZU4EV 12-worker/8-context direct-200MHz default is faster than the previous 7K70T 6-worker/4-context direct-200MHz point on every measured scene, with the largest gains in compute-heavy views. Detailed current performance is kept in [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md); historical comparisons are kept in [ARCHITECTURE_EVOLUTION_REPORT.md](ARCHITECTURE_EVOLUTION_REPORT.md) and [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md).
 
-The latest representative direct-200MHz ZU4EV 12-worker/8-context summary is:
+The latest direct-200MHz ZU4EV 12-worker/8-context 10-run summary is:
 
-| Scene | Transport pass | Retry events | FPGA s | Pixels/s | vs 7K70T 6w/4ctx 200MHz |
-|---|---:|---:|---:|---:|---:|
-| fast escape @128 | `1/1` | `0` | `4.150` | `499705.08` | `1.118x` |
-| standard @64 | `1/1` | `0` | `4.143` | `500531.67` | `1.119x` |
-| Seahorse zoom @512 | `1/1` | `0` | `4.289` | `483464.75` | `1.333x` |
-| deep tendrils @8192 | `1/1` | `0` | `4.418` | `469374.80` | `1.939x` |
-| deep mini-brot @8192 | `1/1` | `0` | `9.183` | `225810.49` | `2.282x` |
-| deep Seahorse @1024 | `1/1` | `0` | `4.767` | `435016.18` | `2.028x` |
+| Scene | Transport pass | Retry events | Mean FPGA s | Min | Max | CV | Mean pixels/s | vs 7K70T 6w/4ctx 200MHz |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| fast escape @128 | `10/10` | `4` | `4.563` | `4.146` | `7.261` | `21.96%` | `468446.75` | `1.017x` |
+| standard @64 | `10/10` | `2` | `4.353` | `4.141` | `5.191` | `10.06%` | `480268.18` | `1.065x` |
+| Seahorse zoom @512 | `10/10` | `2` | `4.499` | `4.288` | `6.371` | `14.62%` | `467436.73` | `1.270x` |
+| deep tendrils @8192 | `10/10` | `3` | `4.739` | `4.417` | `5.492` | `10.79%` | `441838.90` | `1.808x` |
+| deep mini-brot @8192 | `10/10` | `6` | `10.146` | `9.181` | `12.295` | `10.91%` | `206484.60` | `2.066x` |
+| deep Seahorse @1024 | `10/10` | `2` | `4.967` | `4.754` | `5.805` | `8.89%` | `420129.06` | `1.946x` |
 
 ## 14. Resource Use
 

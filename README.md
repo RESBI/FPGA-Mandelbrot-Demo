@@ -654,18 +654,18 @@ On each failed compute tile attempt, the host drains stale UART bytes and sends 
 python python\mandelbrot_host.py --port COM6 --soft-reset
 ```
 
-Latest ZU4EV direct-200MHz 12-worker, 8-context 1080p host-tiled run at 12 Mbaud with compute tile equal to host tile (`1920x120` for 1080p), one run per scene:
+Latest ZU4EV direct-200MHz 12-worker, 8-context 1080p host-tiled 10-run benchmark at 12 Mbaud with compute tile equal to host tile (`1920x120` for 1080p):
 
-| Scene | Transport pass | Retry events | FPGA Time | Throughput | vs 7K70T 4w/4ctx 200MHz | vs 7K70T 6w/4ctx 200MHz |
-|---|---:|---:|---:|---:|---:|---:|
-| Fast escape @128 | `1/1` | `0` | `4.150s` | `499705.08 pps` | `1.222x` | `1.118x` |
-| Standard @64 | `1/1` | `0` | `4.143s` | `500531.67 pps` | `1.223x` | `1.119x` |
-| Seahorse zoom @512 | `1/1` | `0` | `4.289s` | `483464.75 pps` | `1.837x` | `1.333x` |
-| Deep tendrils @8192 | `1/1` | `0` | `4.418s` | `469374.80 pps` | `2.902x` | `1.939x` |
-| Deep mini-brot @8192 | `1/1` | `0` | `9.183s` | `225810.49 pps` | `3.444x` | `2.282x` |
-| Deep Seahorse @1024 | `1/1` | `0` | `4.767s` | `435016.18 pps` | `2.913x` | `2.028x` |
+| Scene | Transport pass | Retry events | Mean FPGA Time | Min | Max | CV | Mean throughput | vs 7K70T 6w/4ctx 200MHz |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Fast escape @128 | `10/10` | `4` | `4.563s` | `4.146s` | `7.261s` | `21.96%` | `468446.75 pps` | `1.017x` |
+| Standard @64 | `10/10` | `2` | `4.353s` | `4.141s` | `5.191s` | `10.06%` | `480268.18 pps` | `1.065x` |
+| Seahorse zoom @512 | `10/10` | `2` | `4.499s` | `4.288s` | `6.371s` | `14.62%` | `467436.73 pps` | `1.270x` |
+| Deep tendrils @8192 | `10/10` | `3` | `4.739s` | `4.417s` | `5.492s` | `10.79%` | `441838.90 pps` | `1.808x` |
+| Deep mini-brot @8192 | `10/10` | `6` | `10.146s` | `9.181s` | `12.295s` | `10.91%` | `206484.60 pps` | `2.066x` |
+| Deep Seahorse @1024 | `10/10` | `2` | `4.967s` | `4.754s` | `5.805s` | `8.89%` | `420129.06 pps` | `1.946x` |
 
-The ZU4EV result should be compared primarily against the previous 7K70T direct-200MHz points. Both families run at 200 MHz, so the gains above come from deployable parallelism (`12 workers / 8 contexts`) and not from a higher clock. The shallow scenes improve modestly because fixed host-tile, collection, command, and UART overheads remain visible. The deep scenes improve much more because more FP pipelines stay occupied.
+The ZU4EV result should be compared primarily against the previous 7K70T 6-worker/4-context direct-200MHz point. Both results run at 200 MHz, so the gains above come from deployable parallelism (`12 workers / 8 contexts`) and not from a higher clock. The shallow scenes improve modestly because fixed host-tile, collection, command, UART overhead, and occasional tile retries remain visible. The deep scenes improve much more because more FP pipelines stay occupied.
 
 Major architecture performance stages are summarized below. Rows are not all the same test campaign; use them as a compact progression map, and use the current table above for the latest validated ZU4EV point.
 
@@ -675,7 +675,7 @@ Major architecture performance stages are summarized below. Rows are not all the
 | 12M single-burst, 4-worker 2ctx | High baud, monolithic response | `4.678s` | `4.202s` | `17.280s` | `83.428s` |
 | 7K70T 4-worker 4ctx direct 200MHz | First validated direct-200MHz default | `5.072s` | `5.066s` | `7.879s` | `31.625s` |
 | 7K70T 6-worker 4ctx direct 200MHz | Timing-fixed worker scaling | `4.641s` | `4.636s` | `5.715s` | `20.963s` |
-| ZU4EV 12-worker 8ctx direct 200MHz | Current accepted point | `4.150s` | `4.143s` | `4.289s` | `9.183s` |
+| ZU4EV 12-worker 8ctx direct 200MHz | Current 10-run mean | `4.563s` | `4.353s` | `4.499s` | `10.146s` |
 
 The current ZU4EV build is the best validated point in the measured matrix. Detailed 200MHz ZU4EV optimization data and the full six-scene comparison are in [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md). Historical 7K70T timing closure and worker-count scaling are in [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md) and [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
 

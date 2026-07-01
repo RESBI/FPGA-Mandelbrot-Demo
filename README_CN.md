@@ -100,18 +100,18 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 
 ## 当前资源和时序
 
-最新默认 VMC_RTSB ZU4EV direct-200MHz 12-worker 8ctx 1080p 六场景板级测试，12 Mbaud，默认 `1920x120` host tile，compute tile 等于 host tile：
+最新默认 VMC_RTSB ZU4EV direct-200MHz 12-worker 8ctx 1080p 六场景 10-run 板级测试，12 Mbaud，默认 `1920x120` host tile，compute tile 等于 host tile：
 
-| 场景 | Transport pass | Retry events | FPGA 时间 | 吞吐 | 对比 7K70T 6w/4ctx 200MHz |
-|---|---:|---:|---:|---:|---:|
-| fast escape @128 | `1/1` | `0` | `4.150s` | `499705.08 pps` | `1.118x` |
-| standard @64 | `1/1` | `0` | `4.143s` | `500531.67 pps` | `1.119x` |
-| Seahorse zoom @512 | `1/1` | `0` | `4.289s` | `483464.75 pps` | `1.333x` |
-| deep tendrils @8192 | `1/1` | `0` | `4.418s` | `469374.80 pps` | `1.939x` |
-| deep mini-brot @8192 | `1/1` | `0` | `9.183s` | `225810.49 pps` | `2.282x` |
-| deep Seahorse @1024 | `1/1` | `0` | `4.767s` | `435016.18 pps` | `2.028x` |
+| 场景 | Transport pass | Retry events | 平均 FPGA 时间 | Min | Max | CV | 平均吞吐 | 对比 7K70T 6w/4ctx 200MHz |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| fast escape @128 | `10/10` | `4` | `4.563s` | `4.146s` | `7.261s` | `21.96%` | `468446.75 pps` | `1.017x` |
+| standard @64 | `10/10` | `2` | `4.353s` | `4.141s` | `5.191s` | `10.06%` | `480268.18 pps` | `1.065x` |
+| Seahorse zoom @512 | `10/10` | `2` | `4.499s` | `4.288s` | `6.371s` | `14.62%` | `467436.73 pps` | `1.270x` |
+| deep tendrils @8192 | `10/10` | `3` | `4.739s` | `4.417s` | `5.492s` | `10.79%` | `441838.90 pps` | `1.808x` |
+| deep mini-brot @8192 | `10/10` | `6` | `10.146s` | `9.181s` | `12.295s` | `10.91%` | `206484.60 pps` | `2.066x` |
+| deep Seahorse @1024 | `10/10` | `2` | `4.967s` | `4.754s` | `5.805s` | `8.89%` | `420129.06 pps` | `1.946x` |
 
-上表的倍数是当前 ZU4EV 12w/8ctx 结果相对上一阶段 7K70T 6w/4ctx 200MHz 结果计算的。fast/standard 场景已接近 UART/host/packet overhead 限制，deep 场景收益更大。
+上表的倍数是当前 ZU4EV 12w/8ctx 10-run mean 相对上一阶段 7K70T 6w/4ctx 200MHz 10-run mean 结果计算的。fast/standard 场景已接近 UART/host/packet overhead 限制，且偶发 tile retry 会拉低均值；deep 场景收益更大。
 
 直接使用 200 MHz 作为完整计算时钟的 ZU4EV 12-worker 8ctx 设计已成为当前默认有效性能点：timing-clean，`WNS=0.148ns`, `TNS=0.000ns`，并通过烧录、小图 HW/SW verify 和上述 1080p 六场景测试。当前优化细节见 `doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md`；历史性能、资源、时序和阶段对比见 `doc/ARCHITECTURE_EVOLUTION_REPORT.md`。
 

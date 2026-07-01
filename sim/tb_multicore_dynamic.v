@@ -4,6 +4,8 @@
 module tb_multicore_dynamic #(
     parameter CORE_COUNT = 4,
     parameter WORKER_CONTEXTS = 2,
+    parameter WORKER_ADD_UNITS = 1,
+    parameter WORKER_MUL_UNITS = 1,
     parameter TEST_ROWS = 12,
     parameter TEST_COLS = 16,
     parameter TEST_MAX_ITER = 64,
@@ -38,7 +40,9 @@ module tb_multicore_dynamic #(
         .CORE_FIFO_DEPTH(CORE_FIFO_DEPTH),
         .SCHED_MODE(1),
         .DYNAMIC_OWNER_DEPTH(64),
-        .WORKER_CONTEXTS(WORKER_CONTEXTS)
+        .WORKER_CONTEXTS(WORKER_CONTEXTS),
+        .WORKER_ADD_UNITS(WORKER_ADD_UNITS),
+        .WORKER_MUL_UNITS(WORKER_MUL_UNITS)
     ) u_dut (
         .clk(clk),
         .rst(rst),

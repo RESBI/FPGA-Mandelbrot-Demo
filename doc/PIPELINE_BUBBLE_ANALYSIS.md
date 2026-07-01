@@ -1092,3 +1092,188 @@ The legacy single-context worker had substantial pipeline bubbles: roughly 3 mul
 The first de-bubbling architecture has now been proven with two in-flight pixel contexts per worker, one multiplier, one adder, tagged FP writeback, and ordered commit. Re-running the model with the current latencies strengthens the earlier conclusion: add contexts before adding FP units. `2ctx`/`4ctx`/`8ctx` do not benefit from extra ADD or MUL units in the aggregate model; `16ctx 1M+2A` is the first clear multi-unit step. Adding more multipliers is not the first move because `2M+1A` is still adder-bottlenecked and FP64 multipliers consume scarce DSPs.
 
 At 12 Mbaud, de-bubbling is already strategically relevant for deep scenes: current board throughput is about 80-85% of the compute-only `2ctx 1M+1A` model for deep tendrils, deep mini-brot, and deep Seahorse. Fast scenes remain output/host limited, so transport/protocol work is still required to expose compute gains there.
+
+## ZU4EV 12w/8ctx ADD/MUL Unit Count Update
+
+This update reflects the later VMC_RTSB ZU4EV 200MHz result. The active design is no longer the earlier XC7K70T 4ctx or 6w/4ctx point. The current accepted point is:
+
+| Item | Current value |
+|---|---:|
+| Board / part | VMC_RTSB ZU4EV, `xczu4ev-sfvc784-1-i` |
+| Clock | single-ended `sys_clk` on `E12`, direct 200MHz |
+| Workers | 12 |
+| Contexts per worker | 8 |
+| FP units per worker | `1M+1A` |
+| Worker latency tags | `MUL_LAT=6`, `ADD_LAT=9` |
+| Routed timing | `WNS=0.148ns`, `TNS=0.000ns` |
+| Routed resources | `85171 / 87840` CLB LUTs (`96.96%`), `71453 / 175680` registers, `121 / 728` DSPs, `25.5 / 128` BRAM tiles |
+
+The earlier conclusion that contexts should be increased before FP-unit count was validated by the ZU4EV result: moving from 6 workers / 4 contexts to 12 workers / 8 contexts improved the same behavioral simulation workload from `15.978ms` to `6.300ms` (`2.536x`) without changing `MUL_LAT` or `ADD_LAT`. The remaining question is now different: after reaching 8 contexts per worker and nearly exhausting LUT capacity, should the next de-bubbling step add more `fp_add` or `fp_mul` units?
+
+### Updated 10-Run Board Baseline
+
+The current 10-run 1080p benchmark is the baseline for any future multi-unit comparison. The comparison target is the previous 200MHz 6-worker/4-context XC7K70T point, not the older 100MHz data.
+
+| Scene | Transport pass | Retry events | Mean FPGA s | Mean pps | vs 200MHz 6w/4ctx |
+|---|---:|---:|---:|---:|---:|
+| fast escape @128 | `10/10` | `4` | `4.563` | `468446.75` | `1.017x` |
+| standard @64 | `10/10` | `2` | `4.353` | `480268.18` | `1.065x` |
+| Seahorse zoom @512 | `10/10` | `2` | `4.499` | `467436.73` | `1.270x` |
+| deep tendrils @8192 | `10/10` | `3` | `4.739` | `441838.90` | `1.808x` |
+| deep mini-brot @8192 | `10/10` | `6` | `10.146` | `206484.60` | `2.066x` |
+| deep Seahorse @1024 | `10/10` | `2` | `4.967` | `420129.06` | `1.946x` |
+
+The retry events are tile-level recoveries. They are part of the current whole-system behavior and should be included in whole-frame performance comparisons.
+
+### Feasibility Of More FP Units
+
+The ZU4EV has enough DSP capacity for more FP units, but the accepted design has very little LUT/routing headroom:
+
+| Resource | Used | Device | Remaining | Meaning for extra FP units |
+|---|---:|---:|---:|---|
+| CLB LUTs | `85171` | `87840` | `2669` (`3.04%`) | Main blocker. Extra issue, mux, and writeback logic is risky. |
+| CLB Registers | `71453` | `175680` | `104227` | Not a blocker. |
+| DSPs | `121` | `728` | `607` | Plenty of raw multiplier capacity. |
+| BRAM Tiles | `25.5` | `128` | `102.5` | Not a blocker. |
+
+Therefore the critical cost of extra adders or multipliers is not the DSP count itself. The critical cost is the logic around the FP units:
+
+| Current single-lane structure | What a second lane adds |
+|---|---|
+| One `add_a/add_b/add_neg` and one `mul_a/mul_b` operand path | More 64-bit operand muxing and more routing from context state. |
+| One `add_req_*` and one `mul_req_*` issue slot | Wider issue selection and more hazard checks. |
+| One tag pipe per FP unit | Per-lane tag pipes and lane-id handling. |
+| One result writeback case per unit | Multiple simultaneous result returns and conflict avoidance. |
+| Generic 8-context ready scan | Potential two-of-eight selection logic, which is much more expensive than one-of-eight. |
+
+This means a naive `2A` or `2M` extension of `mandelbrot_core_worker_kctx` is likely to be LUT/routing-limited, even though DSP utilization is low.
+
+### Operation Balance Revisited
+
+One non-escaping Mandelbrot iteration still needs approximately:
+
+```text
+3 multiplier issues
+5 adder/subtractor issues
+```
+
+With enough independent contexts, the ideal issue limit is:
+
+```text
+T_issue = max(3 / M, 5 / A)
+```
+
+For the current and proposed per-worker FP-unit mixes:
+
+| FP units per worker | Ideal issue limit | Interpretation |
+|---|---:|---|
+| `1M+1A` | `5.00 cycles/iter` | Single adder is the issue bottleneck. |
+| `2M+1A` | `5.00 cycles/iter` | Second multiplier alone does not improve the ideal limit. |
+| `1M+2A` | `3.00 cycles/iter` | First useful multi-unit extension if enough contexts can feed both adders. |
+| `2M+2A` | `2.50 cycles/iter` | Better theoretical limit, but much larger issue/writeback structure. |
+
+This confirms the earlier model direction: if an extra unit is added, the first useful unit is an adder, not a multiplier.
+
+### Candidate Options From The Current ZU4EV Baseline
+
+| Option | Description | Feasibility | Expected value | Risk |
+|---|---|---|---|---|
+| `12w/8ctx/1M+2A` | Add one extra `fp_add` per worker. | Low-to-medium. | Deep-scene speedup likely `1.15x-1.30x` if it routes. | Very little LUT/routing headroom. |
+| `12w/8ctx/2M+1A` | Add one extra `fp_mul` per worker. | Technically possible, low value. | Likely `1.00x-1.10x`. | Leaves add-side bottleneck unchanged. |
+| `12w/8ctx/2M+2A` | Add one extra adder and multiplier per worker. | Low. | Deep-scene theoretical `1.25x-1.45x`. | Likely too much generic scoreboard/mux/writeback logic. |
+| `8w/8ctx/1M+2A` | Reduce workers, add one adder per worker. | Medium. | Tests add-lane value with lower fanout/routing pressure. | May lose row parallelism and fast-scene throughput. |
+| `10w/8ctx/1M+2A` | Middle point between 8w and 12w. | Medium. | Best exploratory balance if 8w routes easily. | Still uncertain if it beats current 12w/1M+1A. |
+| Low-LUT ring/barrel `1M+2A` | Redesign worker around fixed slots and lane-local issue. | Best long-term path. | Can expose add-lane gains without generic scoreboard blowup. | Larger RTL and verification effort. |
+
+### Whole-System Performance Projection
+
+The table below is intentionally conservative. It uses the current 10-run mean and accounts for UART, host-tile retry events, strict raster order, and row scheduling overhead. Compute-only gains will not fully translate into whole-system speedups, especially on fast scenes.
+
+| Scene | Current 12w/8ctx mean s | Main limiter | `12w 1M+2A` projected s | `8-10w 1M+2A` projected s |
+|---|---:|---|---:|---:|
+| fast escape @128 | `4.563` | UART/host/retry overhead | `4.35-4.55` | `4.50-4.90` |
+| standard @64 | `4.353` | Mostly transport/overhead | `4.15-4.35` | `4.30-4.70` |
+| Seahorse zoom @512 | `4.499` | Mixed compute/output | `3.9-4.2` | `4.0-4.5` |
+| deep tendrils @8192 | `4.739` | Compute-heavy with retry variance | `3.7-4.2` | `3.9-4.5` |
+| deep mini-brot @8192 | `10.146` | Compute-bound | `7.8-8.9` | `8.0-9.5` |
+| deep Seahorse @1024 | `4.967` | Compute-heavy/mixed | `3.9-4.4` | `4.1-4.7` |
+
+Expected speedup ranges versus the current ZU4EV 12w/8ctx point:
+
+| Candidate | Fast/standard | Mixed zooms | Deep compute-heavy | Confidence |
+|---|---:|---:|---:|---|
+| `12w 1M+2A` if it routes | `1.00x-1.05x` | `1.07x-1.15x` | `1.15x-1.30x` | Medium performance, low timing confidence. |
+| `8-10w 1M+2A` | `0.90x-1.02x` | `1.00x-1.12x` | `1.05x-1.25x` | Medium feasibility, medium performance uncertainty. |
+| `12w 2M+1A` | `1.00x-1.03x` | `1.00x-1.08x` | `1.00x-1.10x` | Low value. |
+| `12w 2M+2A` if it routes | `1.00x-1.07x` | `1.12x-1.25x` | `1.25x-1.45x` | Low feasibility in the current generic worker. |
+
+### Concrete `1M+2A` RTL Direction
+
+A minimal two-adder experiment should avoid disturbing the multiplier path. The safest split is:
+
+```text
+adder lane 0: existing init + compute add operations
+adder lane 1: compute add operations only during S_RUN
+```
+
+Required RTL changes:
+
+| Current object | `1M+2A` change |
+|---|---|
+| `add_a`, `add_b`, `add_neg` | Split to `add0_*` and `add1_*`, or an indexed lane array. |
+| `add_req_valid`, `add_req_op`, `add_req_ctx` | Allow two independent add issue slots per cycle. |
+| `add_op_pipe[ADD_LAT]`, `add_ctx_pipe[ADD_LAT]` | Duplicate per lane: `add_lane_op_pipe[lane][stage]`, `add_lane_ctx_pipe[lane][stage]`. |
+| `fp_add u_add` | Instantiate `u_add0` and `u_add1`. |
+| Single add writeback case | Process up to two add completions per cycle. |
+| All-context ready scan | Select up to two independent ready add operations, preferably with lane-local scan windows. |
+| Init operations directly driving add pipe stage 0 | Keep init on lane 0 or route init through the same lane allocator. |
+
+Conservative conflict rules:
+
+- Never issue two add operations from the same context in the same cycle.
+- Avoid scheduling two results that can write the same context in the same return cycle.
+- Preserve per-context dependency chain: `AOP_SUB_RE -> AOP_NEXT_RE -> AOP_2X -> AOP_NEXT_IM`.
+- Keep ordered pixel commit unchanged.
+
+The second adder only helps if multiple contexts are add-ready simultaneously. Therefore `1M+2A` should not be paired with fewer contexts; it should be tested with 8 contexts first, and eventually a lower-LUT 12/16-context worker if the structure can support it.
+
+### Recommended Experiment Matrix
+
+| Build | Workers | Contexts | Adders/worker | Multipliers/worker | Purpose |
+|---|---:|---:|---:|---:|---|
+| `zu4ev_c8_w8_a2m1` | 8 | 8 | 2 | 1 | First routing feasibility point with lower fanout. |
+| `zu4ev_c8_w10_a2m1` | 10 | 8 | 2 | 1 | Middle point if 8-worker has margin. |
+| `zu4ev_c8_w12_a2m1` | 12 | 8 | 2 | 1 | Direct apples-to-apples performance target; highest routing risk. |
+| `zu4ev_c8_w12_a1m2` | 12 | 8 | 1 | 2 | Low-priority multiplier-only sanity check. |
+
+Experiment results so far:
+
+| Build | Simulation | Build / route | Board test | Notes |
+|---|---|---|---|---|
+| `zu4ev_c8_w8_a2m1` | PASS, `12x160`, `max_iter=256`, `1920` pixels, sim finish `8.238ms` | BLOCKED before placement: LUT-as-Logic `94017 / 87840 = 107.03%` | Not run | Directly duplicating the FP64 adder per worker is too LUT-expensive even after reducing to 8 workers. This confirms the second-adder path needs a lower-LUT worker structure before board benchmarking. |
+| `zu4ev_c8_w8_a1m2` | PASS, `12x160`, `max_iter=256`, `1920` pixels, sim finish `12.502ms` | ROUTED but timing failed: `WNS=-0.715ns`, `TNS=-363.545ns`; CLB LUT `85844 / 87840 = 97.73%`, LUT-as-Logic `84090 / 87840 = 95.73%`, DSP `161 / 728 = 22.12%` | Not run | The second multiplier does not help the 8-context worker and creates a harder issue path (`mul1_req_*`, `c_mul_ready`, context scan). This matches the model: `2M+1A` remains adder-limited while adding routing pressure. |
+| `zu4ev_c8_w8_a2m2` | PASS, `12x160`, `max_iter=256`, `1920` pixels, sim finish `7.747ms` | BLOCKED before placement: LUT-as-Logic `121113 / 87840 = 137.87%` | Not run | Adding both lanes gives the best small simulation time among the naive 8w candidates, but the current generic scoreboard plus duplicated FP64 adders is far beyond the ZU4EV LUT budget. |
+| `zu4ev_c8_w10_a2m1` | PASS, `12x160`, `max_iter=256`, `1920` pixels, sim finish `8.226ms` | BLOCKED before placement: LUT-as-Logic `117399 / 87840 = 133.65%` | Not run | Increasing worker count with the duplicated adder worsens the already-failed `8w/1M+2A` resource result. This dominates the planned naive `10w`/`12w` second-adder builds. |
+
+These gate results supersede the initial matrix ordering for the current generic worker. Since `8w/1M+2A` already exceeds LUT-as-Logic capacity, every `10w` or `12w` build containing the same duplicated adder lane is conclusively over budget unless the worker structure changes. Since `8w/2M+1A` routes but fails timing at `97.73%` CLB LUT with worse simulation time than the accepted 12-worker baseline, larger `2M+1A` variants are not promising in the current topology. Board tests and 10-run 1080p benchmarks are therefore intentionally not run for these failed gates; they require a timing-clean bitstream first.
+
+Pass gates:
+
+1. Behavioral simulation with `sim_multicore_dynamic_contexts.tcl` at `WORKER_CONTEXTS=8`, `CORE_COUNT` matching the candidate, `ROWS=12`, `COLS=160`, `MAX_ITER=256`.
+2. Routed 200MHz timing with no setup/hold failures.
+3. Resource check. For exploratory builds, target below `95%` CLB LUT if possible; the current `96.96%` leaves little route stability margin.
+4. Small hardware `160x120 --verify`.
+5. 1080p six-scene benchmark only after the first four gates pass.
+
+### Updated Recommendation
+
+The ZU4EV result changes the old “contexts before FP units” conclusion into a more specific rule:
+
+1. Context scaling has now been exploited to 8 contexts per worker at 12 workers.
+2. The next extra FP unit, if any, should be an adder, not a multiplier.
+3. A naive `12w/8ctx/1M+2A` extension of the current generic scoreboard is risky because LUT utilization is already `96.96%`.
+4. The first practical experiment should be `8w` or `10w` with `1M+2A`, or a lower-LUT ring/barrel worker that can support a second adder without arbitrary two-of-eight context selection.
+5. `2M+1A` should not be prioritized; it does not improve the ideal issue limit because the iteration has five add/sub operations and only three multiplications.
+6. `2M+2A` should wait until a lane-local or low-LUT worker structure exists.
+
+The main implementation rule remains the same as the original de-bubbling analysis: do not buy theoretical issue bandwidth by reintroducing wide global context selection, wide FP64 operand muxes, and arbitrary writeback demuxes. Those structures are exactly what made the generic scoreboard expensive, and they are now the main risk on the near-full ZU4EV design.

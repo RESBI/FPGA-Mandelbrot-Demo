@@ -845,16 +845,16 @@ HW vs SW: 19200/19200 match (100.00%)
 
 ### 1080p Performance Update
 
-The current ZU4EV 12-worker/8-context result was benchmarked with the same six 1080p scene set, `1920x120` host/compute tiles, and `12 Mbaud` UART. The representative summary file is `../python/host_tile_stability_bench/zu4ev200m_c12ctx8_6scene.md`.
+The current ZU4EV 12-worker/8-context result was benchmarked for 10 runs per scene with the same six 1080p scene set, `1920x120` host/compute tiles, and `12 Mbaud` UART. The summary file is `../python/host_tile_stability_bench/zu4ev200m_c12ctx8_10run.md`.
 
-| Scene | Transport pass | Retry events | FPGA seconds | Pixels/s | vs XC7K70T 6w/4ctx 200MHz |
+| Scene | Transport pass | Retry events | Mean FPGA seconds | Mean pixels/s | vs XC7K70T 6w/4ctx 200MHz |
 |---|---:|---:|---:|---:|---:|
-| fast escape @128 | `1/1` | `0` | `4.150` | `499705.08` | `1.118x` |
-| standard @64 | `1/1` | `0` | `4.143` | `500531.67` | `1.119x` |
-| Seahorse zoom @512 | `1/1` | `0` | `4.289` | `483464.75` | `1.333x` |
-| deep tendrils @8192 | `1/1` | `0` | `4.418` | `469374.80` | `1.939x` |
-| deep mini-brot @8192 | `1/1` | `0` | `9.183` | `225810.49` | `2.282x` |
-| deep Seahorse @1024 | `1/1` | `0` | `4.767` | `435016.18` | `2.028x` |
+| fast escape @128 | `10/10` | `4` | `4.563` | `468446.75` | `1.017x` |
+| standard @64 | `10/10` | `2` | `4.353` | `480268.18` | `1.065x` |
+| Seahorse zoom @512 | `10/10` | `2` | `4.499` | `467436.73` | `1.270x` |
+| deep tendrils @8192 | `10/10` | `3` | `4.739` | `441838.90` | `1.808x` |
+| deep mini-brot @8192 | `10/10` | `6` | `10.146` | `206484.60` | `2.066x` |
+| deep Seahorse @1024 | `10/10` | `2` | `4.967` | `420129.06` | `1.946x` |
 
 The improvement pattern is important. Fast escape and standard scenes move only modestly because UART, host parsing, response packetization, command overhead, and raster-order collection are already significant. Deep scenes improve much more because more workers and more contexts increase FP pipeline occupancy and row-level throughput.
 
@@ -972,4 +972,4 @@ The project evolved through a pragmatic sequence:
 16. Migrate the active target to VMC_RTSB ZU4EV with single-ended `sys_clk` on `E12`, clean ZU4EV constraints, Vivado auto-connect programming, and `COM6` host defaults.
 17. Scale the ZU4EV default to 12 workers and 8 contexts per worker, preserving `MUL_LAT=6`, `ADD_LAT=9`, direct 200MHz timing, dynamic row scheduling, and the existing UART command/response protocol.
 
-The current design preserves the original host command protocol while running the active VMC_RTSB ZU4EV target at direct 200 MHz, `12 Mbaud`, 12 workers, and 8 contexts per worker. Fast 1080p scenes now reach about `500k pixels/s`, and the accepted ZU4EV default raises deep mini-brot from the previous XC7K70T 6-worker/4-context 200MHz `20.963s` mean to `9.183s` in the representative ZU4EV run (`2.282x`). Relative to the previous best 7K70T 200MHz point, the ZU4EV 12w/8ctx build improves every measured scene, with the largest gains in deep compute-heavy views. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is reducing route/fanout pressure, strengthening packet/request identity, adding true retransmission or a higher-bandwidth transport, and only then revisiting additional compute parallelism.
+The current design preserves the original host command protocol while running the active VMC_RTSB ZU4EV target at direct 200 MHz, `12 Mbaud`, 12 workers, and 8 contexts per worker. Fast 1080p scenes now average about `468k-480k pixels/s` across the 10-run set, and the accepted ZU4EV default raises deep mini-brot from the previous XC7K70T 6-worker/4-context 200MHz `20.963s` mean to a ZU4EV 10-run mean of `10.146s` (`2.066x`). Relative to the previous best 7K70T 200MHz point, the ZU4EV 12w/8ctx build improves every measured scene, with the largest gains in deep compute-heavy views. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is reducing route/fanout pressure, strengthening packet/request identity, adding true retransmission or a higher-bandwidth transport, and only then revisiting additional compute parallelism.

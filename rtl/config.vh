@@ -52,4 +52,12 @@
 `define CFG_WORKER_CONTEXTS 8
 `endif
 
+`ifndef CFG_WORKER_ADD_UNITS
+`define CFG_WORKER_ADD_UNITS 1
+`endif
+
+`ifndef CFG_WORKER_MUL_UNITS
+`define CFG_WORKER_MUL_UNITS 1
+`endif
+
 `endif // CONFIG_VH
