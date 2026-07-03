@@ -1,6 +1,6 @@
 # Mandelbrot FPGA Accelerator
 
-![demo-show-progress](doc/GIF 03-07-2026 19-52-05.gif)
+![demo-show-progress](doc/GIF_03-07-2026_19-52-05.gif)
 
 FPGA-based Mandelbrot renderer with a UART host interface. The PC sends image-tile commands containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a 12-worker FP64 engine, dynamically assigns rows to available workers, restores raster order, and streams one 16-bit iteration count per pixel. The validated default now targets VMC_RTSB ZU4EV with a single-ended 200 MHz `sys_clk` on E12, using twelve workers with eight pixel contexts per worker over one shared FP64 multiplier and one shared FP64 adder per worker. The UART response path uses full-width row-split retry tiles with `RESPONSE_TILE_ROW_SPLITS=8`, so a default `1920x120` compute response is transmitted as eight independently checksummed `1920x15` retry tiles.
 
