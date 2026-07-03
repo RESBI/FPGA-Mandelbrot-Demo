@@ -1,6 +1,8 @@
 # Mandelbrot FPGA Accelerator
 
-FPGA-based Mandelbrot renderer with a UART host interface. The PC sends one image command containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a 12-worker FP64 engine, dynamically assigns rows to available workers, restores raster order, and streams one 16-bit iteration count per pixel. The validated default now targets VMC_RTSB ZU4EV with a single-ended 200 MHz `sys_clk` on E12, using twelve workers with eight pixel contexts per worker over one shared FP64 multiplier and one shared FP64 adder per worker.
+![demo-show-progress](doc/GIF 03-07-2026 19-52-05.gif)
+
+FPGA-based Mandelbrot renderer with a UART host interface. The PC sends image-tile commands containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a 12-worker FP64 engine, dynamically assigns rows to available workers, restores raster order, and streams one 16-bit iteration count per pixel. The validated default now targets VMC_RTSB ZU4EV with a single-ended 200 MHz `sys_clk` on E12, using twelve workers with eight pixel contexts per worker over one shared FP64 multiplier and one shared FP64 adder per worker. The UART response path uses full-width row-split retry tiles with `RESPONSE_TILE_ROW_SPLITS=8`, so a default `1920x120` compute response is transmitted as eight independently checksummed `1920x15` retry tiles.
 
 For detailed hardware architecture, pipeline scheduling, timing constraints, software design, and validation notes, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the ZU4EV 200 MHz adaptation, UART validation, timing/resource data, and performance comparison against the older 7K70T 200 MHz points, see [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md). Historical direct-200MHz 7K70T closure details remain in [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md) and [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
 
@@ -36,6 +38,7 @@ Current validated default configuration:
 | Programming link | Vivado hardware auto-connect, target device `xczu4_0` |
 | Current routed timing | `WNS=0.148ns`, `TNS=0.000ns`, `WHS=0.010ns`, `THS=0.000ns` |
 | Current routed utilization | `85171` LUTs, `71453` registers, `121` DSP48E2, `25.5` BRAM tiles |
+| Response retry tile split | `RESPONSE_TILE_ROW_SPLITS=8`, full-width row slices |
 
 The default RTL is the 12-worker, 8-context-per-worker configuration on ZU4EV at direct 200 MHz. It builds, programs, meets timing, passes small-image HW/SW verification, and passes the six 1080p host-tiled scenes. The older 7K70T 4-worker and 6-worker direct-200MHz builds remain the most relevant historical comparison points.
 
@@ -316,6 +319,7 @@ Current defaults:
 | `CFG_SCHED_MODE` | `1` | `top`, `mandelbrot_multicore` | `0` static rows, `1` dynamic idle-core rows. |
 | `CFG_DYNAMIC_OWNER_DEPTH` | `4096` | `top`, `mandelbrot_multicore` | Dynamic row-owner table depth. |
 | `CFG_WORKER_CONTEXTS` | `8` | `top`, `mandelbrot_multicore` | `1` single-context worker, `2`/`4` historical workers, `8` current ZU4EV default. |
+| `CFG_RESPONSE_TILE_ROW_SPLITS` | `8` | `top`, `tx_ctrl` | Split one compute response into full-width row-split retry tiles. |
 
 For the default source build, edit `rtl/config.vh` and keep the Python host in sync when changing UART baud:
 
@@ -331,7 +335,7 @@ The existing Vivado build scripts intentionally override some top-level paramete
 
 | Script | Overrides | Purpose |
 |---|---|---|
-| `build_fp64.tcl` | `CLK_HZ=200000000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 CORE_COUNT=12 WORKER_CONTEXTS=8` | Default FP64 direct-200MHz dynamic 12-worker, 8-context ZU4EV build. |
+| `build_fp64.tcl` | `CLK_HZ=200000000 DIRECT_200MHZ=1 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 CORE_COUNT=12 WORKER_CONTEXTS=8` plus source default `RESPONSE_TILE_ROW_SPLITS=8` | Default FP64 direct-200MHz dynamic 12-worker, 8-context ZU4EV build. |
 | `build_fp64_100mhz.tcl` | `CLK_HZ=100000000 DIRECT_200MHZ=0 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=4` | 100MHz 4-context reference build. |
 | `build_fp64_contexts.tcl` | `SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=N` | Explicit K-context worker build for comparisons and experiments. |
 | `build_fp64_static.tcl` | `SCHED_MODE=0 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=1` | Static scheduler, single-context regression build. |
@@ -440,10 +444,10 @@ Or with an explicit local install path:
 C:\Xilinx\Vivado\2024.2\bin\vivado.bat -mode batch -source program.tcl
 ```
 
-`program.tcl` connects to Vivado `hw_server` at `127.0.0.1:3122`, opens the CH347 XVC target at `127.0.0.1:2542`, and auto-detects the default FP64 bitstream first, then dynamic/bring-up bitstreams and FP128 if FP64 is not present. To program the static regression build, pass its bitstream explicitly:
+`program.tcl` uses Vivado hardware auto-connect, opens the attached hardware target, and selects a supported FPGA device matching `*xczu4*` or the older `*xc7k70t*` pattern. Pass a bitstream explicitly when programming a non-default build:
 
 ```bash
-vivado -mode batch -source program.tcl -tclargs ./fp64_static_proj/mandelbrot_fp64_static.runs/impl_1/top.bit
+vivado -mode batch -source program.tcl -tclargs ./fp64_rtr8_proj/mandelbrot_fp64_rtr8.runs/impl_1/top.bit
 ```
 
 Expected output includes:
@@ -630,7 +634,7 @@ sequenceDiagram
 
 ### Current Recommended Mode: Host-Tiled 12 Mbaud
 
-The current reliable high-baud operating mode is host-driven tiling at 12000000 baud, and the host now enables it by default. If no tile arguments are supplied, the host selects full-width host stripes with a default height of 120 rows, `--tile-retries 3`, and a per-read tile receive timeout of 30 seconds. By default the hardware compute tile is the host tile itself, except the compute width is capped at 4096 columns. With the current soft-reset-on-retry path, a failed large tile is drained, the FPGA is reset with `RST!RST!`, and the same tile is recomputed. The recommended 1080p setting is automatic for a 1920-wide image: `--tile-width 1920 --tile-height 120 --tile-retries 3 --quiet`.
+The current reliable high-baud operating mode is host-driven tiling at 12000000 baud, and the host enables it by default. If no tile arguments are supplied, the host selects full-width host stripes with a default height of 120 rows, `--tile-retries 3`, and a per-read tile receive timeout of 5 seconds. By default the hardware compute tile height equals the host tile height, and the compute width is capped at 2048 columns. This keeps 1080p at one `1920x120` compute tile per stripe, while a `4096x120` host stripe is automatically split into two `2048x120` compute tiles. The RTL splits each compute response by height with `RESPONSE_TILE_ROW_SPLITS=8`, so a 1080p `1920x120` compute tile becomes eight full-width `1920x15` retry tiles with independent checksums. The recommended 1080p setting is automatic for a 1920-wide image: `--tile-width 1920 --tile-height 120 --tile-retries 3 --quiet`.
 
 Example:
 
@@ -640,7 +644,7 @@ python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-it
 
 Use `--full-frame` only when you intentionally want the older single-command full-frame response path for regression or controlled single-burst experiments.
 
-If a high-baud tile loses bytes, the host may appear idle until the current serial read times out. The default tiled path uses `--tile-read-timeout 30`; lower it for faster retry detection or raise it for very slow/deep tiles.
+If a high-baud tile loses bytes, the host may appear idle until the current serial read times out. The default tiled path now uses `--tile-read-timeout 5.0`, which bounds short-read retry tails while remaining above normal `1920x120` response time at 12 Mbaud.
 
 With `--quiet`, the host now keeps a single-line progress display instead of printing every tile. The format is:
 
@@ -648,22 +652,32 @@ With `--quiet`, the host now keeps a single-line progress display instead of pri
 [progress] (n / total compute tile) (m / total host tile) current task
 ```
 
-On each failed compute tile attempt, the host drains stale UART bytes and sends a soft reset command (`RST!RST!`) unless `--no-soft-reset-on-retry` is set. The reset clears the FPGA command parser, compute engine, output FIFOs, and transmit controller, then the host recomputes only the failed compute tile. You can also issue a reset manually:
+For large tiled renders, `--preview` opens a live thumbnail preview window when the output format is an image. The console still uses the compact single-line progress bar, and the preview refreshes after completed compute tiles are copied into the image buffer. Use `--preview-size` to choose the maximum preview dimension.
+
+```bash
+python python\mandelbrot_host.py --width 4096 --height 4096 --max-iter 8192 --center -0.040720424861 -0.6994534564320001 --step 1e-7 --output python\m_4.png --quiet --preview --preview-size 512 --palette fire
+```
+
+The host distinguishes checksum-only local retry-tile failures from framing failures. If a full `RT/TD/TE` frame is consumed but one row-split `TD` checksum fails, the host records that retry-tile rectangle, continues the first full-frame pass, then recomputes the merged failed rectangles and patches them into the final image. If framing is lost (`Bad tile magic`, incomplete payload, missing checksum), the stream is no longer aligned; the host drains stale UART bytes and sends a soft reset command (`RST!RST!`) unless `--no-soft-reset-on-retry` is set, then recomputes the current compute tile immediately.
+
+The tiled receive path reads UART data in protocol order, but checksum and pixel unpacking for completed `TD` packets run on worker threads. After one compute response reaches `TE`, the host can issue the next compute tile while the previous response is being finalized and copied into the image buffer. Serial reads are intentionally not parallelized because multiple readers on one UART stream would corrupt framing.
+
+You can also issue a reset manually:
 
 ```powershell
 python python\mandelbrot_host.py --port COM6 --soft-reset
 ```
 
-Latest ZU4EV direct-200MHz 12-worker, 8-context 1080p host-tiled 10-run benchmark at 12 Mbaud with compute tile equal to host tile (`1920x120` for 1080p):
+Latest ZU4EV direct-200MHz 12-worker, 8-context, `M=8` row-split retry-tile 1080p host-tiled 10-run benchmark at 12 Mbaud with the 1080p default `1920x120` compute tile:
 
 | Scene | Transport pass | Retry events | Mean FPGA Time | Min | Max | CV | Mean throughput | vs 7K70T 6w/4ctx 200MHz |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Fast escape @128 | `10/10` | `4` | `4.563s` | `4.146s` | `7.261s` | `21.96%` | `468446.75 pps` | `1.017x` |
-| Standard @64 | `10/10` | `2` | `4.353s` | `4.141s` | `5.191s` | `10.06%` | `480268.18 pps` | `1.065x` |
-| Seahorse zoom @512 | `10/10` | `2` | `4.499s` | `4.288s` | `6.371s` | `14.62%` | `467436.73 pps` | `1.270x` |
-| Deep tendrils @8192 | `10/10` | `3` | `4.739s` | `4.417s` | `5.492s` | `10.79%` | `441838.90 pps` | `1.808x` |
-| Deep mini-brot @8192 | `10/10` | `6` | `10.146s` | `9.181s` | `12.295s` | `10.91%` | `206484.60 pps` | `2.066x` |
-| Deep Seahorse @1024 | `10/10` | `2` | `4.967s` | `4.754s` | `5.805s` | `8.89%` | `420129.06 pps` | `1.946x` |
+| Fast escape @128 | `10/10` | `1` | `3.821s` | `3.720s` | `4.702s` | `8.11%` | `545436.22 pps` | `1.215x` |
+| Standard @64 | `10/10` | `1` | `3.816s` | `3.715s` | `4.696s` | `8.10%` | `546090.60 pps` | `1.215x` |
+| Seahorse zoom @512 | `10/10` | `1` | `3.964s` | `3.864s` | `4.855s` | `7.89%` | `525491.58 pps` | `1.442x` |
+| Deep tendrils @8192 | `10/10` | `0` | `3.994s` | `3.991s` | `3.997s` | `0.04%` | `519243.89 pps` | `2.145x` |
+| Deep mini-brot @8192 | `10/10` | `0` | `9.166s` | `9.164s` | `9.168s` | `0.02%` | `226235.12 pps` | `2.287x` |
+| Deep Seahorse @1024 | `10/10` | `1` | `4.575s` | `4.472s` | `5.485s` | `6.99%` | `454952.34 pps` | `2.113x` |
 
 The ZU4EV result should be compared primarily against the previous 7K70T 6-worker/4-context direct-200MHz point. Both results run at 200 MHz, so the gains above come from deployable parallelism (`12 workers / 8 contexts`) and not from a higher clock. The shallow scenes improve modestly because fixed host-tile, collection, command, UART overhead, and occasional tile retries remain visible. The deep scenes improve much more because more FP pipelines stay occupied.
 
@@ -675,7 +689,7 @@ Major architecture performance stages are summarized below. Rows are not all the
 | 12M single-burst, 4-worker 2ctx | High baud, monolithic response | `4.678s` | `4.202s` | `17.280s` | `83.428s` |
 | 7K70T 4-worker 4ctx direct 200MHz | First validated direct-200MHz default | `5.072s` | `5.066s` | `7.879s` | `31.625s` |
 | 7K70T 6-worker 4ctx direct 200MHz | Timing-fixed worker scaling | `4.641s` | `4.636s` | `5.715s` | `20.963s` |
-| ZU4EV 12-worker 8ctx direct 200MHz | Current 10-run mean | `4.563s` | `4.353s` | `4.499s` | `10.146s` |
+| ZU4EV 12-worker 8ctx direct 200MHz, M=8 row-split retry tiles | Current 10-run mean | `3.821s` | `3.816s` | `3.964s` | `9.166s` |
 
 The current ZU4EV build is the best validated point in the measured matrix. Detailed 200MHz ZU4EV optimization data and the full six-scene comparison are in [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md). Historical 7K70T timing closure and worker-count scaling are in [200MHZ_ATTEMPT_REPORT.md](doc/200MHZ_ATTEMPT_REPORT.md) and [WORKER_COUNT_SCALING.md](doc/WORKER_COUNT_SCALING.md).
 

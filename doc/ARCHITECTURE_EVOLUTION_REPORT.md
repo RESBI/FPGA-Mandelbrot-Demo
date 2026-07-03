@@ -42,6 +42,7 @@ This report explains the design thinking behind the Mandelbrot FPGA accelerator 
 | Pixel format | 16-bit little-endian iteration count |
 | Largest validated frame | 1920x1080 |
 | Current ZU4EV board build status | Full FP64 bitstream builds cleanly |
+| Response retry tiles | Full-width row splits, `RESPONSE_TILE_ROW_SPLITS=8` |
 | Current ZU4EV timing/utilization | `WNS=0.148ns`, `TNS=0.000ns`; 85171 / 87840 CLB LUTs, 71453 / 175680 registers, 121 / 728 DSP48E2, 25.5 / 128 BRAM tiles |
 | Most relevant historical reference | XC7K70T direct-200MHz 6-worker/4-context point from [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md) |
 
@@ -923,6 +924,113 @@ Validation after adding this mode:
 | `../build_fp64.tcl` | Static bitstream generated, timing met. |
 | `../build_fp64_dynamic.tcl` | Dynamic bitstream generated, timing met. |
 
+## Stage 18: Row-Split Retry Tiles And Deferred Checksum Recovery
+
+Detailed report: [TILE_DESIGN.md](TILE_DESIGN.md).
+
+After the ZU4EV `12 workers / 8 contexts` point was accepted, the remaining performance variation was no longer primarily compute throughput. The system was close to the 12 Mbaud UART payload ceiling on shallow scenes, but occasional transport faults still caused large retry tails. The earlier tiled response implementation detected failures, but retry was still coarse and response packetization overhead was higher than necessary.
+
+### Design Problem
+
+The default 1080p host/compute tile is `1920x120`, or `230400` pixels. Keeping that compute tile large is important because a 1080p frame then needs only nine hardware commands. However, if a transport error occurs inside that response, recomputing all 120 rows is unnecessarily coarse when the error is localized.
+
+The first response-tiling experiments split by fixed column count. That made the packet count scale with image width and produced many packets for a `1920x120` stripe. The later requirement was stricter:
+
+| Requirement | Consequence |
+|---|---|
+| Keep compute tile size unchanged | The default compute command remains `1920x120`. |
+| Split transfer into retry tiles | The FPGA emits multiple checksummed `TD` packets inside one compute response. |
+| Configure split count at RTL build time | Add `RESPONSE_TILE_ROW_SPLITS=M`. |
+| Split by compute tile height | Each retry tile is full width and covers a row slice. |
+| Retry only failed checksum tiles | Host records failed row-split rectangles and recomputes them later. |
+
+### RTL Design
+
+The `tx_ctrl` packetizer now derives retry-tile height from the response height and `RESPONSE_TILE_ROW_SPLITS`:
+
+```text
+base_rows = max(1, rows / M)
+retry tile = full width x base_rows
+final retry tile = remaining rows
+```
+
+For the selected default `M=8`, one `1920x120` compute response becomes:
+
+```text
+8 TD packets, each 1920 x 15 pixels
+payload per TD = 1920 * 15 * 2 = 57600 bytes
+```
+
+The packet header stays the same:
+
+```text
+TD row(u16) col(u16) tile_rows(u16) tile_cols(u16) payload checksum
+```
+
+Only the generated geometry changes. `col` is now always zero for the current RTL, `tile_cols=cols`, and `row` advances by the row-split height. The compute core, scheduler, raster collector, and output FIFO are unchanged.
+
+### Host Recovery Design
+
+The host now classifies failures by whether stream alignment is still trustworthy:
+
+| Failure class | Example | Recovery |
+|---|---|---|
+| Checksum-only local failure | One `TD` payload checksum mismatch, but frame reaches `TE` | Keep valid local regions, record failed row-split rectangle, continue other compute tiles, then recompute merged failed rectangles after the first pass. |
+| Framing or short-read failure | Bad magic, incomplete payload, missing checksum | Drain stale bytes, reset input buffer, optionally send `RST!RST!`, and retry the current compute tile immediately. |
+
+This distinction avoids unnecessary stalls for checksum-only errors while preserving correctness when the serial stream is no longer aligned.
+
+The 30-second retry tails observed during intermediate testing were traced to the previous `--tile-read-timeout 30` setting. When a `TD` payload was short, for example `56230/57600` bytes at `row=105`, Python waited the full serial read timeout before returning the short payload. The default tiled read timeout is now `5.0s`, which is still much larger than a normal `1920x120` response time at 12 Mbaud but bounds short-read penalties.
+
+### Row-Split Sweep
+
+The standard scene was used to compare candidate `M` values, 10 runs each where valid:
+
+| Row splits M | Retry tile shape | Standard result | Retry events | Mean pps | Clean-run mean pps | Decision |
+|---:|---|---:|---:|---:|---:|---|
+| `1` | `1920x120` | 10/10 | 1 | `490486.30` | `538245.40` | Too coarse; one full-tile retry dominated mean. |
+| `2` | `1920x60` | invalid | 216 before abort | invalid | invalid | Logs showed systematic incomplete payloads before host failure classification fix. |
+| `4` | `1920x30` | 0/10 | 40 | Fail | Fail | Framing loss on large standard tiles. |
+| `8` | `1920x15` | 10/10 | 0 | `557751.55` | `557751.55` | Selected default. |
+| `15` | `1920x8` | 10/10 | 1 | `547351.22` | `559033.23` | Clean-link fast, but thinner timing and a retry event. |
+| `30` | `1920x4` | 10/10 | 2 | `536672.13` | `560126.07` | Highest clean-run pps, more retry exposure. |
+
+`M=8` won on whole-system stability rather than absolute clean-run pps. Finer splits reduce clean-link overhead slightly, but more packet boundaries and thinner timing did not improve the 10-run mean.
+
+### Six-Scene M=8 Result
+
+The selected `M=8` bitstream was programmed and run through the six 1080p scenes for 10 runs each with the new deferred checksum host logic and `5.0s` tile read timeout:
+
+```text
+python/host_tile_stability_bench/zu4ev200m_c12ctx8_rtr8_deferred_10run.md
+```
+
+| Scene | Transport pass | Retry events | Mean FPGA s | Mean pps |
+|---|---:|---:|---:|---:|
+| fast escape @128 | `10/10` | `1` | `3.821` | `545436.22` |
+| standard @64 | `10/10` | `1` | `3.816` | `546090.60` |
+| Seahorse zoom @512 | `10/10` | `1` | `3.964` | `525491.58` |
+| deep tendrils @8192 | `10/10` | `0` | `3.994` | `519243.89` |
+| deep mini-brot @8192 | `10/10` | `0` | `9.166` | `226235.12` |
+| deep Seahorse @1024 | `10/10` | `1` | `4.575` | `454952.34` |
+
+All 60 runs completed. The four observed retry events were framing failures, not checksum-only local failures, so the deferred checksum path was not naturally triggered in this run. The absence of 30-second tails confirms that the timeout reduction addressed the main observed long-tail mechanism.
+
+### Performance Improvement Over The Previous ZU4EV 12w/8ctx Point
+
+The compute architecture did not change; the gain comes from lower response packet overhead and improved retry behavior.
+
+| Scene | Previous 12w/8ctx mean s | Row-split M=8 mean s | Speedup |
+|---|---:|---:|---:|
+| fast escape @128 | `4.563` | `3.821` | `1.194x` |
+| standard @64 | `4.353` | `3.816` | `1.141x` |
+| Seahorse zoom @512 | `4.499` | `3.964` | `1.135x` |
+| deep tendrils @8192 | `4.739` | `3.994` | `1.187x` |
+| deep mini-brot @8192 | `10.146` | `9.166` | `1.107x` |
+| deep Seahorse @1024 | `4.967` | `4.575` | `1.086x` |
+
+This stage is important because it improved the whole-system benchmark without adding workers, increasing clock frequency, or changing Mandelbrot arithmetic. It attacks the transport/retry overhead that had become visible after compute-side scaling.
+
 ## Recommended Next Evolution
 
 The next major improvement should target routing pressure, protocol resilience, and transport bandwidth before adding more compute cores.
@@ -942,7 +1050,7 @@ Recommended order:
 |---:|---|---|
 | 1 | Keep ZU4EV 12-worker/8-context direct-200MHz as the performance default | It is the fastest timing-clean, board-benchmarked point so far. |
 | 2 | Reduce command-parameter fanout and worker-local routing pressure | The accepted ZU4EV build is LUT-heavy and its worst path is route dominated, not arithmetic-depth dominated. |
-| 3 | Add sequence numbers and true retransmission | Current `RT`/`TD`/`TE` packets detect errors, and host-driven tiling can recompute a stripe, but the FPGA still cannot retransmit one packet. |
+| 3 | Add sequence numbers and true retransmission | Current row-split `RT`/`TD`/`TE` packets detect local errors, and the host can recompute failed checksum rectangles, but the FPGA still cannot retransmit one packet. |
 | 4 | Add request IDs and stronger row/tile IDs | Enables resynchronization, duplicate rejection, and out-of-order completion beyond the current raster collector. |
 | 5 | Add a higher-bandwidth transport | USB FIFO, SPI, Ethernet, or PS memory mapping would remove UART/driver burst limits. |
 | 6 | Keep XC7K70T 4-worker/6-worker 200MHz and 100MHz 4ctx data as explicit historical references | They remain useful for regression and architecture comparison, but they are no longer the active default. |
@@ -971,5 +1079,6 @@ The project evolved through a pragmatic sequence:
 15. Replicate the validated 4ctx worker to six direct-200MHz workers, fix route-dominated dispatcher/worker-control timing, and make the timing-clean 6-worker XC7K70T result the default for that stage.
 16. Migrate the active target to VMC_RTSB ZU4EV with single-ended `sys_clk` on `E12`, clean ZU4EV constraints, Vivado auto-connect programming, and `COM6` host defaults.
 17. Scale the ZU4EV default to 12 workers and 8 contexts per worker, preserving `MUL_LAT=6`, `ADD_LAT=9`, direct 200MHz timing, dynamic row scheduling, and the existing UART command/response protocol.
+18. Add row-split retry tiles with `RESPONSE_TILE_ROW_SPLITS=8`, deferred checksum-only retry, and a shorter 5s tile read timeout, improving the ZU4EV 12w/8ctx six-scene 10-run means without changing compute arithmetic.
 
-The current design preserves the original host command protocol while running the active VMC_RTSB ZU4EV target at direct 200 MHz, `12 Mbaud`, 12 workers, and 8 contexts per worker. Fast 1080p scenes now average about `468k-480k pixels/s` across the 10-run set, and the accepted ZU4EV default raises deep mini-brot from the previous XC7K70T 6-worker/4-context 200MHz `20.963s` mean to a ZU4EV 10-run mean of `10.146s` (`2.066x`). Relative to the previous best 7K70T 200MHz point, the ZU4EV 12w/8ctx build improves every measured scene, with the largest gains in deep compute-heavy views. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is reducing route/fanout pressure, strengthening packet/request identity, adding true retransmission or a higher-bandwidth transport, and only then revisiting additional compute parallelism.
+The current design preserves the original host command protocol while running the active VMC_RTSB ZU4EV target at direct 200 MHz, `12 Mbaud`, 12 workers, and 8 contexts per worker. The transport path now uses full-width row-split retry tiles with `M=8`; a default `1920x120` compute response is eight `1920x15` checksum regions. Fast 1080p scenes now average about `545k-546k pixels/s` across the latest 10-run set, and the accepted ZU4EV default raises deep mini-brot from the previous XC7K70T 6-worker/4-context 200MHz `20.963s` mean to a ZU4EV row-split 10-run mean of `9.166s` (`2.287x`). Relative to the previous best 7K70T 200MHz point, the ZU4EV 12w/8ctx row-split build improves every measured scene, with the largest gains in deep compute-heavy views. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is reducing route/fanout pressure, strengthening packet/request identity, adding true retransmission or a higher-bandwidth transport, and only then revisiting additional compute parallelism.

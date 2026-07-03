@@ -10,7 +10,9 @@ module top #(
     parameter CORE_COUNT = `CFG_CORE_COUNT,
     parameter WORKER_CONTEXTS = `CFG_WORKER_CONTEXTS,
     parameter WORKER_ADD_UNITS = `CFG_WORKER_ADD_UNITS,
-    parameter WORKER_MUL_UNITS = `CFG_WORKER_MUL_UNITS
+    parameter WORKER_MUL_UNITS = `CFG_WORKER_MUL_UNITS,
+    parameter RESPONSE_TILE_COLS = `CFG_RESPONSE_TILE_COLS,
+    parameter RESPONSE_TILE_ROW_SPLITS = `CFG_RESPONSE_TILE_ROW_SPLITS
 ) (
     input  wire uart_rx,
     output wire uart_tx,
@@ -180,7 +182,10 @@ module top #(
         .data_out    (fifo_rd_data)
     );
 
-    tx_ctrl u_txctrl (
+    tx_ctrl #(
+        .RESPONSE_TILE_COLS(RESPONSE_TILE_COLS),
+        .RESPONSE_TILE_ROW_SPLITS(RESPONSE_TILE_ROW_SPLITS)
+    ) u_txctrl (
         .clk        (sys_clk_i),
         .rst        (rst),
         .start      (tx_ctrl_start),

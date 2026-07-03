@@ -3,6 +3,7 @@
 
 module tx_ctrl #(
     parameter RESPONSE_TILE_COLS = `CFG_RESPONSE_TILE_COLS,
+    parameter RESPONSE_TILE_ROW_SPLITS = `CFG_RESPONSE_TILE_ROW_SPLITS,
     parameter RESPONSE_TILE_GAP_CYCLES = `CFG_RESPONSE_TILE_GAP_CYCLES
 ) (
     input  wire         clk,
@@ -44,11 +45,12 @@ module tx_ctrl #(
     reg [2:0]  end_idx;
     reg [15:0] row_idx;
     reg [15:0] tile_col_start;
-    reg [15:0] col_idx;
+    reg [31:0] pixel_idx;
     reg [15:0] current_pixel;
+    reg [15:0] tile_rows;
     reg [15:0] tile_cols;
-    reg [15:0] next_tile_col_start;
-    reg        last_tile;
+    reg [31:0] tile_pixels;
+    reg [15:0] next_row_idx;
     reg        last_row;
     reg [7:0]  checksum;
     reg [31:0] gap_count;
@@ -56,13 +58,35 @@ module tx_ctrl #(
     reg [7:0]  tile_hdr_byte;
     reg [7:0]  end_byte;
 
-    function [15:0] calc_tile_cols;
-        input [15:0] total_cols;
-        input [15:0] col_start;
-        reg [15:0] remaining_cols;
+    function [31:0] calc_tile_pixels;
+        input [15:0] tile_row_count;
+        input [15:0] tile_col_count;
         begin
-            remaining_cols = total_cols - col_start;
-            calc_tile_cols = (remaining_cols > RESPONSE_TILE_COLS) ? RESPONSE_TILE_COLS : remaining_cols;
+            calc_tile_pixels = {16'd0, tile_row_count} * {16'd0, tile_col_count};
+        end
+    endfunction
+
+    function [15:0] calc_base_tile_rows;
+        input [15:0] total_rows;
+        reg [31:0] split_count;
+        begin
+            split_count = (RESPONSE_TILE_ROW_SPLITS < 1) ? 32'd1 : RESPONSE_TILE_ROW_SPLITS;
+            if (total_rows <= split_count[15:0])
+                calc_base_tile_rows = 16'd1;
+            else
+                calc_base_tile_rows = total_rows / split_count[15:0];
+        end
+    endfunction
+
+    function [15:0] calc_tile_rows;
+        input [15:0] total_rows;
+        input [15:0] row_start;
+        reg [15:0] base_rows;
+        reg [15:0] remaining_rows;
+        begin
+            base_rows = calc_base_tile_rows(total_rows);
+            remaining_rows = total_rows - row_start;
+            calc_tile_rows = (remaining_rows > base_rows) ? base_rows : remaining_rows;
         end
     endfunction
 
@@ -84,8 +108,8 @@ module tx_ctrl #(
             4'd3: tile_hdr_byte = row_idx[15:8];
             4'd4: tile_hdr_byte = tile_col_start[7:0];
             4'd5: tile_hdr_byte = tile_col_start[15:8];
-            4'd6: tile_hdr_byte = 8'h01; // tile_rows low
-            4'd7: tile_hdr_byte = 8'h00; // tile_rows high
+            4'd6: tile_hdr_byte = tile_rows[7:0];
+            4'd7: tile_hdr_byte = tile_rows[15:8];
             4'd8: tile_hdr_byte = tile_cols[7:0];
             4'd9: tile_hdr_byte = tile_cols[15:8];
             default: tile_hdr_byte = 8'h00;
@@ -118,8 +142,10 @@ module tx_ctrl #(
                         frame_hdr_idx <= 0;
                         row_idx       <= 0;
                         tile_col_start <= 0;
-                        tile_cols     <= calc_tile_cols(cols, 16'd0);
-                        col_idx       <= 0;
+                        tile_rows     <= calc_tile_rows(rows, 16'd0);
+                        tile_cols     <= cols;
+                        tile_pixels   <= calc_tile_pixels(calc_tile_rows(rows, 16'd0), cols);
+                        pixel_idx     <= 0;
                         state         <= S_FRAME_HDR_BYTE;
                     end
                 end
@@ -163,7 +189,7 @@ module tx_ctrl #(
                     if (!tx_avail) begin
                         tx_en <= 0;
                         if (tile_hdr_idx == 4'd9) begin
-                            col_idx <= 0;
+                            pixel_idx <= 0;
                             state   <= S_READ_FIFO;
                         end else begin
                             tile_hdr_idx <= tile_hdr_idx + 1;
@@ -173,7 +199,7 @@ module tx_ctrl #(
                 end
 
                 S_READ_FIFO: begin
-                    if (col_idx >= tile_cols) begin
+                    if (pixel_idx >= tile_pixels) begin
                         state <= S_TILE_CKSUM;
                     end else if (fifo_avail) begin
                         fifo_rd <= 1;
@@ -207,7 +233,7 @@ module tx_ctrl #(
                         tx_data  <= current_pixel[15:8];
                         tx_en    <= 1;
                         checksum <= checksum ^ current_pixel[15:8];
-                        col_idx  <= col_idx + 1;
+                        pixel_idx <= pixel_idx + 1;
                         state    <= S_SEND_HI_ACK;
                     end
                 end
@@ -239,29 +265,22 @@ module tx_ctrl #(
                     if (gap_count < RESPONSE_TILE_GAP_CYCLES) begin
                         gap_count <= gap_count + 1;
                     end else begin
-                        next_tile_col_start <= tile_col_start + tile_cols;
-                        last_tile <= (tile_col_start + tile_cols >= cols);
-                        last_row <= (row_idx + 1 >= rows);
+                        next_row_idx <= row_idx + tile_rows;
+                        last_row <= (row_idx + tile_rows >= rows);
                         state <= S_TILE_ADVANCE;
                     end
                 end
 
                 S_TILE_ADVANCE: begin
-                    if (last_tile) begin
-                        if (last_row) begin
-                            end_idx <= 0;
-                            state   <= S_END_BYTE;
-                        end else begin
-                            row_idx        <= row_idx + 1;
-                            tile_col_start <= 0;
-                            tile_cols      <= calc_tile_cols(cols, 16'd0);
-                            tile_hdr_idx   <= 0;
-                            checksum       <= 0;
-                            state          <= S_TILE_HDR_BYTE;
-                        end
+                    if (last_row) begin
+                        end_idx <= 0;
+                        state   <= S_END_BYTE;
                     end else begin
-                        tile_col_start <= next_tile_col_start;
-                        tile_cols      <= calc_tile_cols(cols, next_tile_col_start);
+                        row_idx        <= next_row_idx;
+                        tile_col_start <= 0;
+                        tile_rows      <= calc_tile_rows(rows, next_row_idx);
+                        tile_cols      <= cols;
+                        tile_pixels    <= calc_tile_pixels(calc_tile_rows(rows, next_row_idx), cols);
                         tile_hdr_idx   <= 0;
                         checksum       <= 0;
                         state          <= S_TILE_HDR_BYTE;

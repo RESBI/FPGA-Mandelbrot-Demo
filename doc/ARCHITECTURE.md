@@ -791,52 +791,59 @@ The current source defaults are:
 
 | Parameter | Default | Meaning |
 |---|---:|---|
-| `CFG_RESPONSE_TILE_COLS` | `64` | Maximum RTL response packet width. |
-| `CFG_RESPONSE_TILE_GAP_CYCLES` | `1000` | Inter-packet idle gap at 100 MHz, about 10 us. |
+| `CFG_RESPONSE_TILE_ROW_SPLITS` | `8` | Number of full-width row-split retry/checksum tiles per compute response. |
+| `CFG_RESPONSE_TILE_GAP_CYCLES` | `1000` | Inter-packet idle gap, about 5 us at 200 MHz. |
 
-`CFG_RESPONSE_TILE_COLS` controls the width of each RTL `TD` packet. The packet height is determined by the stream position and remaining pixels; in the current implementation packets advance through the response in raster order and do not reorder pixels. The output FIFO still supplies one 16-bit pixel at a time, so the packetizer is a wrapper around the same low-byte/high-byte UART serialization used by the legacy response.
+`CFG_RESPONSE_TILE_ROW_SPLITS` controls the retry/checksum granularity inside one hardware compute response. Each `TD` packet spans the full response width (`tile_cols = cols`, `col = 0`) and covers a slice of the response height. The base slice height is `rows / CFG_RESPONSE_TILE_ROW_SPLITS`, with a minimum of one row; the final packet carries any remaining rows. Packets still advance through the response in raster order and do not reorder pixels. The output FIFO supplies one 16-bit pixel at a time, so the packetizer remains a wrapper around the same low-byte/high-byte UART serialization used by the legacy response.
 
 The RTL response tile is not the same thing as a host compute tile:
 
 | Concept | Controlled By | Example | Purpose |
 |---|---|---|---|
-| RTL response tile | `CFG_RESPONSE_TILE_COLS` in `../rtl/config.vh` | `64` columns | Adds packet boundaries and checksums inside one FPGA response. |
+| RTL response retry tile | `CFG_RESPONSE_TILE_ROW_SPLITS` in `../rtl/config.vh` | full width x 15 rows for `1920x120`, `M=8` | Adds packet boundaries and local checksums inside one FPGA response. |
 | Host tile | `--tile-width`, `--tile-height` | full width x 120 rows | Defines the display/logging stripe and final image copy region. |
 | Hardware compute tile | `--compute-tile-width`, `--compute-tile-height` | host tile, width capped at 4096 | Creates retryable hardware commands inside each host tile. |
 
-A single hardware compute tile can therefore produce many RTL `TD` packets. For example, the default `1920x120` compute tile used for 1080p with `CFG_RESPONSE_TILE_COLS=64` produces 3600 64-column response packets inside one response frame. A smaller `512x120` compute tile can still be selected explicitly when a smaller retry unit is preferred.
+A single hardware compute tile can therefore produce multiple RTL `TD` packets without changing the compute command size. For example, the default `1920x120` compute tile used for 1080p with `CFG_RESPONSE_TILE_ROW_SPLITS=8` produces eight `1920x15` response retry tiles inside one response frame. A smaller compute tile can still be selected explicitly when a smaller command-level retry unit is preferred, but the default keeps the compute tile large and uses row-split checksums for local detection.
 
-Host-driven tiling is now the default behavior in `../python/mandelbrot_host.py`. If the user does not pass `--tile-width` or `--tile-height`, the host selects a full-width stripe with a default height of 120 rows. If the user does not pass `--compute-tile-width` or `--compute-tile-height`, each compute tile equals the host tile, except the compute width is capped at 4096 columns. Tile receive uses a shorter per-read timeout, `--tile-read-timeout 30`, so a byte slip can fail and retry a compute tile without waiting for the global serial timeout. The old single-command path is still available through `--full-frame` for regression and controlled experiments.
+Host-driven tiling is now the default behavior in `../python/mandelbrot_host.py`. If the user does not pass `--tile-width` or `--tile-height`, the host selects a full-width stripe with a default height of 120 rows. If the user does not pass `--compute-tile-width` or `--compute-tile-height`, compute tile height equals the host tile height and compute tile width is capped at 2048 columns. This keeps 1080p at `1920x120`, but splits a `4096x120` host stripe into two safer `2048x120` hardware requests. Tile receive uses a shorter per-read timeout, `--tile-read-timeout 5.0`, so a byte slip can fail and retry a compute tile without waiting for the global serial timeout. The old single-command path is still available through `--full-frame` for regression and controlled experiments.
 
 `CFG_RESPONSE_TILE_GAP_CYCLES` inserts a small idle gap between response packets. This gives the host/USB serial stack short scheduling windows without adding a large throughput penalty. The current default of `1000` cycles is about 5 us at 200 MHz.
 
 For a response frame with `rows` and `cols`, the approximate packet count is:
 
 ```text
-td_packets = rows * ceil(cols / CFG_RESPONSE_TILE_COLS)
+base_rows = max(1, rows / CFG_RESPONSE_TILE_ROW_SPLITS)
+td_packets = ceil(rows / base_rows)
 ```
 
-With the current `CFG_RESPONSE_TILE_COLS=64`, one default `1920x120` hardware compute tile produces:
+With the current `CFG_RESPONSE_TILE_ROW_SPLITS=8`, one default `1920x120` hardware compute tile produces:
 
 ```text
-120 * ceil(1920 / 64) = 120 * 30 = 3600 TD packets
+base_rows = 120 / 8 = 15
+td_packets = 8
+retry tile shape = 1920 x 15
 ```
 
 A default `1920x120` host stripe is one compute response. The payload size is unchanged at two bytes per pixel. The framing overhead for each `TD` packet is 2 magic bytes, 8 header bytes, and 1 checksum byte, so `11` bytes per packet. One default `1920x120` compute response therefore has:
 
 ```text
 payload_bytes = 1920 * 120 * 2 = 460800
-td_overhead   = 3600 * 11 = 39600
-gap_time      = 3600 * 1000 / 100 MHz = 36.0 ms
+td_overhead   = 8 * 11 = 88
+gap_time      = 8 * 1000 / 200 MHz = 40 us
 ```
 
-This overhead is small compared with the payload time at 12 Mbaud, but it is not zero. Increasing `CFG_RESPONSE_TILE_COLS` would reduce packet count and host parsing overhead, at the cost of larger corruption windows and possibly different timing/resource behavior in `tx_ctrl`.
+This is much lower overhead than the earlier fixed-column packetization experiment, while still giving eight local checksum boundaries inside the compute tile. The row-split sweep selected `M=8` as the default because it passed the standard-scene 10-run with zero retry events and kept whole-system throughput near the UART payload ceiling.
 
 ### 10.3 Reliability Boundary
 
-Packetized response framing by itself detects checksum errors earlier, but it does not let the FPGA retransmit one packet. During response streaming the protocol is still effectively one-way: the host is receiving and the FPGA is transmitting. If a `TD` packet checksum fails, the host cannot ask the current `tx_ctrl` instance to resend only that packet.
+Packetized response framing detects local payload checksum errors, but it does not let the FPGA retransmit one packet. During response streaming the protocol is still effectively one-way: the host is receiving and the FPGA is transmitting. If a `TD` packet checksum fails, the host cannot ask the current `tx_ctrl` instance to resend only that packet.
 
-Recovery therefore happens at the hardware compute-tile boundary. The host records the failed compute-tile coordinates, discards that subframe, drains stale serial bytes until the link is quiet, resets the input buffer, sends the soft reset command, and sends the same compute tile command again. This recovers from byte slips while keeping RTL retransmission complexity out of the FPGA.
+Recovery now depends on failure class. For a checksum-only local `TD` failure, the host has consumed a complete `RT/TD/TE` frame and the UART stream is still aligned. It keeps the valid local retry tiles, records the failed row-split rectangle in full-image coordinates, continues the remaining compute tiles, then recomputes merged failed rectangles after the first full-frame pass. For framing failures such as bad magic, incomplete header, incomplete payload, missing checksum, or premature end, stream alignment is not trusted; the host drains stale serial bytes until quiet, resets the input buffer, sends the soft reset command, and retries the current compute tile immediately.
+
+The host receive path also pipelines safe CPU-side work. UART reads remain strictly single-threaded and ordered, because two readers on one serial byte stream would break framing. After each `TD` payload is read, checksum and `uint16` unpacking are submitted to worker threads. Once the compute response reaches `TE`, the next compute tile can be requested while the previous response is finalized and copied into the image buffer.
+
+For long renders, `--preview` opens a live thumbnail preview window for image outputs. The console remains on the compact single-line progress bar, while the preview refreshes after completed compute tiles are copied into the image buffer. `--preview-size` controls the maximum preview dimension.
 
 The soft reset command is the eight-byte UART sequence `RST!RST!`. `cmd_parser` recognizes it in any parser state and pulses a system reset long enough to clear the command parser, compute engine, per-core FIFOs, output FIFO, and `tx_ctrl`. The host sends it automatically after a failed compute tile attempt unless `--no-soft-reset-on-retry` is used. It can also be sent manually with `python python\mandelbrot_host.py --port COM6 --soft-reset`.
 
@@ -845,18 +852,22 @@ Host retry sequence:
 ```mermaid
 flowchart TB
     CMD["Send tile command"] --> RX["Receive RT/TD/TE response"]
-    RX --> CHECK{"Frame complete<br/>and checks pass?"}
-    CHECK -->|yes| COPY["Copy tile pixels<br/>into full-frame buffer"]
-    CHECK -->|no| DRAIN["Drain serial until quiet"]
+    RX --> CHECK{"Frame status?"}
+    CHECK -->|clean| COPY["Copy tile pixels<br/>into full-frame buffer"]
+    CHECK -->|checksum-only local TD failure| RECORD["Record failed row-split rect<br/>keep valid local tiles"]
+    CHECK -->|framing/short read| DRAIN["Drain serial until quiet"]
     DRAIN --> RESET["Soft reset FPGA<br/>reset input buffer<br/>increment retry count"]
     RESET --> RETRY{"Retries left?"}
     RETRY -->|yes| CMD
     RETRY -->|no| FAIL["Fail frame"]
+    COPY --> NEXT["Continue next compute tile"]
+    RECORD --> NEXT
+    NEXT --> DEFER["After first pass:<br/>merge and recompute recorded rects"]
 ```
 
-The retry is still coarser than one `TD` packet. A bad `TD` packet causes the current hardware compute tile to be recomputed, because the FPGA has already streamed past the failed packet and has no retained copy to resend. With the default `1920x120` host stripe and matching compute tile, one retry recomputes one host stripe rather than the entire 1080p frame. If a smaller retry unit is more important than command overhead, pass explicit compute tile dimensions such as `--compute-tile-width 512 --compute-tile-height 120`.
+Checksum-only retry is now finer than one compute tile: a failed row-split `TD` packet can be recomputed as a small rectangle such as `1920x15` after the first pass. Framing failures are still compute-tile retries, because the response stream is not trustworthy after alignment is lost. With the default `1920x120` host stripe and matching compute tile, a framing retry recomputes one host stripe rather than the entire 1080p frame. If a smaller command-level retry unit is more important than command overhead, pass explicit compute tile dimensions such as `--compute-tile-width 512 --compute-tile-height 120`.
 
-If bytes stop arriving in the middle of a `TD` payload, the receiver cannot know the packet is incomplete until the serial read returns short. The tiled path therefore overrides the serial timeout during each tile request with `--tile-read-timeout`, currently 30 seconds by default. This turns the apparent hang into a bounded wait followed by drain and retry.
+If bytes stop arriving in the middle of a `TD` payload, the receiver cannot know the packet is incomplete until the serial read returns short. The tiled path therefore overrides the serial timeout during each tile request with `--tile-read-timeout`, currently 5 seconds by default. This turns the apparent hang into a bounded wait followed by drain and retry. Earlier 30-second retry tails were traced to this timeout, not to checksum-only local retry.
 
 Current limitations:
 
@@ -864,7 +875,7 @@ Current limitations:
 |---|---|
 | No packet sequence ID | The host detects bad framing/checksum but cannot explicitly report missing packet numbers. |
 | No request ID | Late bytes from an old failed request are handled by drain/quiet timing, not by an explicit ID check. |
-| No FPGA-side retransmission | A failed packet requires recomputing the current hardware compute tile. |
+| No FPGA-side retransmission | A checksum-only failed packet is recomputed by issuing a new host command for that rectangle; framing failures still require recomputing the current hardware compute tile. |
 | Payload-only checksum | Header corruption is caught by semantic checks, not by a header CRC. |
 
 These are deliberate tradeoffs for the current UART implementation. The design gives practical recovery at 12 Mbaud without converting the FPGA UART path into a full reliable transport stack.
@@ -873,7 +884,7 @@ Important reliability boundaries:
 
 | Boundary | Current Behavior |
 |---|---|
-| Packet corruption inside one `TD` | Detected by payload checksum; host retries the compute tile. |
+| Packet corruption inside one `TD` | Detected by payload checksum; host records and later recomputes the failed row-split rectangle. |
 | Header corruption | Detected by magic/dimension/bounds/length checks; host retries the compute tile. |
 | Lost packet | Detected by missing filled pixels or unexpected `TE`; host retries the compute tile. |
 | Late bytes after a failed tile | Mitigated by drain-until-quiet, soft reset, and input-buffer reset. |
@@ -916,7 +927,7 @@ This avoids off-by-one seams between adjacent compute tiles.
 
 ### 10.5 Tile Size Tradeoffs
 
-Tile size is a tradeoff between recovery granularity and fixed overhead. Small tiles reduce retry cost but increase command count, packet parsing, and host overhead. Large horizontal stripes approach single-burst performance while preserving a practical retry boundary. The current default is a full-width host stripe of 120 rows; if compute-tile dimensions are omitted, the compute tile equals the host tile except for the 4096-column cap.
+Tile size is a tradeoff between recovery granularity and fixed overhead. Small tiles reduce retry cost but increase command count, packet parsing, and host overhead. Large horizontal stripes approach single-burst performance while preserving a practical retry boundary. The current default is a full-width host stripe of 120 rows; if compute-tile dimensions are omitted, compute height equals the host stripe height and compute width is capped at 2048 columns.
 
 Tile-size selection can be estimated with two competing terms:
 
@@ -1182,31 +1193,31 @@ At 12 Mbaud, the practical UART payload upper bound is roughly:
 Measured direct-200MHz fast-scene throughput remains below that theoretical serial payload limit because host/driver overhead, response framing, retry recovery, FIFO pacing, issue slicing, and compute start/finish overhead still matter:
 
 ```text
-1080p fast escape @128: 468446.75 pixels/s, 10-run mean
-1080p standard @64:    480268.18 pixels/s, 10-run mean
+1080p fast escape @128: 545436.22 pixels/s, 10-run mean
+1080p standard @64:    546090.60 pixels/s, 10-run mean
 ```
 
-Current direct-200MHz dynamic + 12-worker + 8-context 10-run examples at 12 Mbaud with `1920x120` host/compute tiles:
+Current direct-200MHz dynamic + 12-worker + 8-context + `M=8` row-split retry-tile 10-run examples at 12 Mbaud with `1920x120` host/compute tiles:
 
 | Case | FPGA Time | Throughput | Main limiter |
 |---|---:|---:|---|
-| `1080p Seahorse zoom @512` | `4.499s` | `467436.73 pps` | Mixed compute/output |
-| `1080p deep tendrils @8192` | `4.739s` | `441838.90 pps` | Mostly compute |
-| `1080p deep minibrot @8192` | `10.146s` | `206484.60 pps` | Compute-bound |
-| `1080p deep Seahorse @1024` | `4.967s` | `420129.06 pps` | Mostly compute |
+| `1080p Seahorse zoom @512` | `3.964s` | `525491.58 pps` | Mixed compute/output |
+| `1080p deep tendrils @8192` | `3.994s` | `519243.89 pps` | Mostly compute |
+| `1080p deep minibrot @8192` | `9.166s` | `226235.12 pps` | Compute-bound |
+| `1080p deep Seahorse @1024` | `4.575s` | `454952.34 pps` | Mostly compute |
 
 Fast escape and standard views are transport/host/issue-overhead sensitive. The current ZU4EV 12-worker/8-context direct-200MHz default is faster than the previous 7K70T 6-worker/4-context direct-200MHz point on every measured scene, with the largest gains in compute-heavy views. Detailed current performance is kept in [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md); historical comparisons are kept in [ARCHITECTURE_EVOLUTION_REPORT.md](ARCHITECTURE_EVOLUTION_REPORT.md) and [WORKER_COUNT_SCALING.md](WORKER_COUNT_SCALING.md).
 
-The latest direct-200MHz ZU4EV 12-worker/8-context 10-run summary is:
+The latest direct-200MHz ZU4EV 12-worker/8-context, `RESPONSE_TILE_ROW_SPLITS=8`, 10-run summary is:
 
 | Scene | Transport pass | Retry events | Mean FPGA s | Min | Max | CV | Mean pixels/s | vs 7K70T 6w/4ctx 200MHz |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| fast escape @128 | `10/10` | `4` | `4.563` | `4.146` | `7.261` | `21.96%` | `468446.75` | `1.017x` |
-| standard @64 | `10/10` | `2` | `4.353` | `4.141` | `5.191` | `10.06%` | `480268.18` | `1.065x` |
-| Seahorse zoom @512 | `10/10` | `2` | `4.499` | `4.288` | `6.371` | `14.62%` | `467436.73` | `1.270x` |
-| deep tendrils @8192 | `10/10` | `3` | `4.739` | `4.417` | `5.492` | `10.79%` | `441838.90` | `1.808x` |
-| deep mini-brot @8192 | `10/10` | `6` | `10.146` | `9.181` | `12.295` | `10.91%` | `206484.60` | `2.066x` |
-| deep Seahorse @1024 | `10/10` | `2` | `4.967` | `4.754` | `5.805` | `8.89%` | `420129.06` | `1.946x` |
+| fast escape @128 | `10/10` | `1` | `3.821` | `3.720` | `4.702` | `8.11%` | `545436.22` | `1.215x` |
+| standard @64 | `10/10` | `1` | `3.816` | `3.715` | `4.696` | `8.10%` | `546090.60` | `1.215x` |
+| Seahorse zoom @512 | `10/10` | `1` | `3.964` | `3.864` | `4.855` | `7.89%` | `525491.58` | `1.442x` |
+| deep tendrils @8192 | `10/10` | `0` | `3.994` | `3.991` | `3.997` | `0.04%` | `519243.89` | `2.145x` |
+| deep mini-brot @8192 | `10/10` | `0` | `9.166` | `9.164` | `9.168` | `0.02%` | `226235.12` | `2.287x` |
+| deep Seahorse @1024 | `10/10` | `1` | `4.575` | `4.472` | `5.485` | `6.99%` | `454952.34` | `2.113x` |
 
 ## 14. Resource Use
 
@@ -1238,7 +1249,7 @@ The current default is the ZU4EV 12-worker/8-context direct-200MHz build. It use
 | Twelve-worker default | Current best validated point. It improves every measured 1080p scene versus the previous 7K70T 6-worker/4-context 200MHz result. |
 | LUT/routing pressure | The accepted 12-worker/8-context build uses `96.96%` CLB LUTs and is limited by route-dominated parameter distribution rather than arithmetic logic depth. |
 | Direct-200MHz mode | Current default. Timing-clean and hardware-benchmarked at twelve workers/eight contexts. |
-| UART output | 12 Mbaud raises the payload ceiling to about 600000 pixels/s, but long multi-megabyte bursts can still show occasional host/FT232HL receive instability without packet-level retransmission. |
+| UART output | 12 Mbaud raises the payload ceiling to about 600000 pixels/s. Row-split retry tiles reduce overhead and localize checksum failures, but framing failures still require compute-tile retry because the FPGA cannot retransmit one packet. |
 | FP64 precision | Very deep zooms below approximately `1e-12` to `1e-14` pixel step become precision-sensitive. |
 | FP units are IEEE-like, not full IEEE-754 | No full NaN/Inf/denormal/rounding support. |
 | FP128 mode exists structurally | Most validation and performance work has focused on FP64. |
@@ -1249,9 +1260,9 @@ The current default is the ZU4EV 12-worker/8-context direct-200MHz build. It use
 Most valuable next steps:
 
 1. Add a higher-bandwidth transport, such as USB FIFO, SPI, Ethernet, or memory-mapped PS interface on Zynq.
-2. Add row/tile IDs to the response protocol so the host can accept out-of-order rows or tiles.
-3. Extend the current dynamic row scheduler toward dynamic tiles once the protocol can carry coordinates.
-4. Add packet-level framing, sequence numbers, and retransmission or a higher-bandwidth transport if UART must remain near 12 Mbaud.
+2. Add row/tile IDs and request IDs to the response protocol so the host can reject stale bytes and eventually accept out-of-order rows or tiles.
+3. Add packet-level sequence numbers and FPGA-side retransmission so a framing failure can retry one `TD` instead of recomputing a compute tile.
+4. Extend the current dynamic row scheduler toward dynamic tiles once the protocol can carry coordinates.
 5. Add cardioid and period-2 bulb classification to skip interior pixels quickly.
 6. Evaluate fixed-point arithmetic for Mandelbrot-specific deep zoom windows.
 7. Validate and optimize FP128 mode for deeper zooms beyond FP64 precision comfort.

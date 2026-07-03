@@ -121,7 +121,8 @@ def parse_host_text(text, returncode, elapsed, scene, run_idx, log_path, output_
     ok = returncode == 0 and complete_frame
     failed_attempts = len(re.findall(r"compute tile receive failed", text, re.IGNORECASE))
     recovered = [int(v) for v in re.findall(r"Recovered\s+(\d+)\s+failed compute tile attempts", text, re.IGNORECASE)]
-    retry_events = max([failed_attempts] + recovered)
+    deferred = [int(v) for v in re.findall(r"Recovered\s+(\d+)\s+deferred checksum retry tile", text, re.IGNORECASE)]
+    retry_events = max([failed_attempts] + recovered) + sum(deferred)
 
     return {
         "scene": scene["name"],

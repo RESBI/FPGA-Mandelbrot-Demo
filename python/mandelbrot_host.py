@@ -22,6 +22,7 @@ import sys
 import argparse
 import os
 import colorsys
+from concurrent.futures import ThreadPoolExecutor
 
 PORT = "COM6"
 BAUD = 12000000
@@ -29,11 +30,92 @@ TIMEOUT = 180.0
 DEFAULT_DYNAMIC_OWNER_DEPTH = 4096
 DEFAULT_MAX_HOST_BYTES = 512 * 1024 * 1024
 DEFAULT_HOST_TILE_HEIGHT = 120
-DEFAULT_COMPUTE_TILE_MAX_WIDTH = 4096
-DEFAULT_TILE_READ_TIMEOUT = 30.0
+DEFAULT_COMPUTE_TILE_MAX_WIDTH = 2048
+DEFAULT_TILE_READ_TIMEOUT = 5.0
 TILE_PROGRESS_PACKET_INTERVAL = 1024
 SOFT_RESET_COMMAND = b"RST!RST!"
 QUIET_PROGRESS_BAR_WIDTH = 28
+ASYNC_CHECKSUM_WORKERS = 4
+
+
+class LocalTileChecksumError(Exception):
+    def __init__(self, pixels, failed_rects):
+        super().__init__(f"{len(failed_rects)} local checksum tile(s) failed")
+        self.pixels = pixels
+        self.failed_rects = failed_rects
+
+
+def payload_xor(payload):
+    checksum = 0
+    for b in payload:
+        checksum ^= b
+    return checksum
+
+
+def process_tiled_payload(payload, checksum_recv, row, col, tile_rows, tile_cols):
+    checksum_calc = payload_xor(payload)
+    if checksum_calc != checksum_recv:
+        return {
+            "ok": False,
+            "row": row,
+            "col": col,
+            "tile_rows": tile_rows,
+            "tile_cols": tile_cols,
+            "checksum_calc": checksum_calc,
+            "checksum_recv": checksum_recv,
+            "payload_first32": payload[:32].hex(),
+            "payload_last32": payload[-32:].hex() if payload else "",
+        }
+    return {
+        "ok": True,
+        "row": row,
+        "col": col,
+        "tile_rows": tile_rows,
+        "tile_cols": tile_cols,
+        "values": struct.unpack(f'<{tile_rows * tile_cols}H', payload),
+    }
+
+
+class PendingTiledResponse:
+    def __init__(self, width, height, tile_futures, verbose=False, collect_local_failures=False):
+        self.width = width
+        self.height = height
+        self.tile_futures = tile_futures
+        self.verbose = verbose
+        self.collect_local_failures = collect_local_failures
+
+    def finalize(self):
+        pixels = [0] * (self.width * self.height)
+        failed_rects = []
+        received_pixels = 0
+        for future in self.tile_futures:
+            result = future.result()
+            row = result["row"]
+            col = result["col"]
+            tile_rows = result["tile_rows"]
+            tile_cols = result["tile_cols"]
+            if not result["ok"]:
+                failed_rects.append((col, row, tile_cols, tile_rows))
+                received_pixels += tile_rows * tile_cols
+                if self.verbose:
+                    print(f"ERROR: Tile checksum mismatch at row={row}, col={col}: calc=0x{result['checksum_calc']:02X}, recv=0x{result['checksum_recv']:02X}")
+                    print(f"  payload_first32={result['payload_first32']}")
+                    print(f"  payload_last32={result['payload_last32']}")
+                continue
+            values = result["values"]
+            idx = 0
+            for dy in range(tile_rows):
+                base = (row + dy) * self.width + col
+                pixels[base:base + tile_cols] = values[idx:idx + tile_cols]
+                received_pixels += tile_cols
+                idx += tile_cols
+        if failed_rects:
+            if self.collect_local_failures:
+                raise LocalTileChecksumError(pixels, failed_rects)
+            return None
+        if self.verbose:
+            print(f"Finalized {received_pixels} pixels from {len(self.tile_futures)} async tile(s)")
+        return pixels
 
 
 def estimate_uart_seconds(width, height):
@@ -194,6 +276,64 @@ def render_image(pixels, width, height, max_iter, output_path, palette_scheme="c
     print(f"Image saved to {output_path} (palette={palette_scheme})")
 
 
+class PreviewWindow:
+    def __init__(self, width, height, max_iter, palette_scheme="classic", max_size=512):
+        try:
+            import tkinter as tk
+            from PIL import Image, ImageTk
+        except ImportError:
+            print("WARNING: Preview requires tkinter and pillow; continuing without preview")
+            self.enabled = False
+            return
+        scale = min(max_size / max(width, 1), max_size / max(height, 1), 1.0)
+        self.preview_w = max(1, int(width * scale))
+        self.preview_h = max(1, int(height * scale))
+        self.width = width
+        self.height = height
+        self.max_iter = max_iter
+        self.palette = make_palette(min(2048, max_iter + 1), palette_scheme)
+        self.palette_size = len(self.palette)
+        self.Image = Image
+        self.ImageTk = ImageTk
+        self.root = tk.Tk()
+        self.root.title("Mandelbrot FPGA Preview")
+        self.image = Image.new("RGB", (self.preview_w, self.preview_h), (0, 0, 0))
+        self.photo = ImageTk.PhotoImage(self.image)
+        self.label = tk.Label(self.root, image=self.photo)
+        self.label.pack()
+        self.enabled = True
+        self.refresh([0] * (width * height))
+
+    def _color(self, value):
+        if value >= self.max_iter:
+            return (0, 0, 0)
+        return self.palette[value % self.palette_size]
+
+    def refresh(self, pixels):
+        if not self.enabled:
+            return
+        data = []
+        for py in range(self.preview_h):
+            sy = min(self.height - 1, py * self.height // self.preview_h)
+            row = sy * self.width
+            for px in range(self.preview_w):
+                sx = min(self.width - 1, px * self.width // self.preview_w)
+                data.append(self._color(pixels[row + sx]))
+        self.image.putdata(data)
+        self.photo = self.ImageTk.PhotoImage(self.image)
+        self.label.configure(image=self.photo)
+        self.root.update_idletasks()
+        self.root.update()
+
+    def close(self):
+        if self.enabled:
+            try:
+                self.root.update_idletasks()
+                self.root.update()
+            except Exception:
+                pass
+
+
 def render_text(pixels, width, height, max_iter, output_path):
     """Render pixel data to ASCII text."""
     chars = " .:-=+*#%@"
@@ -343,7 +483,8 @@ class MandelbrotFPGA:
             print(f"Received {len(pixels)} pixels")
         return pixels
 
-    def recv_tiled_response(self, header, width, height):
+    def recv_tiled_response(self, header, width, height, collect_local_failures=False,
+                            checksum_executor=None, async_finalize=False):
         resp_rows = struct.unpack('<H', header[2:4])[0]
         resp_cols = struct.unpack('<H', header[4:6])[0]
 
@@ -353,9 +494,9 @@ class MandelbrotFPGA:
             print(f"WARNING: Dims mismatch: {resp_rows}x{resp_cols} vs {height}x{width}")
 
         total_pixels = resp_rows * resp_cols
-        pixels = [0] * total_pixels
         received_pixels = 0
         tile_count = 0
+        tile_futures = []
 
         while True:
             tile_magic = self.ser.read(2)
@@ -378,7 +519,12 @@ class MandelbrotFPGA:
                     return None
                 if self.verbose:
                     print(f"Received {received_pixels} pixels in {tile_count} tiles")
-                return pixels
+                response = PendingTiledResponse(resp_cols, resp_rows, tile_futures,
+                                               verbose=self.verbose,
+                                               collect_local_failures=collect_local_failures)
+                if async_finalize:
+                    return response
+                return response.finalize()
 
             if tile_magic != b"TD":
                 print(f"ERROR: Bad tile magic: {tile_magic.hex()}")
@@ -415,29 +561,28 @@ class MandelbrotFPGA:
                 print(f"ERROR: Missing tile checksum at row={row}, col={col}")
                 return None
 
-            checksum_calc = 0
-            for b in payload:
-                checksum_calc ^= b
-            if checksum_calc != ck_byte[0]:
-                print(f"ERROR: Tile checksum mismatch at row={row}, col={col}: calc=0x{checksum_calc:02X}, recv=0x{ck_byte[0]:02X}")
-                print(f"  tile_header={tile_header.hex()}")
-                print(f"  payload_first32={payload[:32].hex()}")
-                print(f"  payload_last32={payload[-32:].hex() if payload else ''}")
-                return None
+            if checksum_executor is None:
+                result = process_tiled_payload(payload, ck_byte[0], row, col, tile_rows, tile_cols)
 
-            tile_values = struct.unpack(f'<{tile_pixels}H', payload)
-            idx = 0
-            for dy in range(tile_rows):
-                base = (row + dy) * resp_cols + col
-                pixels[base:base + tile_cols] = tile_values[idx:idx + tile_cols]
-                received_pixels += tile_cols
-                idx += tile_cols
+                class CompletedFuture:
+                    def __init__(self, value):
+                        self.value = value
+
+                    def result(self):
+                        return self.value
+
+                tile_futures.append(CompletedFuture(result))
+            else:
+                tile_futures.append(checksum_executor.submit(
+                    process_tiled_payload, payload, ck_byte[0], row, col, tile_rows, tile_cols))
+            received_pixels += tile_pixels
 
             tile_count += 1
             if self.verbose and (tile_count % TILE_PROGRESS_PACKET_INTERVAL == 0 or received_pixels == total_pixels):
                 print(f"  Tile progress: {received_pixels}/{total_pixels} pixels ({tile_count} tiles)")
 
-    def recv_response(self, width, height):
+    def recv_response(self, width, height, collect_local_failures=False,
+                      checksum_executor=None, async_finalize=False):
         header = self.ser.read(6)
         if len(header) < 6:
             print(f"ERROR: Incomplete header: {header.hex() if header else 'none'}")
@@ -446,7 +591,10 @@ class MandelbrotFPGA:
         if header[0:2] == b"RK":
             return self.recv_legacy_response(header, width, height)
         if header[0:2] == b"RT":
-            return self.recv_tiled_response(header, width, height)
+            return self.recv_tiled_response(header, width, height,
+                                            collect_local_failures=collect_local_failures,
+                                            checksum_executor=checksum_executor,
+                                            async_finalize=async_finalize)
 
         print(f"ERROR: Bad magic: {header[0]:#x} {header[1]:#x}, header={header.hex()}")
         return None
@@ -496,9 +644,12 @@ def compare_results(hw, sw, width, height):
     return match == total
 
 
-def request_image(fpga, center_re, center_im, step, max_iter, width, height, mode):
+def request_image(fpga, center_re, center_im, step, max_iter, width, height, mode,
+                  collect_local_failures=False, checksum_executor=None, async_finalize=False):
     fpga.send_command(center_re, center_im, step, max_iter, width, height, mode=mode)
-    return fpga.recv_response(width, height)
+    return fpga.recv_response(width, height, collect_local_failures=collect_local_failures,
+                              checksum_executor=checksum_executor,
+                              async_finalize=async_finalize)
 
 
 def drain_serial_until_quiet(fpga, quiet_seconds=0.25, max_seconds=3.0):
@@ -518,9 +669,49 @@ def drain_serial_until_quiet(fpga, quiet_seconds=0.25, max_seconds=3.0):
         print(f"  Drained {drained} stale bytes before retry")
 
 
+def merge_rects(rects):
+    if not rects:
+        return []
+
+    horizontal = []
+    for x, y, w, h in sorted(rects, key=lambda r: (r[1], r[3], r[0])):
+        if horizontal:
+            px, py, pw, ph = horizontal[-1]
+            if py == y and ph == h and px + pw == x:
+                horizontal[-1] = (px, py, pw + w, ph)
+                continue
+        horizontal.append((x, y, w, h))
+
+    merged = []
+    for x, y, w, h in sorted(horizontal, key=lambda r: (r[0], r[2], r[1])):
+        if merged:
+            px, py, pw, ph = merged[-1]
+            if px == x and pw == w and py + ph == y:
+                merged[-1] = (px, py, pw, ph + h)
+                continue
+        merged.append((x, y, w, h))
+    return sorted(merged, key=lambda r: (r[1], r[0]))
+
+
+def copy_rect(dst_pixels, dst_width, x0, y0, src_pixels, src_width, rect_w, rect_h):
+    for dy in range(rect_h):
+        src = dy * src_width
+        dst = (y0 + dy) * dst_width + x0
+        dst_pixels[dst:dst + rect_w] = src_pixels[src:src + rect_w]
+
+
+def calc_subtile_center(center_re, center_im, step, full_half_w, full_half_h, x0, y0, w, h):
+    half_w = (w - 1) >> 1
+    half_h = (h - 1) >> 1
+    return (
+        center_re + (x0 + half_w - full_half_w) * step,
+        center_im + (full_half_h - (y0 + half_h)) * step,
+    )
+
+
 def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, height, mode,
                         tile_width, tile_height, compute_tile_width, compute_tile_height,
-                        retries, tile_read_timeout, soft_reset_on_retry):
+                        retries, tile_read_timeout, soft_reset_on_retry, preview=None):
     pixels = [0] * (width * height)
     full_half_w = (width - 1) >> 1
     full_half_h = (height - 1) >> 1
@@ -529,6 +720,8 @@ def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, heigh
     tile_total = tiles_x * tiles_y
     tile_index = 0
     failed_compute_tiles = []
+    deferred_retry_tiles = []
+    pending_finalized_tiles = []
     total_compute_tiles = 0
     for y_base in range(0, height, tile_height):
         host_h = min(tile_height, height - y_base)
@@ -538,101 +731,261 @@ def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, heigh
             compute_tiles_x = (host_w + compute_tile_width - 1) // compute_tile_width
             total_compute_tiles += compute_tiles_x * compute_tiles_y
     completed_compute_tiles = 0
+    def show_progress(current_task, final=False):
+        if fpga.verbose:
+            return
+        print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_index, tile_total,
+                             current_task, final=final)
 
-    for y0 in range(0, height, tile_height):
-        th = min(tile_height, height - y0)
-        for x0 in range(0, width, tile_width):
-            tw = min(tile_width, width - x0)
-            tile_index += 1
-            compute_tiles_x = (tw + compute_tile_width - 1) // compute_tile_width
-            compute_tiles_y = (th + compute_tile_height - 1) // compute_tile_height
-            compute_total = compute_tiles_x * compute_tiles_y
-            compute_index = 0
+    def finalize_pending(block=False):
+        nonlocal pending_finalized_tiles
+        still_pending = []
+        for item in pending_finalized_tiles:
+            future = item["future"]
+            if not block and not future.done():
+                still_pending.append(item)
+                continue
+            cx0, cy0, cw, ch = item["rect"]
+            deferred_for_item = False
+            try:
+                subtile_pixels = future.result()
+            except LocalTileChecksumError as exc:
+                subtile_pixels = exc.pixels
+                deferred_for_item = True
+                failed = [(cx0 + rx, cy0 + ry, rw, rh) for rx, ry, rw, rh in exc.failed_rects]
+                for rx0, ry0, rw, rh in merge_rects(failed):
+                    deferred_retry_tiles.append({
+                        "host_tile": item["host_tile"],
+                        "compute_tile": item["compute_tile"],
+                        "compute_rect": (cx0, cy0, cw, ch),
+                        "rect": (rx0, ry0, rw, rh),
+                    })
+                if not fpga.verbose:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                print(f"    Deferred {len(failed)} checksum retry tile(s): host_tile={item['host_tile']}, compute_tile={item['compute_tile']}, x={cx0}, y={cy0}, size={cw}x{ch}")
+            if subtile_pixels is None:
+                failed_compute_tiles.append({
+                    "host_tile": item["host_tile"],
+                    "compute_tile": item["compute_tile"],
+                    "x": cx0,
+                    "y": cy0,
+                    "width": cw,
+                    "height": ch,
+                    "attempt": 1,
+                    "retry_tiles": 1,
+                })
+                continue
+            copy_rect(pixels, width, cx0, cy0, subtile_pixels, cw, cw, ch)
+            if preview is not None:
+                preview.refresh(pixels)
+        pending_finalized_tiles = still_pending
 
-            if fpga.verbose:
-                print(f"Tile {tile_index}/{tile_total}: x={x0}, y={y0}, size={tw}x{th}, compute_tiles={compute_total}")
-            else:
-                print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_index, tile_total,
-                                     f"host x={x0}, y={y0}, size={tw}x{th}")
+    checksum_executor = ThreadPoolExecutor(max_workers=ASYNC_CHECKSUM_WORKERS)
+    finalize_executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        for y0 in range(0, height, tile_height):
+            th = min(tile_height, height - y0)
+            for x0 in range(0, width, tile_width):
+                tw = min(tile_width, width - x0)
+                tile_index += 1
+                compute_tiles_x = (tw + compute_tile_width - 1) // compute_tile_width
+                compute_tiles_y = (th + compute_tile_height - 1) // compute_tile_height
+                compute_total = compute_tiles_x * compute_tiles_y
+                compute_index = 0
 
-            for cy0 in range(y0, y0 + th, compute_tile_height):
-                ch = min(compute_tile_height, y0 + th - cy0)
-                for cx0 in range(x0, x0 + tw, compute_tile_width):
-                    cw = min(compute_tile_width, x0 + tw - cx0)
-                    compute_index += 1
-                    subtile_half_w = (cw - 1) >> 1
-                    subtile_half_h = (ch - 1) >> 1
-                    subtile_center_re = center_re + (cx0 + subtile_half_w - full_half_w) * step
-                    subtile_center_im = center_im + (full_half_h - (cy0 + subtile_half_h)) * step
+                if fpga.verbose:
+                    print(f"Tile {tile_index}/{tile_total}: x={x0}, y={y0}, size={tw}x{th}, compute_tiles={compute_total}")
+                else:
+                    show_progress(f"host x={x0}, y={y0}, size={tw}x{th}")
 
-                    subtile_pixels = None
-                    for attempt in range(1, retries + 2):
-                        if fpga.verbose or attempt > 1:
+                for cy0 in range(y0, y0 + th, compute_tile_height):
+                    ch = min(compute_tile_height, y0 + th - cy0)
+                    for cx0 in range(x0, x0 + tw, compute_tile_width):
+                        cw = min(compute_tile_width, x0 + tw - cx0)
+                        compute_index += 1
+                        subtile_center_re, subtile_center_im = calc_subtile_center(
+                            center_re, center_im, step, full_half_w, full_half_h, cx0, cy0, cw, ch)
+
+                        response_enqueued = False
+                        pending_rects = [(cx0, cy0, cw, ch)]
+                        finalize_pending(block=False)
+                        show_progress(f"compute x={cx0}, y={cy0}, size={cw}x{ch}")
+
+                        for attempt in range(1, retries + 2):
+                            retry_rects = merge_rects(pending_rects)
+                            subtile_pixels = None
+                            next_failed = []
+                            local_checksum_retry = False
+                            if fpga.verbose or attempt > 1:
+                                if not fpga.verbose:
+                                    sys.stdout.write("\n")
+                                    sys.stdout.flush()
+                                retry_desc = f"{len(retry_rects)} retry tile(s)" if attempt > 1 else "full compute tile"
+                                print(f"  Compute tile {compute_index}/{compute_total}: x={cx0}, y={cy0}, size={cw}x{ch}, attempt={attempt}, {retry_desc}")
+                            elif not fpga.verbose:
+                                show_progress(f"compute x={cx0}, y={cy0}, size={cw}x{ch}")
+
+                            old_timeout = fpga.ser.timeout
+                            fpga.ser.timeout = tile_read_timeout
+                            try:
+                                if attempt == 1:
+                                    response = request_image(
+                                        fpga, subtile_center_re, subtile_center_im, step, max_iter, cw, ch, mode,
+                                        collect_local_failures=True,
+                                        checksum_executor=checksum_executor,
+                                        async_finalize=True)
+                                    if response is not None:
+                                        if hasattr(response, "finalize"):
+                                            pending_finalized_tiles.append({
+                                                "future": finalize_executor.submit(response.finalize),
+                                                "host_tile": tile_index,
+                                                "compute_tile": compute_index,
+                                                "rect": (cx0, cy0, cw, ch),
+                                            })
+                                            response_enqueued = True
+                                        else:
+                                            copy_rect(pixels, width, cx0, cy0, response, cw, cw, ch)
+                                            if preview is not None:
+                                                preview.refresh(pixels)
+                                else:
+                                    for rx0, ry0, rw, rh in retry_rects:
+                                        rect_center_re, rect_center_im = calc_subtile_center(
+                                            center_re, center_im, step, full_half_w, full_half_h, rx0, ry0, rw, rh)
+                                        try:
+                                            rect_pixels = request_image(
+                                                fpga, rect_center_re, rect_center_im, step, max_iter, rw, rh, mode,
+                                                collect_local_failures=True,
+                                                checksum_executor=checksum_executor)
+                                        except LocalTileChecksumError as exc:
+                                            rect_pixels = exc.pixels
+                                            next_failed.extend((rx0 + fx, ry0 + fy, fw, fh) for fx, fy, fw, fh in exc.failed_rects)
+                                            local_checksum_retry = True
+                                        if rect_pixels is not None:
+                                            if subtile_pixels is None:
+                                                subtile_pixels = [0] * (cw * ch)
+                                            copy_rect(subtile_pixels, cw, rx0 - cx0, ry0 - cy0, rect_pixels, rw, rw, rh)
+                                        elif not next_failed:
+                                            next_failed.append((rx0, ry0, rw, rh))
+                            finally:
+                                fpga.ser.timeout = old_timeout
+
+                            if attempt == 1 and (response_enqueued or response is not None):
+                                pending_rects = []
+                                break
+                            if attempt > 1 and subtile_pixels is not None and not next_failed:
+                                copy_rect(pixels, width, cx0, cy0, subtile_pixels, cw, cw, ch)
+                                pending_rects = []
+                                if preview is not None:
+                                    preview.refresh(pixels)
+                                break
+
+                            pending_rects = merge_rects(next_failed) if next_failed else [(cx0, cy0, cw, ch)]
+                            failed_compute_tiles.append({
+                                "host_tile": tile_index,
+                                "compute_tile": compute_index,
+                                "x": cx0,
+                                "y": cy0,
+                                "width": cw,
+                                "height": ch,
+                                "attempt": attempt,
+                                "retry_tiles": len(pending_rects),
+                            })
                             if not fpga.verbose:
                                 sys.stdout.write("\n")
                                 sys.stdout.flush()
-                            print(f"  Compute tile {compute_index}/{compute_total}: x={cx0}, y={cy0}, size={cw}x{ch}, attempt={attempt}")
-                        elif not fpga.verbose:
-                            print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_index, tile_total,
-                                                 f"compute x={cx0}, y={cy0}, size={cw}x{ch}")
-                        request_t0 = time.perf_counter()
-                        old_timeout = fpga.ser.timeout
-                        fpga.ser.timeout = tile_read_timeout
-                        try:
-                            subtile_pixels = request_image(fpga, subtile_center_re, subtile_center_im, step,
-                                                           max_iter, cw, ch, mode)
-                        finally:
-                            fpga.ser.timeout = old_timeout
-                        if subtile_pixels is not None:
-                            if fpga.verbose:
-                                print(f"    Compute tile elapsed: {time.perf_counter() - request_t0:.3f}s")
-                            break
+                            print(f"    Compute tile receive failed: host_tile={tile_index}, compute_tile={compute_index}, x={cx0}, y={cy0}, size={cw}x{ch}, attempt={attempt}, retry_tiles={len(pending_rects)}")
+                            if local_checksum_retry:
+                                continue
+                            drain_serial_until_quiet(fpga)
+                            fpga.ser.reset_input_buffer()
+                            if soft_reset_on_retry:
+                                fpga.soft_reset(drain_before=False)
 
-                        failure = {
-                            "host_tile": tile_index,
-                            "compute_tile": compute_index,
-                            "x": cx0,
-                            "y": cy0,
-                            "width": cw,
-                            "height": ch,
-                            "attempt": attempt,
-                        }
-                        failed_compute_tiles.append(failure)
+                        if (not response_enqueued and pending_rects):
+                            print("ERROR: Failed compute tiles:")
+                            for failure in failed_compute_tiles[-10:]:
+                                print(f"  host_tile={failure['host_tile']}, compute_tile={failure['compute_tile']}, x={failure['x']}, y={failure['y']}, size={failure['width']}x{failure['height']}, attempt={failure['attempt']}")
+                            return None
+
+                        completed_compute_tiles += 1
                         if not fpga.verbose:
-                            sys.stdout.write("\n")
-                            sys.stdout.flush()
-                        print(f"    Compute tile receive failed: host_tile={tile_index}, compute_tile={compute_index}, x={cx0}, y={cy0}, size={cw}x{ch}, attempt={attempt}")
-                        drain_serial_until_quiet(fpga)
-                        fpga.ser.reset_input_buffer()
-                        if soft_reset_on_retry:
-                            fpga.soft_reset(drain_before=False)
+                            show_progress(f"rx done x={cx0}, y={cy0}, size={cw}x{ch}")
 
-                    if subtile_pixels is None:
-                        print("ERROR: Failed compute tiles:")
-                        for failure in failed_compute_tiles[-10:]:
-                            print(f"  host_tile={failure['host_tile']}, compute_tile={failure['compute_tile']}, x={failure['x']}, y={failure['y']}, size={failure['width']}x{failure['height']}, attempt={failure['attempt']}")
-                        return None
+                if fpga.verbose:
+                    print("  Host tile complete")
+                finalize_pending(block=True)
+    finally:
+        finalize_executor.shutdown(wait=True)
+        checksum_executor.shutdown(wait=True)
 
-                    for dy in range(ch):
-                        src = dy * cw
-                        dst = (cy0 + dy) * width + cx0
-                        pixels[dst:dst + cw] = subtile_pixels[src:src + cw]
-                    completed_compute_tiles += 1
-                    if not fpga.verbose:
-                        print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_index, tile_total,
-                                             f"done x={cx0}, y={cy0}, size={cw}x{ch}")
-
-            if fpga.verbose:
-                print("  Host tile complete")
+    deferred_failures = []
+    if deferred_retry_tiles:
+        deferred_rects = merge_rects([item["rect"] for item in deferred_retry_tiles])
+        if not fpga.verbose:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        print(f"Deferred checksum retries: {len(deferred_retry_tiles)} tile(s), {len(deferred_rects)} merged request(s)")
+        for retry_idx, (rx0, ry0, rw, rh) in enumerate(deferred_rects, 1):
+            pending_rects = [(rx0, ry0, rw, rh)]
+            rect_pixels = None
+            for attempt in range(1, retries + 2):
+                retry_rects = merge_rects(pending_rects)
+                next_failed = []
+                framing_failed = False
+                print(f"  Deferred retry {retry_idx}/{len(deferred_rects)}: x={rx0}, y={ry0}, size={rw}x{rh}, attempt={attempt}, {len(retry_rects)} request(s)")
+                old_timeout = fpga.ser.timeout
+                fpga.ser.timeout = tile_read_timeout
+                try:
+                    for px0, py0, pw, ph in retry_rects:
+                        part_center_re, part_center_im = calc_subtile_center(
+                            center_re, center_im, step, full_half_w, full_half_h, px0, py0, pw, ph)
+                        try:
+                            part_pixels = request_image(fpga, part_center_re, part_center_im, step,
+                                                        max_iter, pw, ph, mode,
+                                                        collect_local_failures=True)
+                        except LocalTileChecksumError as exc:
+                            part_pixels = exc.pixels
+                            next_failed.extend((px0 + fx, py0 + fy, fw, fh) for fx, fy, fw, fh in exc.failed_rects)
+                        if part_pixels is not None:
+                            copy_rect(pixels, width, px0, py0, part_pixels, pw, pw, ph)
+                        elif not next_failed:
+                            next_failed.append((px0, py0, pw, ph))
+                            framing_failed = True
+                            break
+                finally:
+                    fpga.ser.timeout = old_timeout
+                if not next_failed:
+                    rect_pixels = True
+                    break
+                pending_rects = merge_rects(next_failed)
+                deferred_failures.extend({
+                    "x": fx,
+                    "y": fy,
+                    "width": fw,
+                    "height": fh,
+                    "attempt": attempt,
+                } for fx, fy, fw, fh in pending_rects)
+                if framing_failed:
+                    drain_serial_until_quiet(fpga)
+                    fpga.ser.reset_input_buffer()
+                    if soft_reset_on_retry:
+                        fpga.soft_reset(drain_before=False)
+            if rect_pixels is None:
+                print("ERROR: Failed deferred checksum retry tiles:")
+                for failure in deferred_failures[-10:]:
+                    print(f"  x={failure['x']}, y={failure['y']}, size={failure['width']}x{failure['height']}, attempt={failure['attempt']}")
+                return None
 
     if failed_compute_tiles:
         if not fpga.verbose:
             sys.stdout.write("\n")
             sys.stdout.flush()
         print(f"Recovered {len(failed_compute_tiles)} failed compute tile attempts")
+    if deferred_retry_tiles:
+        print(f"Recovered {len(deferred_retry_tiles)} deferred checksum retry tile(s)")
     elif not fpga.verbose:
-        print_quiet_progress(completed_compute_tiles, total_compute_tiles, tile_total, tile_total,
-                             "complete", final=True)
+        show_progress("complete", final=True)
 
     return pixels
 
@@ -688,6 +1041,10 @@ def main():
                         help="Send only the UART soft reset command, then exit")
     parser.add_argument("--quiet", action="store_true",
                         help="Reduce per-tile logging during large transfers")
+    parser.add_argument("--preview", action="store_true",
+                        help="Show a live thumbnail preview window while tiled rendering progresses")
+    parser.add_argument("--preview-size", type=int, default=512,
+                        help="Maximum preview window dimension in pixels (default: 512)")
     args = parser.parse_args()
 
     configure_host_tiling(args)
@@ -716,22 +1073,28 @@ def main():
     if args.host_tiling:
         print(f" Host tiles: {args.tile_width}x{args.tile_height}")
         print(f" Compute tiles: {args.compute_tile_width}x{args.compute_tile_height}, retries={args.tile_retries}, read_timeout={args.tile_read_timeout}s")
+        print(f" Preview: {'enabled' if args.preview else 'disabled'}")
         print(f" Soft reset on retry: {not args.no_soft_reset_on_retry}")
     else:
         print(" Host tiles: disabled (--full-frame)")
     print("=" * 50)
 
     fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
+    preview = None
     try:
         total_pixels = args.width * args.height
         t0 = time.perf_counter()
+        if args.preview and args.host_tiling and args.format != "txt":
+            preview = PreviewWindow(args.width, args.height, args.max_iter,
+                                    args.palette, args.preview_size)
         if args.host_tiling:
             pixels = request_image_tiled(fpga, center_re, center_im, args.step,
                                          args.max_iter, args.width, args.height,
-                                         args.mode, args.tile_width, args.tile_height,
-                                         args.compute_tile_width, args.compute_tile_height,
-                                         args.tile_retries, args.tile_read_timeout,
-                                         not args.no_soft_reset_on_retry)
+                                          args.mode, args.tile_width, args.tile_height,
+                                          args.compute_tile_width, args.compute_tile_height,
+                                          args.tile_retries, args.tile_read_timeout,
+                                          not args.no_soft_reset_on_retry,
+                                          preview)
         else:
             pixels = request_image(fpga, center_re, center_im, args.step,
                                    args.max_iter, args.width, args.height, args.mode)
@@ -763,6 +1126,8 @@ def main():
         t_done = time.perf_counter()
         print(f"Total elapsed: {t_done - t0:.3f}s")
     finally:
+        if preview is not None:
+            preview.close()
         fpga.close()
 
 

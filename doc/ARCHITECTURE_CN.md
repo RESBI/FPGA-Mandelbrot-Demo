@@ -184,19 +184,19 @@ Tile 方案分两层：
 | Host-driven display tiling | `../python/mandelbrot_host.py` | 把大图拆成 host 可见 stripe，并拼回最终图像。 |
 | Hardware compute sub-tiling | `../python/mandelbrot_host.py` | 把每个 host tile 再拆成更小的可重试硬件命令。 |
 
-Host-driven tiling 当前默认开启。如果用户不传 `--tile-width/--tile-height`，host 自动使用全宽、120 行高的 stripe。如果用户不传 `--compute-tile-width/--compute-tile-height`，compute tile 默认等于 host tile 本身，但 compute 宽度上限为 4096。每个 compute tile 接收时使用较短的 `--tile-read-timeout 30`，因此中途 byte slip 不需要等全局串口 timeout 才能进入 retry。旧整帧单命令路径通过 `--full-frame` 显式开启。
+Host-driven tiling 当前默认开启。如果用户不传 `--tile-width/--tile-height`，host 自动使用全宽、120 行高的 stripe。如果用户不传 `--compute-tile-width/--compute-tile-height`，compute tile 高度默认等于 host tile 高度，compute 宽度上限为 2048。这样 1080p 仍是 `1920x120` compute tile，而 `4096x120` host stripe 会自动拆成两个 `2048x120` 硬件请求。每个 compute tile 接收时使用较短的 `--tile-read-timeout 5.0`，因此中途 byte slip 不需要等全局串口 timeout 才能进入 retry。旧整帧单命令路径通过 `--full-frame` 显式开启。
 
-推荐 1080p host tile shape 是 `1920x120`，默认 compute tile 也是 `1920x120`。它把一帧分成 9 个硬件命令。某个 compute tile 失败时，host 会 drain stale bytes、发送 soft reset，并只重算该 tile，而不是重算整帧。
+推荐 1080p host tile shape 是 `1920x120`，默认 compute tile 也是 `1920x120`。它把一帧分成 9 个硬件命令。4096 宽图像会因默认 2048 compute 宽度拆成更多但更稳的硬件请求。某个 compute tile 发生 framing 失败时，host 会 drain stale bytes、发送 soft reset，并只重算该 tile，而不是重算整帧。
 
-当前 `CFG_RESPONSE_TILE_COLS=64`，因此一个默认 `1920x120` compute tile 产生：
+当前 `CFG_RESPONSE_TILE_ROW_SPLITS=8`，因此一个默认 `1920x120` compute tile 产生 8 个全宽 row-split retry tile：
 
 ```text
-120 * ceil(1920 / 64) = 3600 TD packets
+8 * (1920 x 15) TD packets
 ```
 
-这里的 retry 单元是 compute tile；在默认 1080p 配置下它与 host stripe 相同。需要更小 retry unit 时，仍可显式传 `--compute-tile-width` 和 `--compute-tile-height`。
+checksum-only 失败时，retry 单元是 row-split retry tile；framing/short-read 失败时，retry 单元仍是 compute tile，因为串口流已经失同步。需要更小命令级 retry unit 时，仍可显式传 `--compute-tile-width` 和 `--compute-tile-height`。
 
-Host 校验 `RT` 维度、`TD` bounds、payload length、payload checksum、像素覆盖和 `TE` 维度。如果失败，host 记录失败 compute tile 的坐标，drain serial until quiet、reset input buffer、发送 soft reset，然后只重试该 compute tile。Soft reset 命令是 8 字节 UART 序列 `RST!RST!`；也可以手动执行 `python python\mandelbrot_host.py --port COM9 --soft-reset`。
+Host 校验 `RT` 维度、`TD` bounds、payload length、payload checksum、像素覆盖和 `TE` 维度。checksum-only 局部失败时，host 记录失败 retry tile 矩形，继续后续 compute tile，首轮完成后统一重算并回填；framing/short-read 失败时，host drain serial until quiet、reset input buffer、发送 soft reset，然后立即重试该 compute tile。Soft reset 命令是 8 字节 UART 序列 `RST!RST!`；也可以手动执行 `python python\mandelbrot_host.py --port COM6 --soft-reset`。
 
 `--quiet` 下 host 使用单行进度条，格式为：
 
@@ -225,7 +225,7 @@ Host 校验 `RT` 维度、`TD` bounds、payload length、payload checksum、像�
 | 功能 | 说明 |
 |---|---|
 | 命令编码 | 打包 FP64/FP128 参数和 checksum。 |
-| 串口传输 | 默认 `COM9`，12 Mbaud。 |
+| 串口传输 | 默认 `COM6`，12 Mbaud。 |
 | 响应解析 | 支持 legacy `RK` 和 tiled `RT/TD/TE`。 |
 | Host tile | `--tile-width`, `--tile-height`。 |
 | Compute tile | `--compute-tile-width`, `--compute-tile-height`, `--tile-retries`。 |

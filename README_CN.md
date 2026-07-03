@@ -72,7 +72,7 @@ Host PNG/BMP 输出支持 `--palette` 选择软件上色方案，不影响 FPGA 
 python python\mandelbrot_host.py --width 160 --height 120 --max-iter 256 --palette ocean --output python\mandelbrot_160x120_ocean.png
 ```
 
-当前默认启用 host-driven tile。如果不传 `--tile-width/--tile-height`，host 自动使用全宽、120 行高的 host stripe，并默认 `--tile-retries 3`、单次 tile 接收 read timeout 为 30 秒。默认 compute tile 等于 host tile 本身，但 compute 宽度上限为 4096。现在已有失败后 drain 串口、发送软复位 `RST!RST!`、重算该 tile 的方案，因此默认不再拆成较小 compute tile。1080p 默认形状为 `1920x120` host tile，同时也是 `1920x120` compute tile：
+当前默认启用 host-driven tile。如果不传 `--tile-width/--tile-height`，host 自动使用全宽、120 行高的 host stripe，并默认 `--tile-retries 3`、单次 tile 接收 read timeout 为 5 秒。默认 compute tile 高度等于 host tile 高度，compute 宽度上限改为 2048。因此 1080p 仍是 `1920x120` compute tile，而 `4096x120` host stripe 会自动拆成两个 `2048x120` compute tile。RTL 使用 `RESPONSE_TILE_ROW_SPLITS=8`，因此默认 `1920x120` compute response 会被切成 8 个全宽 `1920x15` retry tile，各自独立 checksum。1080p 默认形状为 `1920x120` host tile，同时也是 `1920x120` compute tile：
 
 ```bash
 python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
@@ -84,7 +84,7 @@ python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-it
 [progress] (n / total compute tile) (m / total host tile) current task
 ```
 
-失败的 compute tile 会被记录坐标、drain stale UART bytes，并默认发送 soft reset 命令 `RST!RST!`，然后重算该 compute tile。可用 `--no-soft-reset-on-retry` 关闭自动软复位，也可以手动发送：
+Host 会区分两类失败：如果完整收到 `RT/TD/TE` frame 但某个 retry tile checksum mismatch，则先记录该局部矩形，继续完成剩余 compute tile，最后统一重算并回填；如果出现 bad magic、payload 不完整、缺 checksum 等 framing/short-read 失败，则说明串口流失同步，会 drain stale UART bytes，并默认发送 soft reset 命令 `RST!RST!`，然后立即重算当前 compute tile。可用 `--no-soft-reset-on-retry` 关闭自动软复位，也可以手动发送：
 
 ```powershell
 python python\mandelbrot_host.py --port COM6 --soft-reset
@@ -92,7 +92,7 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 
 如需旧的单命令整帧 response，显式传 `--full-frame`。不建议在 12 Mbaud 大帧下使用该模式。
 
-如果高波特率 tile 中途丢字节，host 可能看起来暂时不动，直到当前串口 read timeout 后才进入 retry。默认 `--tile-read-timeout 30`；可以调低以更快触发 retry，也可以对特别慢的 tile 调高。
+如果高波特率 tile 中途丢字节，host 可能看起来暂时不动，直到当前串口 read timeout 后才进入 retry。默认 `--tile-read-timeout 5.0`；对特别大的实验 tile 可显式调高。
 
 原因：12 Mbaud 单个 4.15 MiB 长 burst 偶发 byte slip；host tile 给失败提供重试边界，`1920x120` 已完成六场景 30-run 稳定性测试。
 
@@ -100,16 +100,16 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 
 ## 当前资源和时序
 
-最新默认 VMC_RTSB ZU4EV direct-200MHz 12-worker 8ctx 1080p 六场景 10-run 板级测试，12 Mbaud，默认 `1920x120` host tile，compute tile 等于 host tile：
+最新默认 VMC_RTSB ZU4EV direct-200MHz 12-worker 8ctx、`M=8` row-split retry tile 1080p 六场景 10-run 板级测试，12 Mbaud，默认 `1920x120` host tile，compute tile 等于 host tile：
 
 | 场景 | Transport pass | Retry events | 平均 FPGA 时间 | Min | Max | CV | 平均吞吐 | 对比 7K70T 6w/4ctx 200MHz |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| fast escape @128 | `10/10` | `4` | `4.563s` | `4.146s` | `7.261s` | `21.96%` | `468446.75 pps` | `1.017x` |
-| standard @64 | `10/10` | `2` | `4.353s` | `4.141s` | `5.191s` | `10.06%` | `480268.18 pps` | `1.065x` |
-| Seahorse zoom @512 | `10/10` | `2` | `4.499s` | `4.288s` | `6.371s` | `14.62%` | `467436.73 pps` | `1.270x` |
-| deep tendrils @8192 | `10/10` | `3` | `4.739s` | `4.417s` | `5.492s` | `10.79%` | `441838.90 pps` | `1.808x` |
-| deep mini-brot @8192 | `10/10` | `6` | `10.146s` | `9.181s` | `12.295s` | `10.91%` | `206484.60 pps` | `2.066x` |
-| deep Seahorse @1024 | `10/10` | `2` | `4.967s` | `4.754s` | `5.805s` | `8.89%` | `420129.06 pps` | `1.946x` |
+| fast escape @128 | `10/10` | `1` | `3.821s` | `3.720s` | `4.702s` | `8.11%` | `545436.22 pps` | `1.215x` |
+| standard @64 | `10/10` | `1` | `3.816s` | `3.715s` | `4.696s` | `8.10%` | `546090.60 pps` | `1.215x` |
+| Seahorse zoom @512 | `10/10` | `1` | `3.964s` | `3.864s` | `4.855s` | `7.89%` | `525491.58 pps` | `1.442x` |
+| deep tendrils @8192 | `10/10` | `0` | `3.994s` | `3.991s` | `3.997s` | `0.04%` | `519243.89 pps` | `2.145x` |
+| deep mini-brot @8192 | `10/10` | `0` | `9.166s` | `9.164s` | `9.168s` | `0.02%` | `226235.12 pps` | `2.287x` |
+| deep Seahorse @1024 | `10/10` | `1` | `4.575s` | `4.472s` | `5.485s` | `6.99%` | `454952.34 pps` | `2.113x` |
 
 上表的倍数是当前 ZU4EV 12w/8ctx 10-run mean 相对上一阶段 7K70T 6w/4ctx 200MHz 10-run mean 结果计算的。fast/standard 场景已接近 UART/host/packet overhead 限制，且偶发 tile retry 会拉低均值；deep 场景收益更大。
 

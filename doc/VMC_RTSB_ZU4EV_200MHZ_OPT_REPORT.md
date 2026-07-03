@@ -112,6 +112,36 @@ python/host_tile_stability_bench/zu4ev200m_c12ctx8_10run.md
 
 The retry events are tile-level recoveries. They reduce the 10-run mean relative to the best single-run values, especially in fast escape and deep mini-brot, but all 60 scene runs completed successfully.
 
+## Row-Split Retry Tile Update
+
+A later transport/retry pass kept the same `12 workers / 8 contexts` compute architecture, but replaced the earlier response packetization with full-width row-split retry tiles. The selected build-time setting is `RESPONSE_TILE_ROW_SPLITS=8`, so a default `1920x120` compute response is split into eight `1920x15` `TD` packets with independent payload checksums.
+
+Host recovery was also refined:
+
+| Failure class | Recovery |
+|---|---|
+| Checksum-only local `TD` failure after a complete `RT/TD/TE` frame | Record the failed row-split rectangle, keep valid local regions, continue the first full-frame pass, then recompute merged failed rectangles. |
+| Framing or short-read failure | Drain stale UART bytes, reset input buffer, optionally send `RST!RST!`, and retry the current compute tile immediately. |
+
+The previous 30-second retry tails were traced to `--tile-read-timeout 30` when a `TD` payload was short. The host default is now `--tile-read-timeout 5.0`, which bounds short-read failures while remaining safely above normal `1920x120` transfer time at 12 Mbaud.
+
+Latest `M=8` six-scene 10-run summary:
+
+```text
+python/host_tile_stability_bench/zu4ev200m_c12ctx8_rtr8_deferred_10run.md
+```
+
+| Candidate | Scene | Transport pass | Retry events | Mean FPGA s | Min s | Max s | CV | Mean pixels/s | Speedup vs earlier 12w/8ctx |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 12w/8ctx + M=8 | fast escape @128 | `10/10` | `1` | `3.821` | `3.720` | `4.702` | `8.11%` | `545436.22` | `1.194x` |
+| 12w/8ctx + M=8 | standard @64 | `10/10` | `1` | `3.816` | `3.715` | `4.696` | `8.10%` | `546090.60` | `1.141x` |
+| 12w/8ctx + M=8 | Seahorse zoom @512 | `10/10` | `1` | `3.964` | `3.864` | `4.855` | `7.89%` | `525491.58` | `1.135x` |
+| 12w/8ctx + M=8 | deep tendrils @8192 | `10/10` | `0` | `3.994` | `3.991` | `3.997` | `0.04%` | `519243.89` | `1.187x` |
+| 12w/8ctx + M=8 | deep mini-brot @8192 | `10/10` | `0` | `9.166` | `9.164` | `9.168` | `0.02%` | `226235.12` | `1.107x` |
+| 12w/8ctx + M=8 | deep Seahorse @1024 | `10/10` | `1` | `4.575` | `4.472` | `5.485` | `6.99%` | `454952.34` | `1.086x` |
+
+All 60 runs passed. The four observed retry events were framing failures, not checksum-only local failures, so the deferred checksum path was not naturally triggered in this run. The main measured improvement comes from lower response packet overhead and the shorter short-read timeout, not from additional compute parallelism.
+
 ## Performance Comparison
 
 ### Simulation Throughput
