@@ -39,10 +39,11 @@ ASYNC_CHECKSUM_WORKERS = 4
 
 
 class LocalTileChecksumError(Exception):
-    def __init__(self, pixels, failed_rects):
+    def __init__(self, pixels, failed_rects, valid_rects=None):
         super().__init__(f"{len(failed_rects)} local checksum tile(s) failed")
         self.pixels = pixels
         self.failed_rects = failed_rects
+        self.valid_rects = valid_rects or []
 
 
 def payload_xor(payload):
@@ -87,6 +88,7 @@ class PendingTiledResponse:
     def finalize(self):
         pixels = [0] * (self.width * self.height)
         failed_rects = []
+        valid_rects = []
         received_pixels = 0
         for future in self.tile_futures:
             result = future.result()
@@ -103,6 +105,7 @@ class PendingTiledResponse:
                     print(f"  payload_last32={result['payload_last32']}")
                 continue
             values = result["values"]
+            valid_rects.append((col, row, tile_cols, tile_rows))
             idx = 0
             for dy in range(tile_rows):
                 base = (row + dy) * self.width + col
@@ -111,7 +114,7 @@ class PendingTiledResponse:
                 idx += tile_cols
         if failed_rects:
             if self.collect_local_failures:
-                raise LocalTileChecksumError(pixels, failed_rects)
+                raise LocalTileChecksumError(pixels, failed_rects, valid_rects)
             return None
         if self.verbose:
             print(f"Finalized {received_pixels} pixels from {len(self.tile_futures)} async tile(s)")
@@ -325,6 +328,23 @@ class PreviewWindow:
         self.root.update_idletasks()
         self.root.update()
 
+    def refresh_rects(self, pixels, rects):
+        if not self.enabled or not rects:
+            return
+        for py in range(self.preview_h):
+            sy = min(self.height - 1, py * self.height // self.preview_h)
+            row = sy * self.width
+            for px in range(self.preview_w):
+                sx = min(self.width - 1, px * self.width // self.preview_w)
+                for rx, ry, rw, rh in rects:
+                    if rx <= sx < rx + rw and ry <= sy < ry + rh:
+                        self.image.putpixel((px, py), self._color(pixels[row + sx]))
+                        break
+        self.photo = self.ImageTk.PhotoImage(self.image)
+        self.label.configure(image=self.photo)
+        self.root.update_idletasks()
+        self.root.update()
+
     def close(self):
         if self.enabled:
             try:
@@ -387,12 +407,17 @@ class MandelbrotFPGA:
             self.ser.close()
 
     def send_command(self, center_re, center_im, step, max_iter, width, height, mode='fp64'):
-        precision = 0 if mode == 'fp64' else 1
+        precision = 0 if mode in ('fp64', 'fx64') else 1
         payload = bytearray()
         payload.append(0x4D)
         payload.append(precision)
 
-        if mode == 'fp64':
+        if mode == 'fx64':
+            F = 55
+            fp_cre = struct.pack('<q', round(center_re * (2**F)))
+            fp_cim = struct.pack('<q', round(center_im * (2**F)))
+            fp_stp = struct.pack('<q', round(step * (2**F)))
+        elif mode == 'fp64':
             fp_cre = struct.pack('<d', center_re)
             fp_cim = struct.pack('<d', center_im)
             fp_stp = struct.pack('<d', step)
@@ -603,13 +628,36 @@ class MandelbrotFPGA:
 # ============================================================
 #  Software Reference
 # ============================================================
-def mandelbrot_software(center_re, center_im, step, max_iter, width, height):
+def mandelbrot_software(center_re, center_im, step, max_iter, width, height, mode='fp64'):
     pixels = []
-    # Match RTL: half_w/half_h are integer truncated, not floating half pixels.
     half_w = (width - 1) >> 1
     half_h = (height - 1) >> 1
     re_start = center_re - half_w * step
     im_start = center_im + half_h * step
+    if mode == 'fx64':
+        F = 55
+        cre_start = round(re_start * (2**F))
+        cim_start = round(im_start * (2**F))
+        step_fx = round(step * (2**F))
+        four = 4 << F
+        for y in range(height):
+            cim = cim_start - y * step_fx
+            cre = cre_start
+            for x in range(width):
+                zr = 0; zi = 0
+                it = 0
+                while it < max_iter:
+                    zr2 = (zr * zr) >> F
+                    zi2 = (zi * zi) >> F
+                    if zr2 + zi2 > four:
+                        break
+                    zrzi = (zr * zi) >> F
+                    zi = (zrzi << 1) + cim
+                    zr = zr2 - zi2 + cre
+                    it += 1
+                pixels.append(it)
+                cre += step_fx
+        return pixels
     for y in range(height):
         c_im = im_start - y * step
         c_re = re_start
@@ -700,6 +748,14 @@ def copy_rect(dst_pixels, dst_width, x0, y0, src_pixels, src_width, rect_w, rect
         dst_pixels[dst:dst + rect_w] = src_pixels[src:src + rect_w]
 
 
+def copy_rect_region(dst_pixels, dst_width, dst_x, dst_y,
+                     src_pixels, src_width, src_x, src_y, rect_w, rect_h):
+    for dy in range(rect_h):
+        src = (src_y + dy) * src_width + src_x
+        dst = (dst_y + dy) * dst_width + dst_x
+        dst_pixels[dst:dst + rect_w] = src_pixels[src:src + rect_w]
+
+
 def calc_subtile_center(center_re, center_im, step, full_half_w, full_half_h, x0, y0, w, h):
     half_w = (w - 1) >> 1
     half_h = (h - 1) >> 1
@@ -747,6 +803,7 @@ def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, heigh
                 continue
             cx0, cy0, cw, ch = item["rect"]
             deferred_for_item = False
+            copied_valid_only = False
             try:
                 subtile_pixels = future.result()
             except LocalTileChecksumError as exc:
@@ -764,6 +821,14 @@ def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, heigh
                     sys.stdout.write("\n")
                     sys.stdout.flush()
                 print(f"    Deferred {len(failed)} checksum retry tile(s): host_tile={item['host_tile']}, compute_tile={item['compute_tile']}, x={cx0}, y={cy0}, size={cw}x{ch}")
+                valid_abs_rects = []
+                for vx, vy, vw, vh in exc.valid_rects:
+                    copy_rect_region(pixels, width, cx0 + vx, cy0 + vy,
+                                     exc.pixels, cw, vx, vy, vw, vh)
+                    valid_abs_rects.append((cx0 + vx, cy0 + vy, vw, vh))
+                if preview is not None:
+                    preview.refresh_rects(pixels, valid_abs_rects)
+                copied_valid_only = True
             if subtile_pixels is None:
                 failed_compute_tiles.append({
                     "host_tile": item["host_tile"],
@@ -776,9 +841,11 @@ def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, heigh
                     "retry_tiles": 1,
                 })
                 continue
+            if copied_valid_only:
+                continue
             copy_rect(pixels, width, cx0, cy0, subtile_pixels, cw, cw, ch)
             if preview is not None:
-                preview.refresh(pixels)
+                preview.refresh_rects(pixels, [(cx0, cy0, cw, ch)])
         pending_finalized_tiles = still_pending
 
     checksum_executor = ThreadPoolExecutor(max_workers=ASYNC_CHECKSUM_WORKERS)
@@ -944,11 +1011,19 @@ def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, heigh
                             part_pixels = request_image(fpga, part_center_re, part_center_im, step,
                                                         max_iter, pw, ph, mode,
                                                         collect_local_failures=True)
+                            part_valid_rects = [(0, 0, pw, ph)]
                         except LocalTileChecksumError as exc:
                             part_pixels = exc.pixels
+                            part_valid_rects = exc.valid_rects
                             next_failed.extend((px0 + fx, py0 + fy, fw, fh) for fx, fy, fw, fh in exc.failed_rects)
                         if part_pixels is not None:
-                            copy_rect(pixels, width, px0, py0, part_pixels, pw, pw, ph)
+                            refreshed = []
+                            for vx, vy, vw, vh in part_valid_rects:
+                                copy_rect_region(pixels, width, px0 + vx, py0 + vy,
+                                                 part_pixels, pw, vx, vy, vw, vh)
+                                refreshed.append((px0 + vx, py0 + vy, vw, vh))
+                            if preview is not None:
+                                preview.refresh_rects(pixels, refreshed)
                         elif not next_failed:
                             next_failed.append((px0, py0, pw, ph))
                             framing_failed = True
@@ -1011,8 +1086,8 @@ def main():
                         help="Output format")
     parser.add_argument("--palette", type=str, choices=PALETTE_CHOICES, default="classic",
                         help="PNG/BMP color palette: classic, fire, ocean, twilight, or grayscale")
-    parser.add_argument("--mode", type=str, choices=["fp64", "fp128"], default="fp64",
-                        help="Precision mode")
+    parser.add_argument("--mode", type=str, choices=["fp64", "fp128", "fx64"], default="fx64",
+                        help="Arithmetic mode: fx64 (fixed-point Q8.55, default), fp64 (IEEE double), fp128")
     parser.add_argument("--verify", action="store_true",
                         help="Also compute in software and compare")
     parser.add_argument("--port", type=str, default=PORT,
@@ -1119,7 +1194,8 @@ def main():
             print("\n--- Software Verification ---")
             t_sw0 = time.perf_counter()
             sw = mandelbrot_software(center_re, center_im, args.step,
-                                     args.max_iter, args.width, args.height)
+                                     args.max_iter, args.width, args.height,
+                                     mode=args.mode)
             t_sw1 = time.perf_counter()
             compare_results(pixels, sw, args.width, args.height)
             print(f"Software elapsed: {t_sw1 - t_sw0:.3f}s")

@@ -64,4 +64,12 @@
 `define CFG_WORKER_MUL_UNITS 1
 `endif
 
+`ifndef CFG_WORKER_MODE
+`define CFG_WORKER_MODE 1
+`endif
+
+`ifndef CFG_FX_CONTEXTS
+`define CFG_FX_CONTEXTS 4
+`endif
+
 `endif // CONFIG_VH

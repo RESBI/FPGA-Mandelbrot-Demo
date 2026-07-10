@@ -40,7 +40,7 @@ module raster_collect_dynamic_rows #(
 
     localparam OWNER_ADDR_W = $clog2(OWNER_TABLE_DEPTH);
 
-    reg [3:0] owner_mem [0:OWNER_TABLE_DEPTH-1];
+    reg [7:0] owner_mem [0:OWNER_TABLE_DEPTH-1];
     reg       owner_gen [0:OWNER_TABLE_DEPTH-1];
 
     wire       row_in_range = (row < OWNER_TABLE_DEPTH);
@@ -48,7 +48,7 @@ module raster_collect_dynamic_rows #(
     wire       owner_row_in_range = (owner_row < OWNER_TABLE_DEPTH);
     wire [OWNER_ADDR_W-1:0] owner_addr = owner_row[OWNER_ADDR_W-1:0];
     wire       row_assigned = row_in_range && (owner_gen[row_addr] == frame_gen);
-    wire [3:0] src_core = owner_mem[row_addr];
+    wire [7:0] src_core = owner_mem[row_addr];
 
     integer j;
 
@@ -64,7 +64,7 @@ module raster_collect_dynamic_rows #(
             core_fifo_rd <= 0;
 
             if (owner_wr && owner_row_in_range) begin
-                owner_mem[owner_addr] <= owner_core[3:0];
+                owner_mem[owner_addr] <= owner_core[7:0];
                 owner_gen[owner_addr] <= frame_gen;
             end
 

@@ -9,7 +9,9 @@ module mandelbrot_multicore #(
     parameter DYNAMIC_OWNER_DEPTH = `CFG_DYNAMIC_OWNER_DEPTH,
     parameter WORKER_CONTEXTS = `CFG_WORKER_CONTEXTS,
     parameter WORKER_ADD_UNITS = `CFG_WORKER_ADD_UNITS,
-    parameter WORKER_MUL_UNITS = `CFG_WORKER_MUL_UNITS
+    parameter WORKER_MUL_UNITS = `CFG_WORKER_MUL_UNITS,
+    parameter WORKER_MODE = `CFG_WORKER_MODE,
+    parameter FX_CONTEXTS = `CFG_FX_CONTEXTS
 ) (
     input  wire                     clk,
     input  wire                     rst,
@@ -92,8 +94,10 @@ module mandelbrot_multicore #(
         for (i = 0; i < CORE_COUNT; i = i + 1) begin : g_core
             assign core_fifo_full[i] = !core_fifo_write_avail[i];
 
-            if (WORKER_CONTEXTS == 2) begin : g_worker_2ctx
-                mandelbrot_core_worker_2ctx u_worker (
+            if (WORKER_MODE == 1) begin : g_worker_fx
+                mandelbrot_core_worker_fx #(
+                    .CONTEXTS(FX_CONTEXTS)
+                ) u_worker (
                     .clk          (clk),
                     .rst          (rst),
                     .ce           (ce),
@@ -112,7 +116,7 @@ module mandelbrot_multicore #(
                     .fifo_wr      (core_fifo_wr[i]),
                     .fifo_full    (core_fifo_full[i])
                 );
-            end else if (WORKER_CONTEXTS == 4 || WORKER_CONTEXTS == 8 || WORKER_CONTEXTS == 16) begin : g_worker_kctx
+            end else if (WORKER_MODE != 1 && (WORKER_CONTEXTS == 4 || WORKER_CONTEXTS == 8 || WORKER_CONTEXTS == 16)) begin : g_worker_kctx
                 mandelbrot_core_worker_kctx #(
                     .CONTEXTS(WORKER_CONTEXTS),
                     .ADD_UNITS(WORKER_ADD_UNITS),

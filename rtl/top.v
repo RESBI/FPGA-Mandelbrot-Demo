@@ -11,6 +11,8 @@ module top #(
     parameter WORKER_CONTEXTS = `CFG_WORKER_CONTEXTS,
     parameter WORKER_ADD_UNITS = `CFG_WORKER_ADD_UNITS,
     parameter WORKER_MUL_UNITS = `CFG_WORKER_MUL_UNITS,
+    parameter WORKER_MODE = `CFG_WORKER_MODE,
+    parameter FX_CONTEXTS = `CFG_FX_CONTEXTS,
     parameter RESPONSE_TILE_COLS = `CFG_RESPONSE_TILE_COLS,
     parameter RESPONSE_TILE_ROW_SPLITS = `CFG_RESPONSE_TILE_ROW_SPLITS
 ) (
@@ -145,7 +147,9 @@ module top #(
         .DYNAMIC_OWNER_DEPTH(DYNAMIC_OWNER_DEPTH),
         .WORKER_CONTEXTS(WORKER_CONTEXTS),
         .WORKER_ADD_UNITS(WORKER_ADD_UNITS),
-        .WORKER_MUL_UNITS(WORKER_MUL_UNITS)
+        .WORKER_MUL_UNITS(WORKER_MUL_UNITS),
+        .WORKER_MODE(WORKER_MODE),
+        .FX_CONTEXTS(FX_CONTEXTS)
     ) u_core (
         .clk            (sys_clk_i),
         .rst            (rst),

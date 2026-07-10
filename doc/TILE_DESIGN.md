@@ -232,6 +232,7 @@ Use the default configuration:
 
 | Improvement | Benefit |
 |---|---|
+| Add FPGA-side retry-tile cache | Serve recent checksum retry tiles without recomputing when the failed `TD` packet is still cached. See [RETRY_TILE_CACHE_DESIGN.md](RETRY_TILE_CACHE_DESIGN.md). |
 | Add packet sequence IDs | Detect missing or duplicate `TD` packets explicitly. |
 | Add request IDs | Reject stale bytes from an older compute tile without relying only on drain/quiet timing. |
 | Add FPGA-side retransmission | Retry one row-split packet without recomputing any pixels. |
