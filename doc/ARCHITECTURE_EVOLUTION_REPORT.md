@@ -1082,3 +1082,140 @@ The project evolved through a pragmatic sequence:
 18. Add row-split retry tiles with `RESPONSE_TILE_ROW_SPLITS=8`, deferred checksum-only retry, and a shorter 5s tile read timeout, improving the ZU4EV 12w/8ctx six-scene 10-run means without changing compute arithmetic.
 
 The current design preserves the original host command protocol while running the active VMC_RTSB ZU4EV target at direct 200 MHz, `12 Mbaud`, 12 workers, and 8 contexts per worker. The transport path now uses full-width row-split retry tiles with `M=8`; a default `1920x120` compute response is eight `1920x15` checksum regions. Fast 1080p scenes now average about `545k-546k pixels/s` across the latest 10-run set, and the accepted ZU4EV default raises deep mini-brot from the previous XC7K70T 6-worker/4-context 200MHz `20.963s` mean to a ZU4EV row-split 10-run mean of `9.166s` (`2.287x`). Relative to the previous best 7K70T 200MHz point, the ZU4EV 12w/8ctx row-split build improves every measured scene, with the largest gains in deep compute-heavy views. The next major architecture step is no longer another integer baud tweak or naive worker replication; it is reducing route/fanout pressure, strengthening packet/request identity, adding true retransmission or a higher-bandwidth transport, and only then revisiting additional compute parallelism.
+
+---
+
+## Chapter: Fixed-Point Q8.55 Redesign — From FP64 to 24-Worker fx64
+
+### Background And Motivation
+
+The FP64 12-worker/8-context design reached a **LUT ceiling** at 94–97% utilization and a **UART ceiling** at ~600k pixels/s. Three experimental phases confirmed that additive optimizations within the FP64 architecture were blocked:
+
+| Phase | Attempt | Result |
+|---|---|---|
+| Phase 0 | Baseline (existing FP64 12w/8ctx) | fast=3.733s, minibrot=9.192s (anchors) |
+| Phase 1 | Add second FP64 adder (1M+2A, 8w) | **Build failed**: 93,971 LUT > 87,840 device limit |
+| Phase 2 | Early-escape on squared terms | Logic safe (sim + verify 100%), but +4,827 LUT (retiming bloat) → 99.63% density, no speed benefit (UART-bound), reverted |
+
+The conclusion: the FP64 generic scoreboard's wide 64-bit operand muxes, N-way ready scans, and writeback demuxes consume too much LUT, and the 9-cycle FP adder latency demands 8+ contexts, further widening the mux. The design was trapped in a "long FP latency → more contexts → wider mux → more LUT" vicious cycle.
+
+### Design Decision: Fixed-Point Q8.55
+
+The key insight is that Mandelbrot iteration values are **bounded and narrow** (|z| < 2 before escape, z² < 4, sums < 4). This makes floating-point's wide dynamic range and normalization hardware unnecessary. A fixed-point format can be both cheaper and more precise:
+
+**Precision validation** (`python/fx_precision_all_scenes.py`):
+
+| Format | fast@128 | std@64 | seahorse@512 | tendrils@8192 | minibrot@8192 | deep-seah@1024 |
+|---|---|---|---|---|---|---|
+| Q8.40 / 48-bit | 100% | 100% | 90% | 84% | 100% | 92% |
+| Q8.48 / 56-bit | 100% | 100% | 100% | 98% | 100% | 100% |
+| **Q8.55 / 64-bit** | **100%** | **100%** | **100%** | **100%** | **100%** | **100%** |
+
+Q8.55 (8 integer bits for ±128 range, 55 fractional bits for 2⁻⁵⁵ ≈ 2.8e-17 resolution) matches FP64 pixel-for-pixel on all six benchmark scenes. The 8 integer bits are necessary because intermediate z² values can reach ~36 before the escape check fires.
+
+Critical precision bug discovered during testing: Q4.44 (4 integer bits, ±8 range) gave **0% match** on fast escape because z_im² = 9 overflows the ±8 range. The fix is 8 integer bits (±128), safely covering z² up to ~128.
+
+### Architecture Changes
+
+#### New RTL Files
+
+| File | Function | Pipeline Stages |
+|---|---|---|
+| `fx_defines.vh` | Q8.55 parameters (`FX_W=64`, `FX_INT_W=8`, `FX_FRAC=55`) | — |
+| `fx_mul.v` | 64-bit signed multiply + `>>55` truncation | 3 (a_r/b_r → prod_r → product) |
+| `fx_add.v` | 64-bit signed addition (subtraction via b-negation) | 1 (sum ≤ a+b) |
+| `fx_mul_int.v` | 16-bit × 64-bit integer×fixed-point multiply (init path) | 3 |
+| `mandelbrot_core_worker_fx.v` | 4-context fixed-point worker | MUL_LAT=4, ADD_LAT=2 |
+| `tb_multicore_fx.v` | Fixed-point multicore testbench + reference model | — |
+
+#### Modified Files
+
+| File | Change |
+|---|---|
+| `config.vh` | Added `CFG_WORKER_MODE` (0=FP64, 1=fx) and `CFG_FX_CONTEXTS` (default 4) |
+| `top.v` | Pass `WORKER_MODE` and `FX_CONTEXTS` to multicore |
+| `mandelbrot_multicore.v` | Added `g_worker_fx` generate branch for `WORKER_MODE=1` |
+| `raster_collect_dynamic_rows.v` | Widened `owner_mem` from 4-bit to 8-bit to support >16 workers |
+| `mandelbrot_host.py` | Added `--mode fx64` packing (Q8.55 in 8 bytes) + fixed-point software reference; default changed from `fp64` to `fx64` |
+
+#### Latency And Context Comparison
+
+| Metric | FP64 kctx (historical) | FX fx (current) |
+|---|---|---|
+| MUL_LAT | 6 | 4 |
+| ADD_LAT | 9 | 2 |
+| Dependency chain | ~47 cycles/iter | ~20 cycles/iter |
+| Issue limit (1M+1A) | 5 cycles/iter | 5 cycles/iter |
+| Min contexts | ~10–16 | 4 |
+| Actual contexts | 8 | 4 |
+| Escape check | `quick_esc` exponent+mantissa | Integer compare `> 4<<55` |
+| Subtraction | `add_neg` sign flip in fp_add | b-operand negation `c_add_b <= -c_zi_sq` |
+| Init multiplier | Shared fp_mul (4 init ops) | Dedicated fx_mul_int (3 init ops) |
+
+### Bugs Found And Fixed During Implementation
+
+| Bug | Symptom | Fix |
+|---|---|---|
+| Tag latency misalignment | Sim timeout: fx_mul/fx_add operands arrive 1 cycle late (non-blocking), but tag pipe assumed same-cycle arrival | Changed `MUL_LAT` from 3→4 and `ADD_LAT` from 1→2 to account for the extra operand-delivery cycle |
+| `four_fx` testbench undriven wire | Collector `!fifo_full` check evaluated to X (Z wire), blocking all reads | Added `wire fifo_full = 1'b0` in testbench |
+| AOP_SRE not subtracting | fx_add does `a+b`; `z_re²-z_im²` gave `z_re²+z_im²` → 89.58% verify match | Negate b: `c_add_b <= -c_zi_sq[i]` before issuing AOP_SRE |
+| owner_mem 4-bit overflow | >16 workers: core index 16+ truncated to 0–15, collector reads wrong FIFO → hang at row 16 | Widened `owner_mem` from `reg [3:0]` to `reg [7:0]`, supporting up to 256 workers |
+| $rtoi 32-bit overflow in testbench | Q8.55 values need 64 bits; `$rtoi()` returns 32-bit `integer` | Replaced with explicit 64-bit hex literals in testbench |
+
+### Build And Resource Results
+
+| Resource | FP64 12w/8ctx (historical) | FX 24w/4ctx (current) | Change |
+|---|---|---|---|
+| CLB LUTs | 85,698 (97.56%) | 83,731 (95.32%) | Same budget, **2× workers** |
+| LUT as Logic | 82,686 (94.13%) | 79,571 (90.59%) | −3,115 |
+| DSP48E2 | 123 (16.9%) | 483 (66.3%) | +360 (64×64 multiplies) |
+| Block RAM Tile | 25.5 (19.9%) | 33 (25.8%) | +7.5 (more worker FIFOs) |
+| CLB Registers | 71,453 (40.7%) | 76,116 (43.3%) | +4,663 |
+| WNS | 0.103ns | 0.078ns | Better timing margin |
+| Workers | 12 | 24 | **2×** |
+
+The fixed-point design shifts resource utilization from LUT-dominated (94% LUT, 17% DSP) to a balanced profile (91% LUT, 66% DSP). The LUT savings come from eliminating FP exponent comparison, mantissa alignment, leading-zero count, and normalization logic.
+
+### Board Test Results (Six-Scene 1080p Benchmark)
+
+| Scene | FP64 12w/8ctx | FX 24w/4ctx | Speedup | Transport |
+|---|---|---|---|---|
+| Fast escape @128 | 3.733s / 555k pps | 3.733s / 556k pps | 1.00× | UART-bound |
+| Standard @64 | 3.816s / 546k pps | 3.727s / 556k pps | 1.02× | UART-bound |
+| Seahorse zoom @512 | 3.964s / 525k pps | 3.882s / 534k pps | 1.02× | Mixed |
+| Deep tendrils @8192 | 3.994s / 519k pps | 5.029s / 412k pps | — | Mixed |
+| **Deep mini-brot @8192** | **9.166s / 226k pps** | **5.091s / 407k pps** | **1.80×** | Compute→mixed |
+| Deep Seahorse @1024 | 4.575s / 455k pps | 4.074s / 509k pps | 1.12× | Mixed |
+
+Small-image verification: 160×120 `--verify --mode fx64` → 19,200/19,200 (100.00%) match.
+
+### Benefits Summary
+
+| Dimension | Benefit |
+|---|---|
+| **Precision** | Q8.55 matches FP64 at 100% on all six scenes; resolution 2⁻⁵⁵ exceeds FP64's 2⁻⁵² |
+| **Worker count** | 2× workers (12→24) in the same LUT budget, doubling row-level parallelism |
+| **Deep-scene speed** | 1.80× on compute-bound mini-brot @8192 (9.2s → 5.1s) |
+| **Timing margin** | WNS improved from 0.103ns to 0.078ns |
+| **Resource balance** | From LUT-single-bottleneck (94% LUT, 17% DSP) to balanced (91% LUT, 66% DSP) |
+| **Protocol compatibility** | Same 33-byte command, same `RT/TD/TE` response, same UART baud; `--mode fx64` only changes how center/step bytes are interpreted |
+| **Regression safety** | `WORKER_MODE=0` retains the full FP64 12w/8ctx path; both modes share the same multicore, scheduler, collector, UART, and tx_ctrl |
+
+### What Did Not Change
+
+- Host command/response protocol (binary, 33 bytes, `RT/TD/TE` tiling)
+- UART design (12 Mbaud fractional NCO, same pins)
+- Dynamic row scheduler (`work_dispatch_dynamic_rows`)
+- Raster collector (`raster_collect_dynamic_rows`, only `owner_mem` widened)
+- TX controller (`tx_ctrl`, `RT/TD/TE` row-split retry tiles)
+- Per-core FIFO and output FIFO structure
+- Pin constraints and clocking (200 MHz single-ended on E12)
+
+### Next Steps
+
+The fx64 redesign unlocked 2× worker parallelism and 1.8× deep-scene speed, but the UART ceiling (~600k pps) still hides compute gains on shallow scenes. The next architecture steps are:
+
+1. **Transport upgrade** (FT245 sync FIFO or Zynq PS AXI) to lift the ~600k pps ceiling.
+2. **Low-LUT ring/barrel worker** to reduce per-worker LUT and fit 28–32 workers.
+3. **Reliability** (request IDs, packet sequence numbers, retry-tile cache).
+4. **Periodicity detection** for mini-brot interior points.
