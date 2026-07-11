@@ -6,7 +6,7 @@ FPGA-based Mandelbrot renderer with a UART host interface. The PC sends image-ti
 
 The fixed-point design uses Q8.55 format (8 integer bits, 55 fractional bits, 64-bit total), which provides resolution of 2^-55 ≈ 2.8e-17 — finer than FP64's 52-bit mantissa (2^-52 ≈ 2.2e-16). All six standard benchmark scenes match FP64 pixel-for-pixel at 100%. The fixed-point arithmetic eliminates FP normalization/alignment logic, reducing adder latency from 9 cycles to 2 cycles and multiplier latency from 6 to 4 cycles, which halves the per-worker LUT cost and allows doubling the worker count from 12 to 24 within the same LUT budget.
 
-For the full design review, phase reports, and the fixed-point redesign study, see [REDESIGN_STUDY_REPORT.md](doc/REDESIGN_STUDY_REPORT.md). For detailed hardware architecture of the original FP64 design, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the ZU4EV 200 MHz adaptation and historical performance, see [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md).
+For the full design review, phase reports, and the fixed-point redesign study, see [REDESIGN_STUDY_REPORT.md](doc/REDESIGN_STUDY_REPORT.md). For the PL-PS DDR architecture (work in progress), see [PL_PS_DDR_DESIGN.md](doc/PL_PS_DDR_DESIGN.md). For detailed hardware architecture, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the ZU4EV 200 MHz adaptation and historical performance, see [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md).
 
 ## Demo Images
 
@@ -791,6 +791,7 @@ doc/ARCHITECTURE_CN.md
 doc/ARCHITECTURE_EVOLUTION_REPORT.md
 doc/ARCHITECTURE_EVOLUTION_REPORT_CN.md
 doc/REDESIGN_STUDY_REPORT.md
+doc/PL_PS_DDR_DESIGN.md
 doc/DESIGN_REVIEW_AND_OPTIMIZATION_REPORT.md
 doc/PHASE0_BASELINE_REPORT.md
 doc/PHASE1_1M2A_REPORT.md

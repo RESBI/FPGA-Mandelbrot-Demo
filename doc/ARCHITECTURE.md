@@ -1051,3 +1051,72 @@ The historical FP64 200MHz build required these timing cuts:
 | kctx FPU issue request slicing | Splits context selection from FPU operand drive by one cycle. |
 
 The fx64 worker does not require most of these because fixed-point add is a single-cycle integer add and fixed-point multiply is a simpler 3-stage DSP pipeline without exponent handling.
+
+---
+
+## Appendix B. PL-PS DDR Architecture (Work In Progress)
+
+This appendix documents the in-progress PL-PS DDR design on branch `VMC_RTSB_zu4ev_newdesign_withRAM`. The design replaces UART streaming with AXI HP writes to PS DDR, using the PS DDR4 as a pixel buffer. The full design document is [PL_PS_DDR_DESIGN.md](PL_PS_DDR_DESIGN.md).
+
+### B.1 Overview
+
+The PL-PS DDR design adds a Zynq UltraScale+ PS block design with:
+- `zynq_ultra_ps_e_0` (DDR4 4 GiB, S_AXI_HP0_FPD 64-bit)
+- `axi_smc_0` (SmartConnect 1 SI / 1 MI)
+- `top_with_ram` (custom RTL: multicore + output FIFO + axi_ddr_writer + cmd_parser_v2)
+- `pl_por_0` (PL-local power-on reset)
+
+The compute pipeline streams pixels from the multicore through the existing output FIFO directly to an AXI4 Master writer, which writes 64-bit packed pixels to PS DDR via the HP0 port at ~500 MB/s. This eliminates the UART bottleneck for pixel transfer.
+
+### B.2 Current Status
+
+| Component | Status |
+|---|---|
+| RTL (`top_with_ram`, `axi_ddr_writer`, `cmd_parser_v2`) | Implemented |
+| Build (22 workers, BD with PS + SmartConnect) | WNS=0.134ns, LUT 96.63% |
+| JTAG blank boot (`psu_init` + bitstream) | Working (DDR4 verified) |
+| UART ACK response | Working |
+| Mandelbrot compute + AXI DDR write | Verified via JTAG DDR readback |
+| TILE_DONE UART notification | Bug: AXI writer completes but TILE_DONE not sent |
+| 6-scene benchmark | Blocked by TILE_DONE bug |
+
+### B.3 Boot Flow
+
+The design uses a JTAG blank-boot flow (no FSBL, no PS C code):
+
+1. `targets 8; rst -system` (PS reset)
+2. `source psu_init_with_ram.tcl; psu_init` (PS register init via JTAG)
+3. `mwr 0x10000000 0xDEADBEEF; mrd 0x10000000` (DDR verify)
+4. `fpga system_wrapper.bit` (PL bitstream)
+5. PL `pl_por` releases reset after ~5ms, UART alive
+
+### B.4 Protocol
+
+The new protocol uses `55 AA TYPE LEN PAYLOAD CHECKSUM` frames:
+
+| Direction | Type | Name | Purpose |
+|---|---|---|---|
+| H→F | 0x10 | COMPUTE_TILE | Compute tile and write to DDR |
+| H→F | 0x11 | ENTER_DOWNLOAD | All tiles done, enter download phase |
+| F→H | 0x81 | ACK | Command accepted |
+| F→H | 0x84 | TILE_DONE | Tile written to DDR, checksum ready |
+
+### B.5 Resource (22-worker PL-PS DDR build)
+
+| Resource | Used | Device | Utilization |
+|---|---:|---:|---:|
+| CLB LUTs | 84,881 | 87,840 | 96.63% |
+| DSP48E2 | 442 | 728 | 60.7% |
+| Block RAM Tile | 46 | 128 | 35.9% |
+| WNS | 0.134ns | — | Timing met |
+
+Worker count reduced from 24 to 22 to accommodate the AXI/PS infrastructure LUT overhead (~5K LUT for SmartConnect + AXI FSM + cmd_parser_v2).
+
+### B.6 Reference Project
+
+The PL-PS DDR design is based on the `PL-PS-MEM-TEST` reference project, which validated:
+- AXI HP0 64-bit write path to PS DDR4 (509 MiB/s measured)
+- JTAG blank-boot flow (`psu_init.tcl` via XSDB)
+- PL-local reset (`pl_por.v`)
+- DDR4 high-address enable (4 GiB full range)
+- `reference/design_1.bd` PS configuration source

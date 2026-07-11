@@ -1219,3 +1219,93 @@ The fx64 redesign unlocked 2× worker parallelism and 1.8× deep-scene speed, bu
 2. **Low-LUT ring/barrel worker** to reduce per-worker LUT and fit 28–32 workers.
 3. **Reliability** (request IDs, packet sequence numbers, retry-tile cache).
 4. **Periodicity detection** for mini-brot interior points.
+
+---
+
+## Chapter: PL-PS DDR Architecture — From UART to AXI HP
+
+### Background
+
+The fx64 fixed-point redesign (24 workers, 4 contexts) achieved 1.80× speedup on deep scenes (mini-brot @8192: 9.2s → 5.1s) but shallow scenes remained UART-bound at ~555k pps. The 12 Mbaud UART ceiling (~600k pps theoretical) hides compute gains on fast-escape scenes. The `REDESIGN_STUDY_REPORT.md` identified PS DDR via AXI HP as the highest-value transport upgrade.
+
+The `PL-PS-MEM-TEST` reference project validated the PL→PS DDR AXI HP path on the same VMC_RTSB ZU4EV board:
+- AXI HP0 64-bit write: 509 MiB/s measured (33.4% of 1525 MiB/s theoretical)
+- JTAG blank-boot flow: `psu_init.tcl` via XSDB, no FSBL or PS C code
+- PL-local reset: `pl_por.v` independent of PS `pl_resetn0`
+- DDR4 high-address enable: 4 GiB full range (2 GiB low + 2 GiB high)
+
+### Design
+
+The PL-PS DDR design adds a Zynq UltraScale+ PS block design to the Mandelbrot accelerator:
+
+- `mandelbrot_multicore` (22 fx64 workers) → output FIFO → `axi_ddr_writer` (AXI4 Master) → SmartConnect → `S_AXI_HP0_FPD` → PS DDR4
+- `cmd_parser_v2` handles COMPUTE_TILE / ENTER_DOWNLOAD commands and ACK / TILE_DONE responses via UART
+- `pl_por` provides PL-local reset, decoupled from PS
+
+The original double-buffered BRAM tile cache design was abandoned during implementation because 2×245760×16-bit = 214 BRAM36 exceeded the device's 128 BRAM limit. The final design uses a streaming architecture: multicore → output FIFO → AXI writer → DDR, where compute and DDR write run in parallel (producer-consumer via FIFO).
+
+### Implementation
+
+New RTL files:
+- `rtl/top_with_ram.v` — PL-PS DDR top-level
+- `rtl/axi_ddr_writer.v` — AXI4 Master, reads from FIFO, writes 64-bit packed pixels to DDR
+- `rtl/cmd_parser_v2.v` — Extended protocol parser + response sender
+- `rtl/pl_por.v` — PL-local reset (copied from PL-PS-MEM-TEST)
+
+Build scripts:
+- `build_mandelbrot_with_ram.tcl` — BD generator + synth + impl
+- `boot_jtag_with_ram.tcl` — JTAG blank-boot script
+
+### Bugs Found And Fixed
+
+| Bug | Fix |
+|---|---|
+| `tile_cache_db` 214 BRAM36 > 128 device limit | Removed tile_cache_db, switched to streaming architecture |
+| `core_fifo_full` wire undriven | Added `assign core_fifo_full = !fifo_write_avail` |
+| AXI writer started after compute (FIFO overflow) | Start AXI writer simultaneously with compute |
+| cmd_parser_v2 state machine oscillation | Merged TX idle into RX sync0 state |
+| AXI burst length mismatch on partial bursts | Always send full BURST_BEATS, zero-pad remainder |
+| `ddr_write_done` gated by `compute_started` | Removed gating |
+| X_INTERFACE_INFO missing on AXI ports | Added attributes for BD interface recognition |
+| PS AXI clock pins unconnected | Connect all PS AXI clock pins in build script |
+
+### Current Status
+
+| Milestone | Status |
+|---|---|
+| RTL implementation | Complete |
+| Vivado build (22 workers) | WNS=0.134ns, LUT 96.63% |
+| JTAG blank boot | Working (DDR4 verified) |
+| UART ACK | Working |
+| Compute + AXI DDR write | Verified (JTAG DDR readback: correct pixel data) |
+| TILE_DONE notification | Bug: AXI writer completes but TILE_DONE frame not sent |
+| 6-scene benchmark | Blocked by TILE_DONE bug |
+
+### Resource Comparison
+
+| Resource | fx64 24w (UART) | PL-PS DDR 22w | Change |
+|---|---|---|---|
+| CLB LUTs | 83,731 (95.32%) | 84,881 (96.63%) | +1,150 (AXI/PS infra) |
+| DSP48E2 | 483 (66.3%) | 442 (60.7%) | -41 (22 vs 24 workers) |
+| Block RAM | 33 (25.8%) | 46 (35.9%) | +13 (PS infra) |
+| Workers | 24 | 22 | -2 (LUT budget for AXI) |
+
+### What Was Learned
+
+1. **BRAM budget**: A full compute tile (1920×120 = 230,400 pixels × 2 bytes = 450 KB) requires ~100 BRAM36 per buffer — far exceeding the device budget for double buffering. Streaming (FIFO → AXI) is the viable approach.
+
+2. **AXI burst compliance**: The SmartConnect strictly enforces AWLEN+1 beats per burst. Partial bursts with early WLAST are rejected. Always send full bursts with zero-padding.
+
+3. **Producer-consumer timing**: The AXI writer must start simultaneously with compute, not after. The 1024-entry output FIFO cannot hold a full tile; it must be drained continuously.
+
+4. **PS blank boot**: The `psu_init.tcl` + `pl_por.v` combination enables a fully self-contained boot without FSBL or PS firmware. The PL UART is alive ~5ms after bitstream load.
+
+5. **Protocol state machine**: A single-process state machine (RX + TX in one always block) avoids multiple-driver issues and ensures TX priority is correctly handled.
+
+### Next Steps
+
+1. Fix TILE_DONE notification bug (add ILA debug core to trace `done`/`tile_done_pending`/`state`)
+2. Recover 24 workers by optimizing AXI control LUT
+3. Add small retry-tile cache (~2-4 BRAM36)
+4. Run 6-scene benchmark
+5. Implement PS-side push (Ethernet/USB) for download phase
