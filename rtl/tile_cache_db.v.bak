@@ -1,0 +1,127 @@
+`timescale 1ns / 1ps
+
+module tile_cache_db #(
+    parameter MAX_TILE_PIXELS = 245760,
+    parameter DATA_WIDTH = 16
+) (
+    input  wire                   clk,
+    input  wire                   rst,
+
+    input  wire                   wr_en,
+    input  wire [DATA_WIDTH-1:0]  wr_data,
+    input  wire                   wr_start,
+    input  wire [15:0]            wr_tile_rows,
+    input  wire [15:0]            wr_tile_cols,
+    output reg                    wr_full,
+    output reg  [0:0]             wr_buffer_id,
+
+    input  wire                   rd_ddr_start,
+    input  wire [0:0]             rd_ddr_buffer_id,
+    output reg                    rd_ddr_done,
+    output reg  [DATA_WIDTH-1:0]  rd_ddr_data,
+    input  wire                   rd_ddr_en,
+    output reg                    rd_ddr_valid,
+
+    input  wire                   rd_retry_start,
+    input  wire [0:0]             rd_retry_buffer_id,
+    input  wire [15:0]            rd_retry_row_offset,
+    input  wire [15:0]            rd_retry_row_count,
+    input  wire [15:0]            rd_retry_cols,
+    output reg  [DATA_WIDTH-1:0]  rd_retry_data,
+    input  wire                   rd_retry_en,
+    output reg                    rd_retry_valid,
+    output reg                    rd_retry_done
+);
+
+    localparam ADDR_W = 19;
+
+    (* ram_style = "block" *) reg [DATA_WIDTH-1:0] mem_a [0:MAX_TILE_PIXELS-1];
+    (* ram_style = "block" *) reg [DATA_WIDTH-1:0] mem_b [0:MAX_TILE_PIXELS-1];
+
+    reg [ADDR_W-1:0] wr_ptr;
+    reg [ADDR_W-1:0] wr_limit;
+    reg [ADDR_W-1:0] ddr_rd_ptr;
+    reg [ADDR_W-1:0] ddr_rd_limit;
+    reg [ADDR_W-1:0] retry_rd_ptr;
+    reg [ADDR_W-1:0] retry_rd_limit;
+
+    reg        ddr_active;
+    reg        retry_active;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            wr_ptr <= 0;
+            wr_limit <= 0;
+            wr_full <= 0;
+            wr_buffer_id <= 0;
+            ddr_rd_ptr <= 0;
+            ddr_rd_limit <= 0;
+            ddr_active <= 0;
+            rd_ddr_done <= 0;
+            rd_ddr_valid <= 0;
+            retry_rd_ptr <= 0;
+            retry_rd_limit <= 0;
+            retry_active <= 0;
+            rd_retry_done <= 0;
+            rd_retry_valid <= 0;
+        end else begin
+            rd_ddr_done <= 0;
+            rd_retry_done <= 0;
+            rd_ddr_valid <= 0;
+            rd_retry_valid <= 0;
+
+            if (wr_start) begin
+                wr_ptr <= 0;
+                wr_limit <= wr_tile_rows * wr_tile_cols;
+                wr_full <= 0;
+                if (wr_ptr >= wr_limit || wr_limit == 0) begin
+                    wr_buffer_id <= ~wr_buffer_id;
+                end
+            end else if (wr_en && !wr_full) begin
+                if (wr_buffer_id == 0)
+                    mem_a[wr_ptr] <= wr_data;
+                else
+                    mem_b[wr_ptr] <= wr_data;
+                wr_ptr <= wr_ptr + 1'b1;
+                if (wr_ptr + 1'b1 >= wr_limit) begin
+                    wr_full <= 1;
+                end
+            end
+
+            if (rd_ddr_start) begin
+                ddr_rd_ptr <= 0;
+                ddr_rd_limit <= wr_limit;
+                ddr_active <= 1;
+            end else if (ddr_active && rd_ddr_en) begin
+                if (rd_ddr_buffer_id == 0)
+                    rd_ddr_data <= mem_a[ddr_rd_ptr];
+                else
+                    rd_ddr_data <= mem_b[ddr_rd_ptr];
+                rd_ddr_valid <= 1;
+                ddr_rd_ptr <= ddr_rd_ptr + 1'b1;
+                if (ddr_rd_ptr + 1'b1 >= ddr_rd_limit) begin
+                    ddr_active <= 0;
+                    rd_ddr_done <= 1;
+                end
+            end
+
+            if (rd_retry_start) begin
+                retry_rd_ptr <= rd_retry_row_offset * rd_retry_cols;
+                retry_rd_limit <= (rd_retry_row_offset + rd_retry_row_count) * rd_retry_cols;
+                retry_active <= 1;
+            end else if (retry_active && rd_retry_en) begin
+                if (rd_retry_buffer_id == 0)
+                    rd_retry_data <= mem_a[retry_rd_ptr];
+                else
+                    rd_retry_data <= mem_b[retry_rd_ptr];
+                rd_retry_valid <= 1;
+                retry_rd_ptr <= retry_rd_ptr + 1'b1;
+                if (retry_rd_ptr + 1'b1 >= retry_rd_limit) begin
+                    retry_active <= 0;
+                    rd_retry_done <= 1;
+                end
+            end
+        end
+    end
+
+endmodule
