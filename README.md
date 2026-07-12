@@ -2,11 +2,15 @@
 
 ![demo-show-progress](doc/GIF_03-07-2026_19-52-05.gif)
 
-FPGA-based Mandelbrot renderer with a UART host interface. The PC sends image-tile commands containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a 24-worker fixed-point (Q8.55, 64-bit) engine, dynamically assigns rows to available workers, restores raster order, and streams one 16-bit iteration count per pixel. The validated default targets VMC_RTSB ZU4EV with a single-ended 200 MHz `sys_clk` on E12, using twenty-four workers with four pixel contexts per worker over one shared fixed-point multiplier and one shared fixed-point adder per worker. The UART response path uses full-width row-split retry tiles with `RESPONSE_TILE_ROW_SPLITS=8`, so a default `1920x120` compute response is transmitted as eight independently checksummed `1920x15` retry tiles.
+FPGA-based Mandelbrot renderer with two transport modes: UART streaming and PL-PS DDR AXI. In both modes the PC sends compute commands containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a fixed-point (Q8.55, 64-bit) engine and streams one 16-bit iteration count per pixel.
 
-The fixed-point design uses Q8.55 format (8 integer bits, 55 fractional bits, 64-bit total), which provides resolution of 2^-55 ≈ 2.8e-17 — finer than FP64's 52-bit mantissa (2^-52 ≈ 2.2e-16). All six standard benchmark scenes match FP64 pixel-for-pixel at 100%. The fixed-point arithmetic eliminates FP normalization/alignment logic, reducing adder latency from 9 cycles to 2 cycles and multiplier latency from 6 to 4 cycles, which halves the per-worker LUT cost and allows doubling the worker count from 12 to 24 within the same LUT budget.
+**UART mode** (default, `build_fp64_fx24.tcl`): 24-worker fixed-point engine, dynamic row scheduling, `RT/TD/TE` tiled response at 12 Mbaud. UART-bound at ~555k pps on shallow scenes.
 
-For the full design review, phase reports, and the fixed-point redesign study, see [REDESIGN_STUDY_REPORT.md](doc/REDESIGN_STUDY_REPORT.md). For the PL-PS DDR architecture (work in progress), see [PL_PS_DDR_DESIGN.md](doc/PL_PS_DDR_DESIGN.md). For detailed hardware architecture, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the ZU4EV 200 MHz adaptation and historical performance, see [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md).
+**PL-PS DDR mode** (`build_mandelbrot_with_ram.tcl`): 22-worker fixed-point engine, writes pixels to PS DDR4 via AXI HP0 at ~500 MB/s. UART only carries command/ACK notifications (~50 bytes/tile). Achieves **17× speedup** on shallow scenes (0.22s vs 3.73s for 1080p fast escape).
+
+The fixed-point design uses Q8.55 format (8 integer bits, 55 fractional bits, 64-bit total), which provides resolution of 2^-55 ≈ 2.8e-17 — finer than FP64's 52-bit mantissa (2^-52 ≈ 2.2e-16). All six standard benchmark scenes match FP64 pixel-for-pixel at 100%. The fixed-point arithmetic eliminates FP normalization/alignment logic, reducing adder latency from 9 cycles to 2 cycles and multiplier latency from 6 to 4 cycles, which halves the per-worker LUT cost.
+
+For the full design review, phase reports, and the fixed-point redesign study, see [REDESIGN_STUDY_REPORT.md](doc/REDESIGN_STUDY_REPORT.md). For the PL-PS DDR architecture, see [PL_PS_DDR_DESIGN.md](doc/PL_PS_DDR_DESIGN.md). For detailed hardware architecture, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the ZU4EV 200 MHz adaptation and historical performance, see [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md).
 
 ## Demo Images
 
@@ -34,11 +38,13 @@ Current validated default configuration:
 | Pixel format | `uint16` iteration count, little-endian |
 | Maximum iteration count | 65535 |
 | Largest validated frame | 1920x1080 |
-| Current board build status | ZU4EV fx64 bitstream builds, programs, and passes six 1080p scenes |
-| Programming link | Vivado hardware auto-connect, target device `xczu4_0` |
-| Current routed timing (fx64 24w) | `WNS=0.078ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
-| Current routed utilization (fx64 24w) | `83731` LUTs (95.32%), `76116` registers, `483` DSP48E2, `33` BRAM tiles |
-| Response retry tile split | `RESPONSE_TILE_ROW_SPLITS=8`, full-width row slices |
+| Current board build status | ZU4EV fx64 bitstream builds, programs, and passes six 1080p scenes; PL-PS DDR mode also validated |
+| Programming link | Vivado hardware auto-connect (UART mode) or XSDB JTAG boot (PL-PS DDR mode), target device `xczu4_0` |
+| Current routed timing (fx64 24w UART) | `WNS=0.078ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
+| Current routed timing (fx64 22w PL-PS DDR) | `WNS=0.134ns`, `TNS=0.000ns`, timing met |
+| Current routed utilization (fx64 24w UART) | `83731` LUTs (95.32%), `76116` registers, `483` DSP48E2, `33` BRAM tiles |
+| Current routed utilization (fx64 22w PL-PS DDR) | `84881` LUTs (96.63%), `442` DSP48E2, `46` BRAM tiles |
+| Response retry tile split | `RESPONSE_TILE_ROW_SPLITS=8`, full-width row slices (UART mode only) |
 
 The default RTL is the 24-worker, 4-context-per-worker fixed-point (fx64) configuration on ZU4EV at direct 200 MHz. It builds, programs, meets timing, passes small-image HW/SW verification at 100% match, and passes the six 1080p host-tiled scenes. The older FP64 12-worker, 8-context build (`build_fp64.tcl`) remains available as a regression path.
 
@@ -71,8 +77,13 @@ Mandelbrot/
 │   ├── fx_defines.vh            Fixed-point Q8.55 parameters (FX_W, FX_FRAC)
 │   ├── uart_rx.v                UART receiver
 │   ├── uart_tx.v                UART transmitter
-│   ├── cmd_parser.v             Host command parser
-│   ├── tx_ctrl.v                Response stream controller
+│   ├── cmd_parser.v             Host command parser (UART mode)
+│   ├── cmd_parser_v2.v          Extended parser + TX (PL-PS DDR mode)
+│   ├── tx_ctrl.v                Response stream controller (UART mode)
+│   ├── top.v                    Top-level integration (UART mode)
+│   ├── top_with_ram.v           Top-level integration (PL-PS DDR mode)
+│   ├── axi_ddr_writer.v         AXI4 Master, FIFO → PS DDR writer (PL-PS DDR mode)
+│   ├── pl_por.v                 PL-local power-on reset (PL-PS DDR mode)
 │   └── queue.v                  Small synchronous FIFO
 ├── constraints_vmc_rtsb_zu4ev/
 │   └── mandelbrot_top.xdc       ZU4EV 200 MHz sys_clk, UART, and LED constraints
@@ -95,7 +106,11 @@ Mandelbrot/
 │   ├── uart_raw_probe.py
 │   ├── uart_listen_raw.py
 │   ├── fx_precision_check.py    Fixed-point vs FP64 precision validation
-│   └── fx_precision_all_scenes.py  Six-scene precision sweep
+│   ├── fx_precision_all_scenes.py  Six-scene precision sweep
+│   ├── test_ram_mode.py         PL-PS DDR mode smoke test
+│   ├── bench_ram_mode.py        PL-PS DDR six-scene benchmark
+│   ├── debug_status.py          PL-PS DDR UART debug status query
+│   └── debug_trace.py           PL-PS DDR compute+debug trace
 ├── doc/                         Architecture, design, analysis, and TODO documents
 │   ├── ARCHITECTURE.md
 │   ├── ARCHITECTURE_CN.md
@@ -114,13 +129,17 @@ Mandelbrot/
 │   ├── RETRY_TILE_CACHE_DESIGN.md
 │   ├── TODO.md
 │   └── TODO_CN.md
-├── build_fp64_fx24.tcl          Default fixed-point build, 24 workers + 4 contexts at 200MHz
+├── build_fp64_fx24.tcl          Default fixed-point build, 24 workers + 4 contexts at 200MHz (UART mode)
 ├── build_fp64_fx16.tcl          Fixed-point 16-worker build (resource comparison)
 ├── build_fp64.tcl               Historical FP64 build, 12 workers + 8 contexts at 200MHz
+├── build_mandelbrot_with_ram.tcl  PL-PS DDR build (22 workers + BD + AXI HP0)
 ├── build_fp64_static.tcl        Static scheduler + 1-context regression build
 ├── build_fp64_dynamic.tcl       Earlier dynamic-scheduler build script
 ├── build_fp128.tcl              FP128 Vivado build script
-├── program.tcl                  JTAG programming script
+├── program.tcl                  JTAG programming script (UART mode)
+├── boot_jtag_with_ram.tcl       JTAG blank-boot script (PL-PS DDR mode)
+├── reference/
+│   └── design_1.bd              PS configuration reference (PL-PS DDR mode)
 ├── sim_fp.tcl                   FP unit simulation script
 ├── sim_core.tcl                 Core simulation script
 ├── sim_fx.tcl                   Fixed-point multicore simulation script
@@ -433,6 +452,28 @@ Use this only when you intentionally want the older static scheduler and single-
 vivado -mode batch -source build_fp64_static.tcl
 ```
 
+### PL-PS DDR Build
+
+`build_mandelbrot_with_ram.tcl` builds the PL-PS DDR mode with a Zynq UltraScale+ PS block design (BD). It uses 22 workers (reduced from 24 to fit AXI infrastructure LUT) and writes pixels to PS DDR4 via AXI HP0:
+
+```bash
+vivado -mode batch -source build_mandelbrot_with_ram.tcl
+```
+
+Expected bitstream:
+
+```text
+./mandelbrot_with_ram_proj/mandelbrot_with_ram.runs/impl_1/system_wrapper.bit
+```
+
+After building, boot the board with the JTAG blank-boot script (requires Vitis XSDB, not Vivado):
+
+```bash
+Z:\Softwares\Xilinx\Vitis\2024.2\bin\xsdb.bat boot_jtag_with_ram.tcl
+```
+
+This initializes PS DDR4 via `psu_init` and programs the PL bitstream — no FSBL or PS C code required. See [PL_PS_DDR_DESIGN.md](doc/PL_PS_DDR_DESIGN.md) for details.
+
 ## Program The FPGA
 
 After building, program the board:
@@ -668,9 +709,9 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 
 ### Six-Scene 1080p Benchmark
 
-Latest ZU4EV direct-200MHz fixed-point 24-worker, 4-context, `M=8` row-split retry-tile 1080p host-tiled benchmark at 12 Mbaud with the 1080p default `1920x120` compute tile:
+#### UART Mode (fx64 24w, 12 Mbaud, `build_fp64_fx24.tcl`)
 
-| Scene | FP64 12w/8ctx baseline | FX 24w/4ctx | Speedup | Transport |
+| Scene | FP64 12w/8ctx baseline | FX 24w/4ctx UART | Speedup | Transport |
 |---|---:|---:|---:|---|
 | Fast escape @128 | `3.733s / 555k pps` | `3.733s / 556k pps` | `1.00x` | UART-bound |
 | Standard @64 | `3.816s / 546k pps` | `3.727s / 556k pps` | `1.02x` | UART-bound |
@@ -679,9 +720,18 @@ Latest ZU4EV direct-200MHz fixed-point 24-worker, 4-context, `M=8` row-split ret
 | Deep mini-brot @8192 | `9.166s / 226k pps` | `5.091s / 407k pps` | **`1.80x`** | Compute-bound |
 | Deep Seahorse @1024 | `4.575s / 455k pps` | `4.074s / 509k pps` | `1.12x` | Mixed |
 
-Small-image verification: 160x120 `--verify` `--mode fx64` → `19200/19200 (100.00%) match`.
+#### PL-PS DDR Mode (fx64 22w, AXI HP0, `build_mandelbrot_with_ram.tcl`)
 
-Deep scenes improve significantly: mini-brot @8192 accelerates **1.80×** (9.2s → 5.1s) due to 2× worker parallelism and shorter dependency latency (20 vs 47 cycles/iteration). Shallow scenes remain UART-bound at ~555k pps; the 12Mbaud UART ceiling (~600k pps theoretical) hides compute gains.
+| Scene | UART fx64 24w | PL-PS DDR 22w | Speedup vs UART | Speedup vs FP64 |
+|---|---:|---:|---:|---:|
+| Fast escape @128 | `3.733s` | **`0.219s / 9476k pps`** | **`17.1x`** | `17.1x` |
+| Standard @64 | `3.816s` | **`0.224s / 9251k pps`** | **`17.0x`** | `17.0x` |
+| Seahorse @512 | `3.964s` | **`1.072s / 1934k pps`** | **`3.7x`** | `3.7x` |
+| Deep tendrils @8192 | `3.994s` | **`1.937s / 1071k pps`** | **`2.1x`** | `2.1x` |
+| Deep mini-brot @8192 | `9.192s` | **`5.090s / 407k pps`** | **`1.8x`** | `1.8x` |
+| Deep Seahorse @1024 | `4.575s` | **`2.289s / 906k pps`** | **`2.0x`** | `2.0x` |
+
+PL-PS DDR mode eliminates the UART bottleneck: pixels go to PS DDR4 at ~500 MB/s, UART only carries ~50 bytes of command/ACK per tile. Shallow scenes accelerate **17×** (3.7s → 0.22s). Deep scenes still limited by compute (22 workers vs 24 in UART mode).
 
 Major architecture performance stages:
 
@@ -691,7 +741,8 @@ Major architecture performance stages:
 | 12M single-burst, 4-worker 2ctx | High baud, monolithic response | `4.678s` | `83.428s` |
 | 7K70T 6-worker 4ctx direct 200MHz | Timing-fixed worker scaling | `4.641s` | `20.963s` |
 | ZU4EV 12-worker 8ctx FP64 direct 200MHz | FP64 10-run mean | `3.821s` | `9.166s` |
-| **ZU4EV 24-worker 4ctx fx64 direct 200MHz** | **Fixed-point current** | `3.733s` | **`5.091s`** |
+| ZU4EV 24-worker 4ctx fx64 direct 200MHz | Fixed-point UART | `3.733s` | **`5.091s`** |
+| **ZU4EV 22-worker 4ctx fx64 PL-PS DDR** | **AXI HP0 to PS DDR4** | **`0.219s`** | **`5.090s`** |
 
 Detailed design review, phase reports, and the fixed-point redesign study are in [REDESIGN_STUDY_REPORT.md](doc/REDESIGN_STUDY_REPORT.md). Historical ZU4EV FP64 optimization data is in [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md).
 

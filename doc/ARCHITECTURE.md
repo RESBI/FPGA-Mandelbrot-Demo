@@ -1054,9 +1054,9 @@ The fx64 worker does not require most of these because fixed-point add is a sing
 
 ---
 
-## Appendix B. PL-PS DDR Architecture (Work In Progress)
+## Appendix B. PL-PS DDR Architecture
 
-This appendix documents the in-progress PL-PS DDR design on branch `VMC_RTSB_zu4ev_newdesign_withRAM`. The design replaces UART streaming with AXI HP writes to PS DDR, using the PS DDR4 as a pixel buffer. The full design document is [PL_PS_DDR_DESIGN.md](PL_PS_DDR_DESIGN.md).
+This appendix documents the PL-PS DDR design on branch `VMC_RTSB_zu4ev_newdesign_withRAM`. The design replaces UART pixel streaming with AXI HP writes to PS DDR4, using the PS DDR as a pixel buffer. The full design document is [PL_PS_DDR_DESIGN.md](PL_PS_DDR_DESIGN.md).
 
 ### B.1 Overview
 
@@ -1066,53 +1066,88 @@ The PL-PS DDR design adds a Zynq UltraScale+ PS block design with:
 - `top_with_ram` (custom RTL: multicore + output FIFO + axi_ddr_writer + cmd_parser_v2)
 - `pl_por_0` (PL-local power-on reset)
 
-The compute pipeline streams pixels from the multicore through the existing output FIFO directly to an AXI4 Master writer, which writes 64-bit packed pixels to PS DDR via the HP0 port at ~500 MB/s. This eliminates the UART bottleneck for pixel transfer.
+The compute pipeline streams pixels from the multicore through the existing output FIFO directly to an AXI4 Master writer, which writes 64-bit packed pixels to PS DDR via the HP0 port at ~500 MB/s. This eliminates the UART bottleneck for pixel transfer. UART is used only for command/ACK/TILE_DONE notifications (~50 bytes per tile).
 
-### B.2 Current Status
+### B.2 Architecture
 
-| Component | Status |
-|---|---|
-| RTL (`top_with_ram`, `axi_ddr_writer`, `cmd_parser_v2`) | Implemented |
-| Build (22 workers, BD with PS + SmartConnect) | WNS=0.134ns, LUT 96.63% |
-| JTAG blank boot (`psu_init` + bitstream) | Working (DDR4 verified) |
-| UART ACK response | Working |
-| Mandelbrot compute + AXI DDR write | Verified via JTAG DDR readback |
-| TILE_DONE UART notification | Bug: AXI writer completes but TILE_DONE not sent |
-| 6-scene benchmark | Blocked by TILE_DONE bug |
+```mermaid
+flowchart TB
+    subgraph PL["FPGA PL"]
+        direction TB
+        URX["uart_rx<br/>12 Mbaud"]
+        CMD2["cmd_parser_v2<br/>COMPUTE_TILE / ACK / TILE_DONE"]
+        CORE2["mandelbrot_multicore<br/>22x fx worker, 4 ctx"]
+        FIFO2["output FIFO<br/>1024x16"]
+        AXIM["axi_ddr_writer<br/>AXI4 Master<br/>64-bit packed pixels"]
+        UTX2["uart_tx<br/>12 Mbaud"]
+        URX --> CMD2 --> CORE2 --> FIFO2 --> AXIM
+        CMD2 --> UTX2
+    end
 
-### B.3 Boot Flow
+    subgraph PS["FPGA PS"]
+        direction TB
+        DDR["PS DDR4 4 GiB<br/>pixel buffer"]
+    end
+
+    URX -->|"UART command"| USB["Host PC"]
+    UTX2 -->|"ACK / TILE_DONE"| USB
+    AXIM -->|"AXI HP0 64-bit<br/>~500 MB/s"| DDR
+```
+
+### B.3 Protocol
+
+The PL-PS DDR protocol uses `55 AA TYPE LEN PAYLOAD CHECKSUM` frames:
+
+| Direction | Type | Name | Purpose |
+|---|---|---|---|
+| H→F | 0x10 | COMPUTE_TILE | Compute tile and write to DDR (42-byte payload: center_re/im/step + max_iter + rows/cols + ddr_base + tile_id) |
+| H→F | 0x11 | ENTER_DOWNLOAD | All tiles done, enter download phase |
+| H→F | 0x02 | QUERY_STATUS | Debug: query internal pipeline state |
+| F→H | 0x81 | ACK | Command accepted (1-byte status) |
+| F→H | 0x84 | TILE_DONE | Tile written to DDR (4-byte checksum) |
+| F→H | 0x90 | DEBUG_STATUS | Debug response (13-byte pipeline state snapshot) |
+
+### B.4 done_sticky + done_ack Handshake
+
+The `axi_ddr_writer` sets `done_sticky` (a level signal) when all pixels are written to DDR. The `cmd_parser_v2` detects this, queues a TILE_DONE frame, and after the frame's checksum byte is transmitted, pulses `done_ack` for one cycle to clear `done_sticky`. A `was_tile_done_tx` flag prevents re-triggering `tile_done_pending` during the 1-cycle window between TX completion and `done_sticky` clearing.
+
+### B.5 UART Debug Mode
+
+The QUERY_STATUS (0x02) command returns a DEBUG_STATUS (0x90) frame with 13 bytes of internal state: cmd_parser state, axi_writer state, compute_busy, compute_started, tile_done_pending, ack_pending, FIFO status, pixels sent/total, checksum, rows, cols, max_iter. This was used to diagnose the TILE_DONE notification bug by observing that `axi_state=IDLE, p_sent=16, p_total=16` but `done_sticky=0` — proving the done pulse was lost during TX.
+
+### B.6 Boot Flow
 
 The design uses a JTAG blank-boot flow (no FSBL, no PS C code):
 
 1. `targets 8; rst -system` (PS reset)
-2. `source psu_init_with_ram.tcl; psu_init` (PS register init via JTAG)
+2. `source psu_init_with_ram.tcl; psu_init` (PS register init via JTAG — PLL, DDR, clocks, MIO)
 3. `mwr 0x10000000 0xDEADBEEF; mrd 0x10000000` (DDR verify)
 4. `fpga system_wrapper.bit` (PL bitstream)
 5. PL `pl_por` releases reset after ~5ms, UART alive
 
-### B.4 Protocol
+### B.7 Six-Scene Benchmark Results
 
-The new protocol uses `55 AA TYPE LEN PAYLOAD CHECKSUM` frames:
-
-| Direction | Type | Name | Purpose |
-|---|---|---|---|
-| H→F | 0x10 | COMPUTE_TILE | Compute tile and write to DDR |
-| H→F | 0x11 | ENTER_DOWNLOAD | All tiles done, enter download phase |
-| F→H | 0x81 | ACK | Command accepted |
-| F→H | 0x84 | TILE_DONE | Tile written to DDR, checksum ready |
-
-### B.5 Resource (22-worker PL-PS DDR build)
-
-| Resource | Used | Device | Utilization |
+| Scene | UART fx64 24w | PL-PS DDR 22w | Speedup |
 |---|---:|---:|---:|
-| CLB LUTs | 84,881 | 87,840 | 96.63% |
-| DSP48E2 | 442 | 728 | 60.7% |
-| Block RAM Tile | 46 | 128 | 35.9% |
-| WNS | 0.134ns | — | Timing met |
+| Fast escape @128 | `3.733s` | **`0.219s`** | **`17.1x`** |
+| Standard @64 | `3.816s` | **`0.224s`** | **`17.0x`** |
+| Seahorse @512 | `3.964s` | **`1.072s`** | **`3.7x`** |
+| Deep tendrils @8192 | `3.994s` | **`1.937s`** | **`2.1x`** |
+| Deep mini-brot @8192 | `9.192s` | **`5.090s`** | **`1.8x`** |
+| Deep Seahorse @1024 | `4.575s` | **`2.289s`** | **`2.0x`** |
 
-Worker count reduced from 24 to 22 to accommodate the AXI/PS infrastructure LUT overhead (~5K LUT for SmartConnect + AXI FSM + cmd_parser_v2).
+Shallow scenes accelerate 17× because UART no longer blocks compute. Deep scenes limited by compute (22 workers vs 24 in UART mode, reduced to fit AXI infrastructure LUT).
 
-### B.6 Reference Project
+### B.8 Resource
+
+| Resource | UART fx64 24w | PL-PS DDR 22w | Change |
+|---|---:|---:|---|
+| CLB LUTs | 83,731 (95.32%) | 84,881 (96.63%) | +1,150 (AXI/PS infra) |
+| DSP48E2 | 483 (66.3%) | 442 (60.7%) | -41 (22 vs 24 workers) |
+| Block RAM Tile | 33 (25.8%) | 46 (35.9%) | +13 (PS infra) |
+| WNS | 0.078ns | 0.134ns | Slightly worse |
+
+### B.9 Reference Project
 
 The PL-PS DDR design is based on the `PL-PS-MEM-TEST` reference project, which validated:
 - AXI HP0 64-bit write path to PS DDR4 (509 MiB/s measured)
