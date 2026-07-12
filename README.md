@@ -583,10 +583,10 @@ python python\mandelbrot_host.py --mode ddr --width 1920 --height 1080 --max-ite
 --ddr-base ADDR      DDR base address for pixel buffer. Default: 0x10000000
 --compute-only       Skip the UART DDR download phase
 --download-retries N Retries per DDR tile UART download
---download-timeout S UART timeout per DDR tile download
+--download-timeout S Per-read UART timeout for a DDR tile download. Default: 5.0
 ```
 
-The default `--mode` is `ddr`, which matches the default `build.tcl` bitstream. The host first sends `COMPUTE_TILE` commands; the FPGA writes each tile into aligned PS DDR slots and reports an XOR16 checksum. The host then sends `ENTER_DOWNLOAD(base, rows, cols)` for each tile; the FPGA reads DDR and returns the existing `RT/TD/TE` UART stream. The host verifies both per-`TD` UART checksums and the end-to-end XOR16 before stitching the image. Use `--compute-only` to benchmark compute + DDR write without downloading pixels. Use `--mode fx64` for the UART-only bitstream (`build_fp64_fx24.tcl`).
+The default `--mode` is `ddr`, which matches the default `build.tcl` bitstream. The host first sends `COMPUTE_TILE` commands; the FPGA writes each tile into aligned PS DDR slots and reports an XOR16 checksum. The host then sends `ENTER_DOWNLOAD(base, rows, cols)` for each tile; the FPGA reads DDR and returns the existing `RT/TD/TE` UART stream. The host verifies both per-`TD` UART checksums and the end-to-end XOR16 before stitching the image. A stalled or short DDR download now retries after 5 seconds by default instead of waiting 30 seconds, while a missing download ACK retries after 2 seconds; use `--download-timeout` to override the pixel-read threshold for unusually large tiles. Use `--compute-only` to benchmark compute + DDR write without downloading pixels. Use `--mode fx64` for the UART-only bitstream (`build_fp64_fx24.tcl`).
 
 ## Useful Test Commands
 

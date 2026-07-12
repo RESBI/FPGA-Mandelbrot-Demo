@@ -34,6 +34,8 @@ DEFAULT_HOST_TILE_HEIGHT = 120
 DEFAULT_COMPUTE_TILE_MAX_WIDTH = 2048
 DEFAULT_DDR_TILE_MAX_WIDTH = 1920
 DEFAULT_TILE_READ_TIMEOUT = 5.0
+DEFAULT_DDR_DOWNLOAD_TIMEOUT = 5.0
+DDR_DOWNLOAD_ACK_TIMEOUT = 2.0
 TILE_PROGRESS_PACKET_INTERVAL = 1024
 SOFT_RESET_COMMAND = b"RST!RST!"
 QUIET_PROGRESS_BAR_WIDTH = 28
@@ -864,13 +866,15 @@ class MandelbrotDDR(MandelbrotFPGA):
         return (checksum, 0) if done_status == 0 else (None, done_status)
 
     def download_tile(self, ddr_base, rows, cols, expected_checksum,
-                      retries=5, timeout=30):
+                      retries=5, timeout=DEFAULT_DDR_DOWNLOAD_TIMEOUT):
         for attempt in range(1, retries + 2):
+            attempt_start = time.perf_counter()
             self.send_enter_download(ddr_base, rows, cols)
-            ack = self.read_frame(timeout=10)
+            ack = self.read_frame(timeout=DDR_DOWNLOAD_ACK_TIMEOUT)
             if not ack or ack[0] != DDR_TYPE_ACK or len(ack[1]) != 1:
                 if attempt <= retries:
-                    print(f"WARNING: Download ACK failed for 0x{ddr_base:X}, attempt={attempt}")
+                    print(f"WARNING: Download ACK failed for 0x{ddr_base:X}, "
+                          f"attempt={attempt}, elapsed={time.perf_counter() - attempt_start:.2f}s, retrying")
                     drain_serial_until_quiet(self, quiet_seconds=0.1, max_seconds=2.0)
                     time.sleep(0.05)
                     continue
@@ -904,9 +908,11 @@ class MandelbrotDDR(MandelbrotFPGA):
                       f"actual=0x{actual_checksum:04X}, attempt={attempt}")
             else:
                 if checksum_failed:
-                    print(f"WARNING: DDR UART tile checksum failed, attempt={attempt}")
+                    print(f"WARNING: DDR UART tile checksum failed, attempt={attempt}, "
+                          f"elapsed={time.perf_counter() - attempt_start:.2f}s")
                     continue
-                print(f"WARNING: DDR UART framing failed, attempt={attempt}")
+                print(f"WARNING: DDR UART framing failed, attempt={attempt}, "
+                      f"elapsed={time.perf_counter() - attempt_start:.2f}s")
                 remaining_stream_seconds = rows * cols * 2 * 10.0 / BAUD
                 drain_serial_until_quiet(
                     self, quiet_seconds=0.1,
@@ -1534,8 +1540,8 @@ def main():
                         help="Compute and write DDR only; skip UART download")
     parser.add_argument("--download-retries", type=int, default=5,
                         help="Retries per DDR tile UART download")
-    parser.add_argument("--download-timeout", type=float, default=30.0,
-                        help="UART timeout per DDR tile download")
+    parser.add_argument("--download-timeout", type=float, default=DEFAULT_DDR_DOWNLOAD_TIMEOUT,
+                        help=f"Per-read UART timeout for a DDR tile download (default: {DEFAULT_DDR_DOWNLOAD_TIMEOUT}s)")
     args = parser.parse_args()
 
     is_ddr_mode = (args.mode == 'ddr')
@@ -1618,6 +1624,8 @@ def main():
         print(f" Mode: DDR (fx64, PL-PS DDR)")
         print(f" DDR base: 0x{args.ddr_base:X}")
         print(f" UART download: {'disabled' if args.compute_only else 'enabled'}")
+        if not args.compute_only:
+            print(f" Download retries: {args.download_retries}, timeout={args.download_timeout}s")
     else:
         print(f" Mode: {args.mode.upper()}")
     print(f" Center: ({center_re}, {center_im})")

@@ -83,6 +83,7 @@ TE rows(u16 LE) cols(u16 LE)
 - UART TD：像素字节 XOR8。
 - `TILE_DONE`：writer 输入像素流 XOR16。
 - Host 下载完整 DDR tile 后重新计算 XOR16，并与 `TILE_DONE` 对比，覆盖计算输出、DDR 写入、DDR 读取和 UART 回传的端到端路径。
+- Host 默认以 5 秒单次读取超时检测 DDR UART 短读或停顿，并直接从 DDR 重试当前 tile；下载 ACK 缺失时 2 秒后重试。`--download-timeout` 可为更大的实验 tile 调高像素读取阈值。
 - writer 检查 `BRESP`；reader 检查 `RRESP` 和 `RLAST`。AXI read error 会终止当前下载，Host 不将不完整数据作为有效图像。
 
 ### 0.6 当前模块
