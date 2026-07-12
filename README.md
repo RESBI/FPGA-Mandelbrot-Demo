@@ -1,6 +1,6 @@
 # Mandelbrot FPGA Accelerator
 
-![demo-show-progress](doc/GIF_03-07-2026_19-52-05.gif)
+![demo-show-progress](doc/GIF_13-07-2026_05-09-03.gif)
 
 FPGA-based Mandelbrot renderer with two transport modes: **PL-PS DDR (default)** and UART streaming. In both modes the PC sends compute commands containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a fixed-point (Q8.55, 64-bit) engine and streams one 16-bit iteration count per pixel.
 
