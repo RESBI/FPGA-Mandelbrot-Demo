@@ -170,18 +170,20 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    subgraph RAM[top_with_ram.v — DDR default]
-        CLK[sys_clk on E12<br/>200 MHz] --> BUFG[BUFG]
-        RST[pl_por reset]
+    subgraph HOST["Host PC"]
+        CLI["mandelbrot_host.py<br/>--mode ddr"]
+    end
 
-        URX[uart_rx<br/>12 Mbaud]
-        UTX[uart_tx<br/>12 Mbaud]
-        CMD[cmd_parser_v2<br/>COMPUTE_TILE / ENTER_DOWNLOAD]
+    subgraph PL["FPGA PL (top_with_ram.v)"]
+        direction TB
+        URX["uart_rx<br/>12 Mbaud"]
+        CMD["cmd_parser_v2<br/>COMPUTE_TILE / ENTER_DOWNLOAD<br/>ACK / TILE_DONE"]
         CORE["mandelbrot_multicore<br/>22 workers, 4 ctx, fx64"]
-        FIFO[queue<br/>1024 x 16-bit]
-        AXIW[axi_ddr_writer<br/>AXI AW/W/B]
-        AXIR[axi_ddr_reader<br/>AXI AR/R]
-        TXC[tx_ctrl<br/>RT/TD/TE]
+        FIFO["queue<br/>1024 x 16-bit"]
+        AXIW["axi_ddr_writer<br/>AXI AW/W/B Master"]
+        AXIR["axi_ddr_reader<br/>AXI AR/R Master"]
+        TXC["tx_ctrl<br/>RT/TD/TE"]
+        UTX["uart_tx<br/>12 Mbaud"]
 
         URX --> CMD
         CMD --> CORE
@@ -192,12 +194,25 @@ flowchart TB
         CMD --> UTX
     end
 
-    subgraph MC[Inside mandelbrot_multicore]
-        CORE --> DISP[work_dispatch_dynamic_rows<br/>default SCHED_MODE=1]
-        DISP --> WORKERS["22 x mandelbrot_core_worker_fx"]
-        WORKERS --> CFIFO[per-core FIFOs]
-        CFIFO --> MERGE[raster_collect_dynamic_rows]
+    subgraph PS["FPGA PS (Zynq UltraScale+)"]
+        direction TB
+        DDR["PS DDR4 Controller<br/>4 GiB"]
+        HPC0["S_AXI_HPC0_FPD<br/>64-bit read/write"]
+        HPC0 --- DDR
     end
+
+    subgraph DRAM["PS DDR4 SODIMM"]
+        MEM["4 GiB DRAM<br/>pixel buffer"]
+    end
+
+    CLI -->|"UART command"| URX
+    UTX -->|"UART response"| CLI
+
+    AXIW -->|"AXI write<br/>64-bit burst"| HPC0
+    HPC0 -->|"AXI read<br/>64-bit burst"| AXIR
+
+    DDR -->|"memory bus"| MEM
+    MEM -->|"read data"| DDR
 ```
 
 ## Worker Mode Selection
