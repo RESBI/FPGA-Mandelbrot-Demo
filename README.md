@@ -175,7 +175,17 @@ flowchart TB
     subgraph PL["FPGA PL — top_with_ram.v"]
         URX["uart_rx 12Mbaud"]
         CMD["cmd_parser_v2<br/>COMPUTE_TILE / ENTER_DOWNLOAD<br/>ACK / TILE_DONE"]
-        CORE["mandelbrot_multicore<br/>22 workers, 4 ctx, fx64"]
+
+        subgraph MC["mandelbrot_multicore"]
+            DISP["work_dispatch_dynamic_rows"]
+            WORKERS["22 x mandelbrot_core_worker_fx"]
+            CFIFO["per-core FIFOs"]
+            MERGE["raster_collect_dynamic_rows"]
+            DISP --> WORKERS
+            WORKERS --> CFIFO
+            CFIFO --> MERGE
+        end
+
         FIFO["queue 1024x16"]
         AXIW["axi_ddr_writer<br/>AXI AW/W/B Master"]
         AXIR["axi_ddr_reader<br/>AXI AR/R Master"]
@@ -183,18 +193,13 @@ flowchart TB
         UTX["uart_tx 12Mbaud"]
 
         URX --> CMD
-        CMD --> CORE
-        CORE --> FIFO
+        CMD --> DISP
+        MERGE --> FIFO
         FIFO --> AXIW
         AXIR --> TXC
         TXC --> UTX
         CMD --> UTX
     end
-
-    CORE --> DISP["work_dispatch_dynamic_rows"]
-    DISP --> WORKERS["22 x mandelbrot_core_worker_fx"]
-    WORKERS --> CFIFO["per-core FIFOs"]
-    CFIFO --> MERGE["raster_collect_dynamic_rows"]
 
     subgraph PS["FPGA PS — Zynq UltraScale+"]
         HPC0["S_AXI_HPC0_FPD 64-bit R/W"]
