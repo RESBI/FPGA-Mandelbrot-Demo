@@ -191,17 +191,10 @@ flowchart TB
         CMD --> UTX
     end
 
-    subgraph MC["Inside mandelbrot_multicore"]
-        DISP["work_dispatch_dynamic_rows"]
-        WORKERS["22 x mandelbrot_core_worker_fx"]
-        CFIFO["per-core FIFOs"]
-        MERGE["raster_collect_dynamic_rows"]
-        DISP --> WORKERS
-        WORKERS --> CFIFO
-        CFIFO --> MERGE
-    end
-
-    CORE -.-> MC
+    CORE --> DISP["work_dispatch_dynamic_rows"]
+    DISP --> WORKERS["22 x mandelbrot_core_worker_fx"]
+    WORKERS --> CFIFO["per-core FIFOs"]
+    CFIFO --> MERGE["raster_collect_dynamic_rows"]
 
     subgraph PS["FPGA PS — Zynq UltraScale+"]
         HPC0["S_AXI_HPC0_FPD 64-bit R/W"]
