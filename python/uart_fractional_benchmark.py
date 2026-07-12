@@ -133,6 +133,8 @@ def run_host(port, baud, case, out_dir, prefix):
     cmd = [
         sys.executable,
         str(HOST),
+        "--mode",
+        "fx64",
         "--port",
         port,
         "--width",

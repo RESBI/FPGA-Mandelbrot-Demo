@@ -2,7 +2,7 @@ set part_name "xczu4ev-sfvc784-2-i"
 set proj_name "mandelbrot_with_ram"
 set proj_dir  "./mandelbrot_with_ram_proj"
 set rtl_dir   "./rtl"
-set xdc_file  "./constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc"
+set xdc_file  "./constraints_vmc_rtsb_zu4ev/mandelbrot_with_ram.xdc"
 set ref_bd_file "./reference/design_1.bd"
 set pl_clk_hz "200000000"
 
@@ -124,7 +124,7 @@ foreach pin_name {saxihp0_fpd_aclk saxigp0_aclk saxihpc0_fpd_aclk maxihpm0_lpd_a
 }
 
 set axi_connected 0
-foreach ps_intf {S_AXI_HP0_FPD S_AXI_HPC0_FPD S_AXI_HP0} {
+foreach ps_intf {S_AXI_HPC0_FPD S_AXI_HP0_FPD S_AXI_HP0} {
     if {[llength [get_bd_intf_pins -quiet axi_smc_0/M00_AXI]] && [llength [get_bd_intf_pins -quiet zynq_ultra_ps_e_0/$ps_intf]]} {
         connect_bd_intf_net [get_bd_intf_pins mandelbrot_0/M_AXI] [get_bd_intf_pins axi_smc_0/S00_AXI]
         connect_bd_intf_net [get_bd_intf_pins axi_smc_0/M00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/$ps_intf]
@@ -147,7 +147,6 @@ if {[llength [get_bd_intf_pins -quiet zynq_ultra_ps_e_0/FIXED_IO]]} {
     make_bd_intf_pins_external [get_bd_intf_pins zynq_ultra_ps_e_0/FIXED_IO]
 }
 
-validate_bd_design
 assign_bd_address
 
 set has_ddr_high 0

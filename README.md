@@ -2,13 +2,13 @@
 
 ![demo-show-progress](doc/GIF_03-07-2026_19-52-05.gif)
 
-FPGA-based Mandelbrot renderer with two transport modes: UART streaming and PL-PS DDR AXI. In both modes the PC sends compute commands containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a fixed-point (Q8.55, 64-bit) engine and streams one 16-bit iteration count per pixel.
+FPGA-based Mandelbrot renderer with two transport modes: **PL-PS DDR (default)** and UART streaming. In both modes the PC sends compute commands containing center, step, maximum iteration count, and dimensions. The FPGA computes pixels with a fixed-point (Q8.55, 64-bit) engine and streams one 16-bit iteration count per pixel.
 
-**UART mode** (default, `build_fp64_fx24.tcl`): 24-worker fixed-point engine, dynamic row scheduling, `RT/TD/TE` tiled response at 12 Mbaud. UART-bound at ~555k pps on shallow scenes.
+**PL-PS DDR mode** (default, `build.tcl`): 22-worker fixed-point engine writes pixels to PS DDR4 through AXI during the compute phase, then reads them back through an AXI read master and returns `RT/TD/TE` pixel frames over UART during the download phase. XSDB is only used for PS DDR initialization and PL programming. Use `--mode ddr` (the default) with the host script.
 
-**PL-PS DDR mode** (`build_mandelbrot_with_ram.tcl`): 22-worker fixed-point engine, writes pixels to PS DDR4 via AXI HP0 at ~500 MB/s. UART only carries command/ACK notifications (~50 bytes/tile). Achieves **17× speedup** on shallow scenes (0.22s vs 3.73s for 1080p fast escape).
+**UART mode** (`build_fp64_fx24.tcl`): 24-worker fixed-point engine, dynamic row scheduling, `RT/TD/TE` tiled response at 12 Mbaud. UART-bound at ~555k pps on shallow scenes. Use `--mode fx64` with the host script.
 
-The fixed-point design uses Q8.55 format (8 integer bits, 55 fractional bits, 64-bit total), which provides resolution of 2^-55 ≈ 2.8e-17 — finer than FP64's 52-bit mantissa (2^-52 ≈ 2.2e-16). All six standard benchmark scenes match FP64 pixel-for-pixel at 100%. The fixed-point arithmetic eliminates FP normalization/alignment logic, reducing adder latency from 9 cycles to 2 cycles and multiplier latency from 6 to 4 cycles, which halves the per-worker LUT cost.
+The fixed-point design uses Q8.55 format (8 integer bits, 55 fractional bits, 64-bit total), which provides resolution of 2^-55 ≈ 2.8e-17. The fixed-point arithmetic eliminates FP normalization/alignment logic, reducing adder latency to 2 cycles and multiplier latency to 4 cycles, which keeps the per-worker LUT cost low.
 
 For the full design review, phase reports, and the fixed-point redesign study, see [REDESIGN_STUDY_REPORT.md](doc/REDESIGN_STUDY_REPORT.md). For the PL-PS DDR architecture, see [PL_PS_DDR_DESIGN.md](doc/PL_PS_DDR_DESIGN.md). For detailed hardware architecture, see [ARCHITECTURE.md](doc/ARCHITECTURE.md). For the ZU4EV 200 MHz adaptation and historical performance, see [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md).
 
@@ -23,30 +23,31 @@ Current validated default configuration:
 
 | Item | Value |
 |---|---:|
-| FPGA target | VMC_RTSB ZU4EV, `xczu4ev-sfvc784-1-i` |
+| FPGA target | VMC_RTSB ZU4EV, DDR build `xczu4ev-sfvc784-2-i` (from `reference/design_1.bd`) |
 | Vivado version used | 2024.2 or compatible |
 | Board clock input | 200 MHz single-ended `sys_clk` on E12 |
 | Internal system clock | Direct 200 MHz single clock domain |
 | Arithmetic mode | Fixed-point Q8.55 (64-bit), `WORKER_MODE=1` |
-| Mandelbrot workers | 24 |
+| **Default transport** | **PL-PS DDR (AXI HPC0 → PS DDR4 → UART download)** |
+| Mandelbrot workers | 22 (DDR mode) / 24 (UART mode) |
 | Pixel contexts per worker | 4 |
-| Historical FP64 mode | `WORKER_MODE=0`, 12 workers, 8 contexts (regression) |
 | Default scheduler | Dynamic idle-core rows (`SCHED_MODE=1`) |
 | FP datapath effective rate | 200 MHz (`FP_CE_DIV=1`) |
 | UART baudrate | 12000000 |
 | Host serial port default | `COM6` |
+| Host `--mode` default | `ddr` (PL-PS DDR + fx64) |
 | Pixel format | `uint16` iteration count, little-endian |
 | Maximum iteration count | 65535 |
 | Largest validated frame | 1920x1080 |
-| Current board build status | ZU4EV fx64 bitstream builds, programs, and passes six 1080p scenes; PL-PS DDR mode also validated |
-| Programming link | Vivado hardware auto-connect (UART mode) or XSDB JTAG boot (PL-PS DDR mode), target device `xczu4_0` |
+| Current board build status | ZU4EV DDR bitstream builds/programs; 4x4, 160x120, edge-tiled 161x121, and 1920x1080 DDR-to-UART tests pass |
+| Programming link | XSDB JTAG boot (DDR mode) or Vivado hardware auto-connect (UART mode), target device `xczu4_0` |
+| Current routed timing (fx64 22w PL-PS DDR) | `WNS=0.114ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
 | Current routed timing (fx64 24w UART) | `WNS=0.078ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
-| Current routed timing (fx64 22w PL-PS DDR) | `WNS=0.134ns`, `TNS=0.000ns`, timing met |
+| Current routed utilization (fx64 22w PL-PS DDR) | `86450` LUTs (98.42%), `73894` registers, `445` DSP48E2, `46` BRAM tiles |
 | Current routed utilization (fx64 24w UART) | `83731` LUTs (95.32%), `76116` registers, `483` DSP48E2, `33` BRAM tiles |
-| Current routed utilization (fx64 22w PL-PS DDR) | `84881` LUTs (96.63%), `442` DSP48E2, `46` BRAM tiles |
 | Response retry tile split | `RESPONSE_TILE_ROW_SPLITS=8`, full-width row slices (UART mode only) |
 
-The default RTL is the 24-worker, 4-context-per-worker fixed-point (fx64) configuration on ZU4EV at direct 200 MHz. It builds, programs, meets timing, passes small-image HW/SW verification at 100% match, and passes the six 1080p host-tiled scenes. The older FP64 12-worker, 8-context build (`build_fp64.tcl`) remains available as a regression path.
+The default RTL is the 22-worker, 4-context-per-worker fixed-point (fx64) configuration on ZU4EV at direct 200 MHz with PL-PS DDR transport. It builds, programs via JTAG blank-boot, meets timing, and completes a 1920x1080 DDR-to-UART transfer with bit-exact software verification. The 24-worker UART fx64 build (`build_fp64_fx24.tcl`) remains available as an alternative.
 
 ## Repository Layout
 
@@ -58,10 +59,10 @@ Mandelbrot/
 │   ├── mandelbrot_core_worker_fx.v
 │   │                              Default fixed-point Q8.55 4-context row worker
 │   ├── mandelbrot_core_worker_kctx.v
-│   │                              Historical FP64 4/8-context row worker (regression)
+│   │                              Historical FP64 4/8-context row worker (not used in current builds)
 │   ├── mandelbrot_core_worker_2ctx.v
-│   │                              Historical FP64 2-context row worker
-│   ├── mandelbrot_core_worker.v Single-context FP64 row worker (regression)
+│   │                              Historical FP64 2-context row worker (not used)
+│   ├── mandelbrot_core_worker.v Single-context FP64 row worker (historical, not used)
 │   ├── mandelbrot_core.v        Legacy/single-core Mandelbrot FSM and FP scheduling
 │   ├── work_dispatch_static_rows.v
 │   ├── work_dispatch_dynamic_rows.v
@@ -70,8 +71,8 @@ Mandelbrot/
 │   ├── fx_mul.v                 Fixed-point 64-bit signed multiplier (3-stage pipeline)
 │   ├── fx_add.v                 Fixed-point 64-bit signed adder (1-stage pipeline)
 │   ├── fx_mul_int.v             16×64-bit integer×fixed-point multiplier (init path)
-│   ├── fp_add.v                 Parameterized FP64 adder/subtractor (historical)
-│   ├── fp_mul.v                 Parameterized FP64 multiplier (historical)
+│   ├── fp_add.v                 Parameterized FP64 adder/subtractor (historical FP64, not used in current builds)
+│   ├── fp_mul.v                 Parameterized FP64 multiplier (historical FP64, not used in current builds)
 │   ├── config.vh                Central RTL configuration defaults
 │   ├── fp_defines.vh            FP64/FP128 parameters and CE divider
 │   ├── fx_defines.vh            Fixed-point Q8.55 parameters (FX_W, FX_FRAC)
@@ -83,6 +84,7 @@ Mandelbrot/
 │   ├── top.v                    Top-level integration (UART mode)
 │   ├── top_with_ram.v           Top-level integration (PL-PS DDR mode)
 │   ├── axi_ddr_writer.v         AXI4 Master, FIFO → PS DDR writer (PL-PS DDR mode)
+│   ├── axi_ddr_reader.v         AXI4 Master, PS DDR → UART pixel reader (PL-PS DDR mode)
 │   ├── pl_por.v                 PL-local power-on reset (PL-PS DDR mode)
 │   └── queue.v                  Small synchronous FIFO
 ├── constraints_vmc_rtsb_zu4ev/
@@ -97,7 +99,7 @@ Mandelbrot/
 │   ├── tb_multicore_fx.v        Fixed-point multicore testbench + reference model
 │   └── tb_core_count.v
 ├── python/                      Host and hardware test scripts
-│   ├── mandelbrot_host.py       Host CLI with --mode fp64/fp128/fx64 support
+│   ├── mandelbrot_host.py       Host CLI with --mode ddr/fx64 support
 │   ├── pipeline_2ctx_model.py
 │   ├── test_esc.py
 │   ├── test_points.py
@@ -129,13 +131,9 @@ Mandelbrot/
 │   ├── RETRY_TILE_CACHE_DESIGN.md
 │   ├── TODO.md
 │   └── TODO_CN.md
-├── build_fp64_fx24.tcl          Default fixed-point build, 24 workers + 4 contexts at 200MHz (UART mode)
-├── build_fp64_fx16.tcl          Fixed-point 16-worker build (resource comparison)
-├── build_fp64.tcl               Historical FP64 build, 12 workers + 8 contexts at 200MHz
-├── build_mandelbrot_with_ram.tcl  PL-PS DDR build (22 workers + BD + AXI HP0)
-├── build_fp64_static.tcl        Static scheduler + 1-context regression build
-├── build_fp64_dynamic.tcl       Earlier dynamic-scheduler build script
-├── build_fp128.tcl              FP128 Vivado build script
+├── build.tcl                    Canonical default build entrypoint
+├── build_mandelbrot_with_ram.tcl  PL-PS DDR build (sourced by build.tcl)
+├── build_fp64_fx24.tcl          Fixed-point UART build, 24 workers + 4 contexts at 200MHz
 ├── program.tcl                  JTAG programming script (UART mode)
 ├── boot_jtag_with_ram.tcl       JTAG blank-boot script (PL-PS DDR mode)
 ├── reference/
@@ -151,23 +149,21 @@ Mandelbrot/
 └── README.md                    Project overview
 ```
 
-## System Diagram
+## Default DDR System Diagram
 
 ```mermaid
 flowchart LR
-    PC[Host PC<br/>Python CLI] -->|UART command<br/>center, step, size, max_iter| RX[UART RX]
-    RX --> Parser[cmd_parser]
-    Parser -->|image parameters| Core[mandelbrot_multicore<br/>24 fixed-point workers<br/>4 contexts each]
-    Core -->|raster-order uint16 stream| FIFO[queue<br/>1024 x 16-bit]
-    FIFO --> TXC[tx_ctrl]
+    PC[Host PC<br/>mandelbrot_host.py] -->|COMPUTE_TILE| RX[UART RX]
+    RX --> Parser[cmd_parser_v2]
+    Parser --> Core[mandelbrot_multicore<br/>22 fx64 workers]
+    Core --> FIFO[output FIFO<br/>1024 x 16-bit]
+    FIFO --> Writer[axi_ddr_writer<br/>AW/W/B]
+    Writer -->|AXI HPC0| DDR[PS DDR4]
+    DDR -->|AXI AR/R| Reader[axi_ddr_reader]
+    Reader --> TXC[tx_ctrl<br/>RT/TD/TE]
     TXC --> TX[UART TX]
-    TX -->|response header<br/>pixels<br/>checksum| PC
-
-    Core --> SCHED[dynamic row dispatcher]
-    SCHED --> W0[worker 0<br/>4 pixel contexts]
-    SCHED --> W1[worker 1<br/>4 pixel contexts]
-    SCHED --> W2[worker 2<br/>4 pixel contexts]
-    SCHED --> WN[workers 3..23<br/>4 pixel contexts each]
+    TX -->|DDR pixel download| PC
+    Parser -->|ACK / TILE_DONE| TX
 ```
 
 ## RTL Structure
@@ -255,11 +251,11 @@ The FP64 worker pipeline (historical, `mandelbrot_core_worker_kctx`) uses `MUL_L
 
 ### Hardware
 
-- VMC_RTSB ZU4EV board using `xczu4ev-sfvc784-1-i` and the current ZU4EV pins in `constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc`.
-- JTAG programming through Vivado Hardware Manager auto-connect; the programmed device appears as `xczu4_0`.
+- VMC_RTSB ZU4EV board. The default DDR build follows `reference/design_1.bd` and targets `xczu4ev-sfvc784-2-i`; UART-only legacy builds still target `-1-i`.
+- DDR mode uses XSDB JTAG blank boot (`boot_jtag_with_ram.tcl`); UART-only builds may use Vivado Hardware Manager auto-connect. The programmed device appears as `xczu4_0`.
 - FT232HL UART connection wired to FPGA `uart_rx=D12` and `uart_tx=C12`.
 - 200 MHz single-ended reference clock on `sys_clk=E12`.
-- Two board LEDs are used by the current top-level as `led[2]` and `led[3]`.
+- The default DDR top-level exposes only clock and UART PL pins; LED pins below apply to the UART-only top-level.
 
 Current pin constraints:
 
@@ -345,12 +341,12 @@ Current defaults:
 | `CFG_CLK_HZ` | `200000000` | `uart_rx`, `uart_tx` | System clock used for fractional UART timing. |
 | `CFG_UART_BAUD` | `12000000` | `uart_rx`, `uart_tx` | UART baudrate. Must match `python/mandelbrot_host.py` `BAUD`. |
 | `CFG_UART_ACC_WIDTH` | `32` | `uart_rx`, `uart_tx` | Fractional baud accumulator width. |
-| `CFG_CORE_COUNT` | `12` | `top`, `mandelbrot_multicore` | Number of Mandelbrot workers. Overridden to 24 by `build_fp64_fx24.tcl`. |
+| `CFG_CORE_COUNT` | `22` | `top`, `mandelbrot_multicore` | Number of Mandelbrot workers. Overridden to 24 by `build_fp64_fx24.tcl`. |
 | `CFG_CORE_FIFO_DEPTH` | `4096` | `top`, `mandelbrot_multicore` | Per-core result FIFO depth. |
 | `CFG_OUTPUT_FIFO_DEPTH` | `1024` | `top` | Shared output FIFO depth before `tx_ctrl`. |
 | `CFG_SCHED_MODE` | `1` | `top`, `mandelbrot_multicore` | `0` static rows, `1` dynamic idle-core rows. |
 | `CFG_DYNAMIC_OWNER_DEPTH` | `4096` | `top`, `mandelbrot_multicore` | Dynamic row-owner table depth. |
-| `CFG_WORKER_CONTEXTS` | `8` | `top`, `mandelbrot_multicore` | FP64 context count when `WORKER_MODE=0`. |
+| `CFG_WORKER_CONTEXTS` | `4` | `top`, `mandelbrot_multicore` | FP64 context count when `WORKER_MODE=0` (historical). |
 | `CFG_WORKER_MODE` | `1` | `top`, `mandelbrot_multicore` | `0` = FP64 (kctx), `1` = fixed-point (fx). |
 | `CFG_FX_CONTEXTS` | `4` | `top`, `mandelbrot_multicore` | Context count per fixed-point worker when `WORKER_MODE=1`. |
 | `CFG_RESPONSE_TILE_ROW_SPLITS` | `8` | `top`, `tx_ctrl` | Split one compute response into full-width row-split retry tiles. |
@@ -369,19 +365,38 @@ The existing Vivado build scripts intentionally override some top-level paramete
 
 | Script | Overrides | Purpose |
 |---|---|---|
-| `build_fp64_fx24.tcl` | `CORE_COUNT=24 WORKER_MODE=1 FX_CONTEXTS=4 WORKER_CONTEXTS=4 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 RESPONSE_TILE_ROW_SPLITS=8` | **Default** fixed-point direct-200MHz dynamic 24-worker, 4-context ZU4EV build. |
-| `build_fp64_fx16.tcl` | `CORE_COUNT=16 WORKER_MODE=1 FX_CONTEXTS=4 WORKER_CONTEXTS=4 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 RESPONSE_TILE_ROW_SPLITS=8` | Fixed-point 16-worker build for resource comparison. |
-| `build_fp64.tcl` | `CORE_COUNT=12 WORKER_MODE=0 WORKER_CONTEXTS=8 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 RESPONSE_TILE_ROW_SPLITS=8` | Historical FP64 12-worker, 8-context direct-200MHz build (regression). |
-| `build_fp64_100mhz.tcl` | `CLK_HZ=100000000 DIRECT_200MHZ=0 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=4` | 100MHz 4-context FP64 reference build. |
-| `build_fp64_static.tcl` | `SCHED_MODE=0 DYNAMIC_OWNER_DEPTH=4096 WORKER_CONTEXTS=1` | Static scheduler, single-context FP64 regression build. |
+| `build_mandelbrot_with_ram.tcl` | `CORE_COUNT=22 WORKER_MODE=1 FX_CONTEXTS=4 WORKER_CONTEXTS=4 SCHED_MODE=1` | **Default** PL-PS DDR 22-worker fx64 build with PS BD + AXI HPC0 read/write. |
+| `build_fp64_fx24.tcl` | `CORE_COUNT=24 WORKER_MODE=1 FX_CONTEXTS=4 WORKER_CONTEXTS=4 SCHED_MODE=1 DYNAMIC_OWNER_DEPTH=4096 RESPONSE_TILE_ROW_SPLITS=8` | Fixed-point UART 24-worker, 4-context direct-200MHz ZU4EV build. |
 
 Those Vivado generics take precedence over the corresponding `CFG_*` defaults for `top` parameters. UART defaults currently come from `config.vh` unless a build script is extended to override them.
 
 ## Build
 
-### Fixed-Point Build (Default)
+### PL-PS DDR Build (Default)
 
-`build_fp64_fx24.tcl` is the default validated fixed-point build. It sets:
+`build.tcl` is the canonical default entrypoint and sources `build_mandelbrot_with_ram.tcl`. It creates a Zynq UltraScale+ PS block design (BD), uses 22 workers, writes compute results to PS DDR4, and enables PL-side AXI readback for UART download:
+
+```bash
+Z:\Softwares\Xilinx\Vivado\2024.2\bin\vivado.bat -mode batch -source build.tcl
+```
+
+Expected bitstream:
+
+```text
+./mandelbrot_with_ram_proj/mandelbrot_with_ram.runs/impl_1/system_wrapper.bit
+```
+
+After building, boot the board with the JTAG blank-boot script (requires Vitis XSDB, not Vivado):
+
+```bash
+Z:\Softwares\Xilinx\Vitis\2024.2\bin\xsdb.bat boot_jtag_with_ram.tcl
+```
+
+This initializes PS DDR4 via `psu_init` and programs the PL bitstream — no FSBL or PS C code required. See [PL_PS_DDR_DESIGN.md](doc/PL_PS_DDR_DESIGN.md) for details.
+
+### Fixed-Point UART Build (Alternative)
+
+`build_fp64_fx24.tcl` is the 24-worker fixed-point UART build. It sets:
 
 ```text
 CLK_HZ=200000000
@@ -404,7 +419,7 @@ vivado -mode batch -source build_fp64_fx24.tcl
 Using an explicit local install path, replace the example prefix with your Vivado installation directory:
 
 ```bash
-C:\Xilinx\Vivado\2024.2\bin\vivado.bat -mode batch -source build_fp64_fx24.tcl
+Z:\Softwares\Xilinx\Vivado\2024.2\bin\vivado.bat -mode batch -source build_fp64_fx24.tcl
 ```
 
 Expected output includes:
@@ -414,69 +429,21 @@ BUILD SUCCESSFUL
 Bitstream: ./fp64_fx24_proj/mandelbrot_fp64_fx24.runs/impl_1/top.bit
 ```
 
-### FP64 Build (Historical / Regression)
+## Program The FPGA
 
-`build_fp64.tcl` is the historical FP64 12-worker, 8-context build. It sets `WORKER_MODE=0` to select the FP64 kctx worker:
+### DDR Mode (Default)
 
-```bash
-vivado -mode batch -source build_fp64.tcl
-```
-
-Expected bitstream:
-
-```text
-./fp64_proj/mandelbrot_fp64.runs/impl_1/top.bit
-```
-
-### 100MHz FP64 Reference Build
-
-Use this only when you intentionally want the old 100MHz 4-context reference:
-
-```bash
-vivado -mode batch -source build_fp64_100mhz.tcl
-```
-
-### FP128 Build
-
-FP128 is structurally supported, but most validation has focused on FP64 and fx64.
-
-```bash
-vivado -mode batch -source build_fp128.tcl
-```
-
-### Static Regression Build
-
-Use this only when you intentionally want the older static scheduler and single-context worker regression path:
-
-```bash
-vivado -mode batch -source build_fp64_static.tcl
-```
-
-### PL-PS DDR Build
-
-`build_mandelbrot_with_ram.tcl` builds the PL-PS DDR mode with a Zynq UltraScale+ PS block design (BD). It uses 22 workers (reduced from 24 to fit AXI infrastructure LUT) and writes pixels to PS DDR4 via AXI HP0:
-
-```bash
-vivado -mode batch -source build_mandelbrot_with_ram.tcl
-```
-
-Expected bitstream:
-
-```text
-./mandelbrot_with_ram_proj/mandelbrot_with_ram.runs/impl_1/system_wrapper.bit
-```
-
-After building, boot the board with the JTAG blank-boot script (requires Vitis XSDB, not Vivado):
+After building the DDR bitstream, boot the board with the JTAG blank-boot script (requires Vitis XSDB):
 
 ```bash
 Z:\Softwares\Xilinx\Vitis\2024.2\bin\xsdb.bat boot_jtag_with_ram.tcl
 ```
 
-This initializes PS DDR4 via `psu_init` and programs the PL bitstream — no FSBL or PS C code required. See [PL_PS_DDR_DESIGN.md](doc/PL_PS_DDR_DESIGN.md) for details.
+This initializes PS DDR4 via `psu_init` and programs the PL bitstream — no FSBL or PS C code required.
 
-## Program The FPGA
+### UART Mode (Alternative)
 
-After building, program the board:
+After building the UART bitstream, program the board:
 
 ```bash
 vivado -mode batch -source program.tcl
@@ -485,7 +452,7 @@ vivado -mode batch -source program.tcl
 Or with an explicit local install path:
 
 ```bash
-C:\Xilinx\Vivado\2024.2\bin\vivado.bat -mode batch -source program.tcl
+Z:\Softwares\Xilinx\Vivado\2024.2\bin\vivado.bat -mode batch -source program.tcl
 ```
 
 `program.tcl` uses Vivado hardware auto-connect, opens the attached hardware target, and selects a supported FPGA device matching `*xczu4*` or the older `*xc7k70t*` pattern. Pass a bitstream explicitly when programming a non-default build:
@@ -503,7 +470,13 @@ Done
 
 ## Smoke Test
 
-Run a quick escape test after programming. The `mandelbrot_host.py` with `--mode fx64` and a 1×1 image is the recommended smoke test:
+Run a quick escape test after programming. The `mandelbrot_host.py` with `--mode ddr` (default) and a 1×1 image is the recommended smoke test:
+
+```bash
+python python\mandelbrot_host.py --mode ddr --port COM6 --width 1 --height 1 --max-iter 256 --center 2.5 0.0 --step 0.001 --output python\smoke_test.png --timeout 10
+```
+
+For UART mode, use `--mode fx64`:
 
 ```bash
 python python\mandelbrot_host.py --mode fx64 --port COM6 --width 1 --height 1 --max-iter 256 --center 2.5 0.0 --step 0.001 --output python\smoke_test.png --timeout 10
@@ -515,7 +488,13 @@ Expected: the command completes quickly and the output image is a single pixel w
 
 ## Render Images
 
-Basic render (fixed-point mode):
+Basic render (DDR mode, default):
+
+```bash
+python python\mandelbrot_host.py --mode ddr --width 160 --height 120 --max-iter 256 --output python\mandelbrot_160x120.png
+```
+
+Basic render (UART mode):
 
 ```bash
 python python\mandelbrot_host.py --mode fx64 --width 160 --height 120 --max-iter 256 --output python\mandelbrot_160x120.png
@@ -524,7 +503,7 @@ python python\mandelbrot_host.py --mode fx64 --width 160 --height 120 --max-iter
 Render with an alternate color palette:
 
 ```bash
-python python\mandelbrot_host.py --mode fx64 --width 160 --height 120 --max-iter 256 --palette ocean --output python\mandelbrot_160x120_ocean.png
+python python\mandelbrot_host.py --mode ddr --width 160 --height 120 --max-iter 256 --palette ocean --output python\mandelbrot_160x120_ocean.png
 ```
 
 Available PNG/BMP palettes:
@@ -546,19 +525,25 @@ python python\mandelbrot_host.py --mode fx64 --verify --width 160 --height 120 -
 Fast 1080p transfer-heavy render:
 
 ```bash
-python python\mandelbrot_host.py --mode fx64 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 240 --output python\hw_1080p_fast_escape_i128_s0p002.png
+python python\mandelbrot_host.py --mode ddr --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 240 --output python\hw_1080p_fast_escape_i128_s0p002.png
 ```
 
 1080p standard Mandelbrot view:
 
 ```bash
-python python\mandelbrot_host.py --mode fx64 --width 1920 --height 1080 --max-iter 64 --center -0.5 0.0 --step 0.002 --timeout 240 --output python\hw_1080p_standard_i64_s0p002.png
+python python\mandelbrot_host.py --mode ddr --width 1920 --height 1080 --max-iter 64 --center -0.5 0.0 --step 0.002 --timeout 240 --output python\hw_1080p_standard_i64_s0p002.png
 ```
 
 1080p deep zoom example:
 
 ```bash
-python python\mandelbrot_host.py --mode fx64 --width 1920 --height 1080 --max-iter 1024 --center -0.743643887037151 0.13182590420533 --step 1e-8 --timeout 300 --output python\hw_1080p_deep_seahorse_i1024_s1e-8.png
+python python\mandelbrot_host.py --mode ddr --width 1920 --height 1080 --max-iter 1024 --center -0.743643887037151 0.13182590420533 --step 1e-8 --timeout 300 --output python\hw_1080p_deep_seahorse_i1024_s1e-8.png
+```
+
+1080p benchmark (compute + DDR write only, skip UART download):
+
+```bash
+python python\mandelbrot_host.py --mode ddr --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --compute-only --quiet
 ```
 
 ## Host CLI Options
@@ -572,14 +557,18 @@ python python\mandelbrot_host.py --mode fx64 --width 1920 --height 1080 --max-it
 --output PATH        Output image/text path. Default: mandelbrot.png
 --format FORMAT      png, bmp, or txt. Default: png
 --palette NAME       PNG/BMP palette: classic, fire, ocean, twilight, grayscale
---mode MODE          fx64, fp64, or fp128. Default: fx64
+--mode MODE          ddr (PL-PS DDR, default), fx64 (UART fixed-point)
 --verify             Also compute software reference and compare
 --port COMx          Serial port. Default: COM6
 --timeout SEC        Serial timeout. Default: 180.0
 --force-large-frame  Bypass host-side large-frame guards only for matching bitstreams
+--ddr-base ADDR      DDR base address for pixel buffer. Default: 0x10000000
+--compute-only       Skip the UART DDR download phase
+--download-retries N Retries per DDR tile UART download
+--download-timeout S UART timeout per DDR tile download
 ```
 
-The default `--mode` is `fx64` (fixed-point Q8.55), which matches the default bitstream (`build_fp64_fx24.tcl`). When using `--mode fx64`, the host packs `center_re`, `center_im`, and `step` as 64-bit signed Q8.55 fixed-point integers (same 8-byte field width as FP64). The `--verify` software reference uses the same fixed-point arithmetic for bit-exact comparison. Use `--mode fp64` only when an FP64 bitstream (`build_fp64.tcl`) is programmed.
+The default `--mode` is `ddr`, which matches the default `build.tcl` bitstream. The host first sends `COMPUTE_TILE` commands; the FPGA writes each tile into aligned PS DDR slots and reports an XOR16 checksum. The host then sends `ENTER_DOWNLOAD(base, rows, cols)` for each tile; the FPGA reads DDR and returns the existing `RT/TD/TE` UART stream. The host verifies both per-`TD` UART checksums and the end-to-end XOR16 before stitching the image. Use `--compute-only` to benchmark compute + DDR write without downloading pixels. Use `--mode fx64` for the UART-only bitstream (`build_fp64_fx24.tcl`).
 
 ## Useful Test Commands
 
@@ -671,9 +660,9 @@ sequenceDiagram
 
 ## Performance Notes
 
-### Current Recommended Mode: Host-Tiled 12 Mbaud
+### UART Alternative Mode: Host-Tiled 12 Mbaud
 
-The current reliable high-baud operating mode is host-driven tiling at 12000000 baud, and the host enables it by default. If no tile arguments are supplied, the host selects full-width host stripes with a default height of 120 rows, `--tile-retries 3`, and a per-read tile receive timeout of 5 seconds. By default the hardware compute tile height equals the host tile height, and the compute width is capped at 2048 columns. This keeps 1080p at one `1920x120` compute tile per stripe, while a `4096x120` host stripe is automatically split into two `2048x120` compute tiles. The RTL splits each compute response by height with `RESPONSE_TILE_ROW_SPLITS=8`, so a 1080p `1920x120` compute tile becomes eight full-width `1920x15` retry tiles with independent checksums. The recommended 1080p setting is automatic for a 1920-wide image: `--tile-width 1920 --tile-height 120 --tile-retries 3 --quiet`.
+This subsection describes the UART-only `--mode fx64` alternative. Its reliable high-baud operating mode is host-driven tiling at 12000000 baud. DDR mode also uses full-width 120-row compute/download tiles by default, but retries a failed UART download directly from DDR instead of recomputing the tile.
 
 Example:
 
@@ -704,7 +693,7 @@ The tiled receive path reads UART data in protocol order, but checksum and pixel
 You can also issue a reset manually:
 
 ```powershell
-python python\mandelbrot_host.py --port COM6 --soft-reset
+python python\mandelbrot_host.py --mode fx64 --port COM6 --soft-reset
 ```
 
 ### Six-Scene 1080p Benchmark
@@ -720,18 +709,22 @@ python python\mandelbrot_host.py --port COM6 --soft-reset
 | Deep mini-brot @8192 | `9.166s / 226k pps` | `5.091s / 407k pps` | **`1.80x`** | Compute-bound |
 | Deep Seahorse @1024 | `4.575s / 455k pps` | `4.074s / 509k pps` | `1.12x` | Mixed |
 
-#### PL-PS DDR Mode (fx64 22w, AXI HP0, `build_mandelbrot_with_ram.tcl`)
+#### PL-PS DDR Mode End-to-End Results (fx64 22w, AXI HPC0, `build.tcl`)
 
-| Scene | UART fx64 24w | PL-PS DDR 22w | Speedup vs UART | Speedup vs FP64 |
-|---|---:|---:|---:|---:|
-| Fast escape @128 | `3.733s` | **`0.219s / 9476k pps`** | **`17.1x`** | `17.1x` |
-| Standard @64 | `3.816s` | **`0.224s / 9251k pps`** | **`17.0x`** | `17.0x` |
-| Seahorse @512 | `3.964s` | **`1.072s / 1934k pps`** | **`3.7x`** | `3.7x` |
-| Deep tendrils @8192 | `3.994s` | **`1.937s / 1071k pps`** | **`2.1x`** | `2.1x` |
-| Deep mini-brot @8192 | `9.192s` | **`5.090s / 407k pps`** | **`1.8x`** | `1.8x` |
-| Deep Seahorse @1024 | `4.575s` | **`2.289s / 906k pps`** | **`2.0x`** | `2.0x` |
+The old UART design pipelines compute and transfer per tile (total ≈ max(compute, transfer)). The DDR design separates them into two sequential phases: compute → DDR write, then DDR → UART download (total = compute + download).
 
-PL-PS DDR mode eliminates the UART bottleneck: pixels go to PS DDR4 at ~500 MB/s, UART only carries ~50 bytes of command/ACK per tile. Shallow scenes accelerate **17×** (3.7s → 0.22s). Deep scenes still limited by compute (22 workers vs 24 in UART mode).
+| Scene | Old UART 24w (s) | DDR Compute (s) | DDR Download (s) | DDR Total (s) | E2E Speedup |
+|---|---:|---:|---:|---:|---:|
+| Fast escape @128 | `3.733` | `0.221` | `4.369` | `4.590` | `0.81x` |
+| Standard @64 | `3.727` | `0.223` | `4.373` | `4.596` | `0.81x` |
+| Seahorse @512 | `3.882` | `1.086` | `5.009` | `6.095` | `0.64x` |
+| Deep tendrils @8192 | `5.029` | `1.950` | `5.002` | `6.952` | `0.72x` |
+| Deep mini-brot @8192 | `5.091` | `5.104` | `4.418` | `9.522` | `0.53x` |
+| Deep Seahorse @1024 | `4.074` | `2.254` | `4.406` | `6.660` | `0.61x` |
+
+Download times include 12 Mbaud byte-slip retry overhead. Pure download without retries is ~3.8s.
+
+End-to-end DDR mode is slower than UART because compute and download are sequential (not overlapped). The DDR design's value is compute-stage acceleration (1.8-17x without UART backpressure), lossless retry from DDR, and a clear path to PS-side push (Ethernet/USB) that would reduce download from ~4.4s to <0.1s.
 
 Major architecture performance stages:
 
@@ -740,24 +733,22 @@ Major architecture performance stages:
 | Historical 576k, 4-worker 1ctx | Early UART-bound baseline | `72.736s` | `234.231s` |
 | 12M single-burst, 4-worker 2ctx | High baud, monolithic response | `4.678s` | `83.428s` |
 | 7K70T 6-worker 4ctx direct 200MHz | Timing-fixed worker scaling | `4.641s` | `20.963s` |
-| ZU4EV 12-worker 8ctx FP64 direct 200MHz | FP64 10-run mean | `3.821s` | `9.166s` |
 | ZU4EV 24-worker 4ctx fx64 direct 200MHz | Fixed-point UART | `3.733s` | **`5.091s`** |
-| **ZU4EV 22-worker 4ctx fx64 PL-PS DDR** | **AXI HP0 to PS DDR4** | **`0.219s`** | **`5.090s`** |
+| **ZU4EV 22w 4ctx fx64 PL-PS DDR (compute-only)** | **AXI write to DDR** | **0.221s** | **5.104s** |
+| **ZU4EV 22w 4ctx fx64 PL-PS DDR (end-to-end)** | **DDR + UART download** | **4.590s** | **9.522s** |
 
 Detailed design review, phase reports, and the fixed-point redesign study are in [REDESIGN_STUDY_REPORT.md](doc/REDESIGN_STUDY_REPORT.md). Historical ZU4EV FP64 optimization data is in [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](doc/VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md).
 
-### Resource Comparison
+### DDR Resource Utilization
 
-| Resource | FP64 12w/8ctx (historical) | FX 24w/4ctx (current) | Change |
-|---|---:|---:|---|
-| CLB LUTs | 85,698 (97.56%) | 83,731 (95.32%) | Same budget, **2× workers** |
-| LUT as Logic | 82,686 (94.13%) | 79,571 (90.59%) | −3,115 |
-| DSP48E2 | 123 (16.9%) | 483 (66.3%) | +360 (64×64 multiplies) |
-| Block RAM Tile | 25.5 (19.9%) | 33 (25.8%) | +7.5 (more worker FIFOs) |
-| CLB Registers | 71,453 (40.7%) | 76,116 (43.3%) | +4,663 |
-| WNS | 0.103ns | 0.078ns | Better timing margin |
+Latest routed utilization for the default fx64 22-worker PL-PS DDR build (`build.tcl`):
 
-The fixed-point design shifts resource utilization from LUT-dominated (94% LUT, 17% DSP) to a more balanced profile (91% LUT-as-logic, 66% DSP), doubling the worker count within the same LUT budget.
+| Resource | Used | Device | Utilization |
+|---|---:|---:|---:|
+| CLB LUTs | 86,450 | 87,840 | 98.42% |
+| CLB Registers | 73,894 | 175,680 | 42.06% |
+| DSP48E2 | 445 | 728 | 61.13% |
+| Block RAM Tile | 46 | 128 | 35.94% |
 
 ### Baudrate Investigation
 
@@ -767,9 +758,7 @@ Detailed reports: [UART_BAUDRATE_INVESTIGATION.md](doc/UART_BAUDRATE_INVESTIGATI
 
 ### HW/SW Boundary Differences
 
-The FP64 engine uses truncation-rounding (round-toward-zero) while the Python software reference uses IEEE 754 round-to-nearest-even. This causes small pixel-level differences near the Mandelbrot set boundary where chaotic dynamics amplify sub-ULP errors across iterations. These differences are not a bug and do not affect visual image quality.
-
-The fixed-point (fx64) engine uses truncation in the multiplier (`>> FX_FRAC`), which matches the fx64 software reference exactly. In precision validation, Q8.55 fixed-point matches FP64 pixel-for-pixel at 100% on all six standard benchmark scenes, and provides finer resolution (2^-55 vs FP64's 2^-52).
+The fixed-point (fx64) engine uses truncation in the multiplier (`>> FX_FRAC`), which matches the fx64 software reference exactly. Q8.55 fixed-point provides resolution of 2^-55 ≈ 2.8e-17. In precision validation, all six standard benchmark scenes match the software reference pixel-for-pixel at 100%.
 
 Detailed report: [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](doc/FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md).
 
@@ -777,17 +766,8 @@ Current ZU4EV direct-200MHz routed timing:
 
 | Build | Mode | Workers | Contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|---:|
+| `build.tcl` | fx64 DDR-to-UART | 22 | 4 | `0.114ns` | `0.000ns` | `0.011ns` | `0.000ns` |
 | `build_fp64_fx24.tcl` | fx64 | 24 | 4 | `0.078ns` | `0.000ns` | `0.011ns` | `0.000ns` |
-| `build_fp64.tcl` (historical) | FP64 | 12 | 8 | `0.148ns` | `0.000ns` | `0.010ns` | `0.000ns` |
-
-Latest routed utilization for the ZU4EV default fixed-point 24-worker, 4-context build:
-
-| Resource | Used | Device | Utilization |
-|---|---:|---:|---:|
-| CLB LUTs | 83,731 | 87,840 | 95.32% |
-| CLB Registers | 76,116 | 175,680 | 43.33% |
-| DSP48E2 | 483 | 728 | 66.35% |
-| Block RAM Tile | 33 | 128 | 25.78% |
 
 ## Troubleshooting
 
@@ -804,7 +784,7 @@ Common causes:
 - Wrong serial port.
 - Board needs reprogramming after a failed test.
 - `test_esc.py` or another process still owns the port.
-- `--mode` does not match the programmed bitstream. The default is `fx64` (fixed-point); use `--mode fp64` only when an FP64 bitstream is programmed.
+- `--mode` does not match the programmed bitstream. The Host default is `ddr`; use `--mode fx64` for `build_fp64_fx24.tcl`.
 
 ### Bad Or Incomplete Image
 

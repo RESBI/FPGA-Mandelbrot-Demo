@@ -1309,3 +1309,184 @@ Build scripts:
 3. Add small retry-tile cache (~2-4 BRAM36)
 4. Run 6-scene benchmark
 5. Implement PS-side push (Ethernet/USB) for download phase
+
+---
+
+## Chapter: PL-PS DDR to UART Download — Completing the Data Path
+
+### Background
+
+The PL-PS DDR design (previous chapter) closed the compute→DDR write path but stopped short of returning pixels to the host. Pixels were written to PS DDR4 by `axi_ddr_writer`, but the only readback mechanism was XSDB/JTAG memory dumps over USB — fine for verification, unusable for production. The end-to-end loop was broken: a host command could trigger a compute, but could not fetch the result without a debugger attached.
+
+The goal of this stage was to complete the data path: read pixels back from PS DDR via a PL-side AXI master and stream them to the host over the existing UART. This reuses the verified UART transport and protocol while keeping the high-throughput AXI write path for compute results.
+
+### Design
+
+The download path is the mirror of the write path:
+
+```mermaid
+flowchart LR
+    PSDDR[PS DDR4] --> HP[AXI HP0 FPD]
+    HP --> SmartConn[SmartConnect]
+    SmartConn --> Reader[axi_ddr_reader]
+    Reader --> BeatFIFO[16-entry beat FIFO]
+    BeatFIFO --> Serial[Lane serializer]
+    Serial --> TXArb[UART TX arbiter]
+    TXArb --> TXC[tx_ctrl]
+    TXC --> UART[UART TX]
+    UART --> PC[Python Host]
+```
+
+`axi_ddr_reader` is an AXI4 AR/R master that issues fixed-length bursts against PS DDR. Each 64-bit beat carries four packed uint16 pixels; a lane serializer splits them out in raster order. A 16-entry beat FIFO decouples the AXI burst rate from the much slower UART consumption rate. `top_with_ram.v` adds a download controller FSM and a TX arbiter that multiplexes between `cmd_parser_v2` (ACK/TILE_DONE frames) and `tx_ctrl` (pixel stream).
+
+### New And Modified RTL
+
+#### `axi_ddr_reader.v` (new)
+
+AXI4 AR/R master, 64-bit data width.
+
+- Issues `ARLEN+1` beat bursts, walking `araddr` across the tile's DDR footprint
+- Splits each 64-bit beat into four uint16 pixels via a lane serializer (lanes 0→3 in little-endian order)
+- 16-entry beat FIFO decouples AXI burst timing from UART consumption
+- Handles 4KB burst-boundary crossing by splitting a tile into multiple AXI bursts
+- Handles partial last beat when `pixels × 2` is not a multiple of 8 bytes (trailing lanes discarded)
+
+#### `top_with_ram.v` (modified)
+
+- Added AXI AR/R port wiring from SmartConnect `M_AXI` to `axi_ddr_reader`
+- Added download controller FSM:
+  - `download_pending` — `ENTER_DOWNLOAD` latched, wait for reader idle
+  - `download_active` — reader running, UART TX arbiter routes pixels through `tx_ctrl`
+  - `download_finish_pending` — reader done, send `TILE_DONE` frame via `cmd_parser_v2`
+- Added UART TX arbiter between `cmd_parser_v2` (control frames) and `tx_ctrl` (pixel data); control frames have priority
+
+#### `cmd_parser_v2.v` (modified)
+
+- `ENTER_DOWNLOAD` payload widened from 4 bytes to 12 bytes: `ddr_base` (u64) + `rows` (u16) + `cols` (u16)
+- Added `busy` validation: reject `ENTER_DOWNLOAD` while download FSM is active
+- Added alignment validation: `ddr_base` must be 8-byte aligned; `rows`/`cols` must be non-zero
+- `TILE_DONE` frame widened to 4 bytes: `xor16` (u16) + `status` (u8) + `reserved` (u8)
+
+#### `axi_ddr_writer.v` (modified)
+
+- Added explicit `ST_AW` state separate from `ST_DATA` to prevent duplicate `AWVALID` assertion
+- Added `ST_READ_WAIT` state to align synchronous-FIFO read timing (one-cycle settle before sampling `fifo_rd_data`)
+- Added BRESP error checking: latch `bresp != OKAY` into a sticky error flag surfaced via the `TILE_DONE` status byte
+
+### Bugs Found And Fixed
+
+| Bug | Symptom | Root Cause | Fix |
+|---|---|---|---|
+| AXI AW duplicate submission | SmartConnect accepted duplicate address transactions; DDR footprint overran into next tile | Writer re-asserted `AWVALID` while waiting for the first pixel from the FIFO, before `AWREADY` had been observed | Added explicit `ST_AW` state; `AWVALID` is held for exactly one `AWREADY` handshake, then deasserted before entering `ST_DATA` |
+| Synchronous FIFO read timing | First pixel of each tile was stale (zero or previous-tile residue) | Writer sampled `fifo_rd_data` the same cycle as `rd_en`, but the FIFO output is registered one cycle later | Added `ST_READ_WAIT` state: assert `rd_en`, wait one cycle, then sample `fifo_rd_data` on the next cycle |
+| Host DDR slot overlap | Intermittent pixel corruption on multi-tile runs | Host packed tile addresses tightly (`base + tile_index × pixel_bytes`), but the writer pads each tile up to a 128-byte burst boundary, so tile *N*'s padding overwrote tile *N+1*'s first pixels | Host now reserves `ceil(pixel_bytes, 128)` per tile slot; tile base addresses are 128-byte aligned and non-overlapping |
+
+### Board Test Results
+
+#### Correctness
+
+| Frame | Tiles | Result |
+|---|---|---|
+| 4×4 | 1 | 100% software match |
+| 160×120 | 1 | 100% software match |
+| 161×121 (9-tile edge/padding) | 9 | 100% software match |
+| 1920×1080 | 108 | 100% software match |
+
+#### Performance
+
+The old UART design pipelines compute and transfer per tile: while `tx_ctrl` sends tile *N*'s pixels over UART, the multicore computes tile *N+1*. Total time ≈ max(compute, transfer) per tile, and UART transfer dominates shallow scenes.
+
+The DDR design separates the flow into two sequential phases: (1) compute all tiles and write to DDR, (2) download all tiles from DDR via UART. Total = compute + download (not overlapped).
+
+| Scene | Old UART 24w (s) | DDR Compute (s) | DDR Download (s) | DDR Total (s) | E2E Speedup |
+|---|---:|---:|---:|---:|---:|
+| Fast escape @128 | 3.733 | 0.221 | 4.369 | 4.590 | 0.81× |
+| Standard @64 | 3.727 | 0.223 | 4.373 | 4.596 | 0.81× |
+| Seahorse @512 | 3.882 | 1.086 | 5.009 | 6.095 | 0.64× |
+| Deep tendrils @8192 | 5.029 | 1.950 | 5.002 | 6.952 | 0.72× |
+| Deep mini-brot @8192 | 5.091 | 5.104 | 4.418 | 9.522 | 0.53× |
+| Deep Seahorse @1024 | 4.074 | 2.254 | 4.406 | 6.660 | 0.61× |
+
+Download times include 12 Mbaud byte-slip retry overhead; pure download without retries is ~3.8s.
+
+End-to-end DDR mode is slower than UART because compute and download are sequential. The old design's 3.733s for fast escape includes overlapped compute+transfer — the transfer alone is ~3.5s, and compute is hidden inside it. The DDR design's 0.221s compute is genuinely faster (no UART backpressure), but the 4.4s download is additive, making the total 4.6s.
+
+The DDR design's value is compute-stage acceleration (1.8-17× without UART backpressure), lossless retry from DDR, and a clear path to PS-side push. With PS Ethernet/USB push replacing UART download (~4.4s → <0.1s), end-to-end would be 0.3s for fast escape (12× vs old 3.7s) and 5.2s for deep minibrot (comparable to old 5.1s, compute-dominated).
+
+#### UART Framing Slip Recovery
+
+When a host-side UART framing slip corrupts the pixel stream, the recovery flow is:
+
+1. Host detects slip (length mismatch or checksum failure on a tile segment)
+2. Host drains the stale stream until line idle
+3. Host re-issues `ENTER_DOWNLOAD` for the affected tile — pixels are re-read from DDR without recompute
+4. Reader restarts from `ddr_base`; no compute resources are touched
+
+This works because pixels persist in DDR until overwritten. The cost of a slip is a re-download (~35 ms/tile at 1080p width), not a recompute.
+
+### Final Resources
+
+| Resource | Value | Utilization |
+|---|---|---|
+| CLB LUTs | 86,450 | 98.42% |
+| CLB Registers | 73,894 | — |
+| DSP48E2 | 445 | — |
+| Block RAM | 46 | — |
+| WNS | 0.114 ns | — |
+
+LUT utilization is at 98.42%, essentially saturating the device. The reader, download FSM, and TX arbiter added roughly 1,500 LUT over the previous PL-PS DDR build.
+
+### Retry Tile Analysis
+
+A full-tile BRAM cache — storing the last computed tile so retries can be served from PL without a DDR round-trip — is infeasible: one 1920×120 tile at 16 bits/pixel is ~450 KB, requiring ~100 BRAM36, already over the 128 device limit before counting any other block.
+
+Current approach: retry the whole tile from DDR. The host re-issues `ENTER_DOWNLOAD`, `axi_ddr_reader` re-reads the tile, and pixels are re-streamed over UART. This costs a full UART download per retry but requires no extra BRAM.
+
+Future direction: a per-row-slice BRAM cache. Instead of caching whole tiles, cache a small rolling window of row slices (e.g., 8 rows × 1920 pixels × 2 bytes = 30 KB ≈ 13 BRAM36). A new `RETRY_TILE` command would specify a row range; the reader serves cached slices from BRAM and only fetches evicted slices from DDR. This fits comfortably in the BRAM budget and cuts retry latency by an order of magnitude on partial-tile failures.
+
+### End-to-End Assessment
+
+#### Architecture Comparison: Overlapped Pipeline vs Compute-Transport Separation
+
+The project has gone through three transport architectures:
+
+| Era | Architecture | Compute-Transport Relationship | Shallow Scene | Deep Scene |
+|---|---|---|---|---|
+| UART 24w (baseline) | Compute + UART transfer per tile, overlapped | total ≈ max(compute, transfer) per tile | 3.7s (transfer-bound) | 5.1s (compute-bound) |
+| DDR compute-only (intermediate) | Compute → DDR write, no download | compute only, no E2E | 0.22s (17× compute) | 5.1s (1.8× compute) |
+| DDR E2E (current) | Compute → DDR → UART download, sequential | total = compute + download | 4.6s (0.81× E2E) | 9.5s (0.53× E2E) |
+
+#### Why E2E Is Currently Slower
+
+The old UART design pipelines compute and transfer at tile granularity: while `tx_ctrl` sends tile *N*'s pixels, the multicore computes tile *N+1*. For shallow scenes where compute is fast (0.025s/tile) and transfer dominates (0.42s/tile), the total is approximately *transfer_time × num_tiles* — compute is hidden.
+
+The DDR design separates the flow into two non-overlapping phases:
+1. All tiles compute and write to DDR (fast, no UART backpressure)
+2. All tiles download from DDR via UART (same UART bandwidth as old design)
+
+Since phase 2 uses the same 12 Mbaud UART, its duration is similar to the old design's total time. Phase 1 is additional, making the total longer.
+
+#### Advantages of the Separated Design
+
+Despite the current E2E regression, the compute-transport separation provides:
+
+1. **Compute profiling**: The compute stage runs at full worker speed without UART backpressure, enabling accurate performance measurement (1.8-17× faster than old compute-under-backpressure).
+
+2. **Lossless retry**: Pixels persist in DDR. A UART framing slip costs only a re-download (~0.42s/tile), not a recompute. The old design required recomputing the entire tile on any framing failure.
+
+3. **Transport agility**: The DDR storage and AXI read path are transport-agnostic. Replacing the UART download with a faster transport (PS Ethernet/USB) only changes the download phase, with no RTL modification needed.
+
+4. **Decoupled scaling**: Future compute improvements (more workers, fx128 precision) are independent of transport bandwidth. The old design's compute was capped by UART backpressure.
+
+5. **Large image support**: The old design's UART streaming required the entire image to fit in one continuous transfer. The DDR design stores arbitrary image sizes in DDR and downloads tile-by-tile.
+
+#### Future Plans
+
+| Upgrade | Expected E2E (fast escape) | Expected E2E (deep minibrot) | Effort |
+|---|---|---|---|
+| Current (UART download) | 4.6s | 9.5s | Done |
+| PS Ethernet push (~50 MB/s) | 0.22s + 0.08s ≈ **0.30s** | 5.10s + 0.08s ≈ **5.18s** | PS C program + GEM3 |
+| PS USB push (~40 MB/s) | 0.22s + 0.10s ≈ **0.32s** | 5.10s + 0.10s ≈ **5.20s** | PS C program + USB |
+| fx128 precision (future) | 2× compute ≈ 0.44s + 0.08s ≈ **0.52s** | 2× compute ≈ 10.2s + 0.08s ≈ **10.3s** | New RTL datapath |
+
+With PS-side push, the DDR architecture achieves 12× E2E speedup on shallow scenes and breaks even on deep scenes — while providing lossless retry and transport agility that the old UART pipeline cannot offer.

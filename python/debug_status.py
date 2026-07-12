@@ -39,16 +39,16 @@ def parse_debug(payload):
     cmd_state = payload[0] & 0xF
     flags = payload[1]
     compute_busy = (flags >> 7) & 1
-    compute_started = (flags >> 6) & 1
+    ddr_write_busy = (flags >> 6) & 1
     ddr_done = (flags >> 5) & 1
     tile_done_pend = (flags >> 4) & 1
     ack_pend = (flags >> 3) & 1
     fifo_rd_avail = (flags >> 2) & 1
     fifo_wr_avail = (flags >> 1) & 1
-    axi_p_sent = payload[2]
-    axi_p_total = payload[3]
-    axi_state = payload[4]
-    cmd_state_raw = payload[5]
+    axi_state = payload[2]
+    cmd_state_raw = payload[3]
+    axi_p_sent = payload[4]
+    axi_p_total = payload[5]
     checksum_lo = payload[6]
     checksum_hi = payload[7]
     ack_status = payload[8]
@@ -59,11 +59,12 @@ def parse_debug(payload):
         8: "TX_TYPE", 9: "TX_LEN", 10: "TX_PAY", 11: "TX_CSUM"
     }
     axi_state_names = {
-        0: "IDLE", 1: "GET", 2: "PACK", 3: "W", 4: "B", 5: "DONE"
+        0: "IDLE", 1: "AW", 2: "GET", 3: "READ_WAIT",
+        4: "PACK", 5: "W", 6: "B", 7: "DONE"
     }
 
     print(f"  cmd_state={cmd_state} ({state_names.get(cmd_state, '?')})")
-    print(f"  compute_busy={compute_busy} compute_started={compute_started}")
+    print(f"  compute_busy={compute_busy} ddr_write_busy={ddr_write_busy}")
     print(f"  ddr_done={ddr_done} tile_done_pending={tile_done_pend} ack_pending={ack_pend}")
     print(f"  fifo_rd_avail={fifo_rd_avail} fifo_wr_avail={fifo_wr_avail}")
     print(f"  axi_state={axi_state} ({axi_state_names.get(axi_state, '?')})")

@@ -1,10 +1,115 @@
 # Mandelbrot PL-PS DDR 加速器设计文档
 
-> 分支：`VMC_RTSB_zu4ev_newdesign_withRAM`。本设计在 fx64 定点 Mandelbrot 加速器基础上，引入 Zynq UltraScale+ EV PS 端 DDR 作为像素回传通道，替代 UART 流式传输，解除 ~600k pps 串口天花板。参考项目 `PL-PS-MEM-TEST` 的 PL-PS AXI HP 访问模式和空白启动流程。
+> 当前目标：计算阶段将像素流写入 PS DDR，下载阶段由 PL 通过 AXI 读回 DDR，再以现有 `RT/TD/TE` 格式经 UART 返回 Host。XSDB/JTAG 只负责初始化 PS DDR 和烧录 bitstream，不属于像素数据通路。
+>
+> **规范优先级**：第 0 章和第 13 章描述当前实现，是权威规范。第 1-12 章保留早期双缓冲提案作为设计演进记录；其中 `tile_cache_db`、`COMPUTE_DONE`、`ALL_DONE`、`RETRY_TILE`、自动遍历全部 tile 等内容未实现，与第 0/13 章冲突时以后者为准。
+
+## 0. 当前实现规范
+
+### 0.1 目标数据流
+
+```text
+计算阶段:
+Host UART COMPUTE_TILE
+  -> mandelbrot_multicore
+  -> 1024x16 output FIFO
+  -> axi_ddr_writer (AXI AW/W/B)
+  -> PS DDR
+  -> ACK + TILE_DONE
+
+下载阶段:
+Host UART ENTER_DOWNLOAD(base, rows, cols)
+  -> axi_ddr_reader (AXI AR/R)
+  -> 16x64-bit beat FIFO + 64-to-16 lane serializer
+  -> tx_ctrl
+  -> RT / TD / TE
+  -> UART
+  -> Host
+```
+
+计算阶段和 UART 下载阶段互斥。Host 对 compute tile 使用 stop-and-wait：收到 `ACK` 和 `TILE_DONE` 后才提交下一 tile。当前实现不使用完整 tile BRAM cache，不支持多个 outstanding compute 命令。
+
+### 0.2 当前控制协议
+
+控制帧统一为：
+
+```text
+55 AA TYPE LEN PAYLOAD CHECKSUM
+```
+
+校验规则：`TYPE + LEN + PAYLOAD + CHECKSUM == 0 (mod 256)`。
+
+| 方向 | Type | Len | Payload | 当前语义 |
+|---|---:|---:|---|---|
+| H->F | `0x10 COMPUTE_TILE` | 42 | `center_re(q8.55,s64) center_im(q8.55,s64) step(q8.55,s64) max_iter(u16) rows(u16) cols(u16) ddr_base(u64) tile_id(u32)` | 计算一个连续 row-major tile 并写 DDR |
+| H->F | `0x11 ENTER_DOWNLOAD` | 12 | `ddr_base(u64) rows(u16) cols(u16)` | 从指定 DDR tile 读出像素并立即发送一套 `RT/TD/TE` |
+| H->F | `0x02 QUERY_STATUS` | 0 | 无 | 返回调试状态 |
+| F->H | `0x81 ACK` | 1 | `status(u8)` | `0=OK, 1=BUSY, 2=BAD_ALIGN, 3=BAD_SIZE` |
+| F->H | `0x84 TILE_DONE` | 4 | `xor16(u16) status(u8) reserved(u8)` | AXI 写响应完成；`status=4` 表示 AXI 写错误 |
+| F->H | `0x90 DEBUG_STATUS` | 13 | 调试字段 | 非稳定应用接口 |
+
+`tile_id` 当前仅为 wire-format 保留字段，RTL 不回传该字段。Host 必须维持单 outstanding 命令，不能依赖 tile ID 做异步关联。
+
+### 0.3 UART 像素协议
+
+下载数据复用现有 `tx_ctrl`：
+
+```text
+RT rows(u16 LE) cols(u16 LE)
+
+TD row(u16 LE) col(u16 LE) tile_rows(u16 LE) tile_cols(u16 LE)
+   pixels(uint16 LE * tile_rows * tile_cols)
+   checksum(XOR8 of pixel bytes)
+
+TE rows(u16 LE) cols(u16 LE)
+```
+
+当前 `tx_ctrl` 只按行切分，每个 TD 必须满足 `col=0`、`tile_cols=frame_cols`，各 TD 的 row 范围连续且无重叠。Host 严格验证几何、每个 TD 的 XOR8，以及整个下载 tile 的 XOR16。
+
+### 0.4 DDR 地址和布局合同
+
+- `ddr_base` 是直接送到 AXI 的物理 byte address；RTL 不执行旧提案中的逻辑高地址转换。
+- 默认使用 DDR low 区 `0x10000000` 起始地址。
+- Host 将 DDR low 安全上限设为 `0x7FF00000`，避开 PS/PMU 保留的顶部 1 MiB。
+- compute/download tile 基址必须 128-byte 对齐。
+- writer 固定使用 16 beat x 8 byte = 128 byte burst；最后不足部分写零 padding。
+- Host 为每个 tile 分配 `slot_bytes = align_up(rows * cols * 2, 128)`，避免 padding 覆盖下一 tile。
+- 每个 AXI read burst受 4 KiB 边界限制；最后 64-bit beat 中无效的 16-bit lane 不发送到 UART。
+- 像素在 DDR 中为连续 row-major `uint16`，每个 64-bit beat 的 lane 顺序为 `[15:0]`、`[31:16]`、`[47:32]`、`[63:48]`。
+
+### 0.5 正确性检查
+
+- 控制帧：8-bit 二补数累加 checksum。
+- UART TD：像素字节 XOR8。
+- `TILE_DONE`：writer 输入像素流 XOR16。
+- Host 下载完整 DDR tile 后重新计算 XOR16，并与 `TILE_DONE` 对比，覆盖计算输出、DDR 写入、DDR 读取和 UART 回传的端到端路径。
+- writer 检查 `BRESP`；reader 检查 `RRESP` 和 `RLAST`。AXI read error 会终止当前下载，Host 不将不完整数据作为有效图像。
+
+### 0.6 当前模块
+
+| 文件 | 当前职责 |
+|---|---|
+| `rtl/top_with_ram.v` | DDR 顶层、UART 所有权切换、compute/download 阶段控制 |
+| `rtl/axi_ddr_writer.v` | output FIFO -> AXI AW/W/B，固定 128-byte burst |
+| `rtl/axi_ddr_reader.v` | AXI AR/R -> beat FIFO -> uint16 像素接口 |
+| `rtl/cmd_parser_v2.v` | DDR 控制帧、ACK、TILE_DONE、状态查询 |
+| `rtl/tx_ctrl.v` | DDR 下载阶段生成 `RT/TD/TE` |
+| `python/mandelbrot_host.py` | tile 地址规划、计算命令、UART DDR 下载、checksum 和图像拼接 |
+
+### 0.7 当前不支持的旧提案功能
+
+- 完整 tile 双 BRAM 乒乓缓存。
+- `COMPUTE_DONE` 与 DDR 写入异步流水。
+- `ALL_DONE` 自动下载清单。
+- `RETRY_TILE` BRAM cache 重发。
+- RTL 内逻辑低/高 DDR 地址映射。
+- PS 端 Ethernet/USB 推送程序。
 
 ---
 
 ## 1. 背景与动机
+
+> 本章至第 12 章为早期提案和历史分析，不是当前 wire protocol 或 RTL 合同。当前实现请先阅读第 0 章和第 13 章。
 
 ### 1.1 当前瓶颈
 
@@ -907,19 +1012,24 @@ LUT 增量 ~2.5K（98.1%，接近满但可容纳），BRAM 增量 ~26 块（46.1
 | `ddr_write_done` 被 `compute_started` 门控 | AXI writer 可能在 multicore 声明 merge_done 前完成，导致 TILE_DONE 丢失 | 移除 `~compute_started` 门控 |
 | X_INTERFACE_INFO 缺失 | BD 无法识别 top_with_ram 的 AXI 接口 | 为所有 AXI 信号添加 `(* X_INTERFACE_INFO = "..." *)` 属性 |
 | PS AXI 时钟未连接 | `maxihpm0_lpd_aclk` 等时钟引脚悬空 | 构建脚本连接所有可能的 PS AXI 时钟引脚 |
+| output FIFO 同步读延迟 | writer 在发出 `fifo_rd_en` 后过早采样 `fifo_rd_data`，首像素可能使用旧值 | 增加显式 `ST_READ_WAIT` 状态 |
+| AXI AW 重复提交 | 等待第一个像素期间反复拉高相同 `AWVALID`，SmartConnect 接收多个重复地址事务，后续 W burst 与错误 AW 配对 | 增加独立 `ST_AW`，每个 128-byte burst 只允许一次 AW 握手；65 像素双 burst testbench 验证 |
+| Host DDR 地址槽重叠 | tile 地址按有效字节紧邻分配，writer 尾部 128-byte padding 可覆盖下一 tile | Host 使用 `align_up(rows*cols*2, 128)` 分配物理槽 |
+| 12 Mbaud 长流 byte slip | 大图某个 `RT/TD/TE` 下载可能失去 framing | Host 排空旧下载流后，对相同 DDR tile 重发 `ENTER_DOWNLOAD`，无需重算 |
 
 ### 13.3 当前验证状态
 
 | 验证项 | 结果 | 详情 |
 |---|---|---|
-| Vivado 综合 + 实现 | ✅ PASS | 22 worker, LUT 84,881 (96.63%), WNS=0.134ns, DSP 442, BRAM 46 |
+| Vivado 综合 + 实现 | ✅ PASS | 22 worker, LUT 86,450 (98.42%), registers 73,894, WNS=0.114ns, WHS=0.011ns, DSP 445, BRAM 46 |
 | JTAG 空白启动 | ✅ PASS | `psu_init` 初始化 PS DDR（DEADBEEF 验证），bitstream 烧录成功 |
 | UART ACK 响应 | ✅ PASS | COMPUTE_TILE 命令接收后 0.011s 内返回 ACK (type=0x81, status=0) |
-| Mandelbrot 计算 | ✅ PASS | 4×4 tile 正确计算（所有像素 iter=256，符合 -0.5 中心点预期） |
-| AXI DDR 写入 | ✅ PASS | JTAG 读取 DDR @0x10000000 确认 16 beats（128 bytes）全部写入，数据正确（0x01000100 = 4×iter256） |
-| TILE_DONE 通知 | ✅ PASS | 4×4 tile 在 0.011s 内收到 TILE_DONE (type=0x84, checksum=0x0100) |
-| 160×120 tile | ✅ PASS | 19200 像素在 0.025s 内完成计算+DDR写入+TILE_DONE |
-| 六场景基准测试 | ✅ PASS | 全部 6 场景通过，见 13.9 |
+| Mandelbrot 计算 | ✅ PASS | 4×4、160×120、161×121 edge-tiled 和 1920×1080 均完成 |
+| AXI DDR 写入 | ✅ PASS | writer 单元测试覆盖同步 FIFO、65 像素双 burst、AW 地址唯一性、尾部 padding；板级 checksum 与下载数据一致 |
+| AXI DDR 读取 | ✅ PASS | reader 单元测试覆盖 1/3/4/5/63/64/65/129 像素、16-bit lane 顺序和 4 KiB burst 边界 |
+| UART DDR 回传 | ✅ PASS | 4×4 为 16/16，160×120 为 19200/19200，161×121 九 tile 为 19481/19481，1080p 为 2073600/2073600 软件匹配 |
+| 1080p 时序 | ✅ PASS | fast escape：compute + DDR write 0.221s；无重试 UART download 3.779s |
+| UART 重传 | ✅ PASS | 1080p 验证中注入/遇到 framing slip 后排空旧流并从 DDR 重读同一 tile，最终 100% 匹配 |
 
 ### 13.4 UART Debug 模式
 
@@ -928,8 +1038,8 @@ LUT 增量 ~2.5K（98.1%，接近满但可容纳），BRAM 增量 ~26 块（46.1
 | Byte | 字段 | 说明 |
 |---|---|---|
 | 0 | cmd_state | cmd_parser_v2 状态机当前状态 (0-11) |
-| 1 | flags | {compute_busy, compute_started, ddr_write_done, tile_done_pending, ack_pending, fifo_rd_avail, fifo_wr_avail, done_sticky} |
-| 2 | axi_state | axi_ddr_writer 状态机 (0=IDLE,1=GET,2=PACK,3=W,4=B,5=DONE) |
+| 1 | flags | {compute_busy, ddr_write_busy, ddr_write_done, tile_done_pending, ack_pending, fifo_rd_avail, fifo_wr_avail, done_sticky} |
+| 2 | axi_state | axi_ddr_writer 状态机 (0=IDLE,1=AW,2=GET,3=READ_WAIT,4=PACK,5=W,6=B,7=DONE) |
 | 3 | cmd_state_raw | cmd_parser_v2 状态机原始值 |
 | 4 | p_sent_lo | AXI writer 已发送像素数 (低 8 位) |
 | 5 | p_total_lo | AXI writer 总像素数 (低 8 位) |
@@ -943,7 +1053,7 @@ LUT 增量 ~2.5K（98.1%，接近满但可容纳），BRAM 增量 ~26 块（46.1
 
 **根因**：`done` 是 1 拍脉冲，但 `cmd_parser_v2` 在发送 ACK 帧时处于 TX 状态，无法捕获该脉冲。
 
-**修复**：将 `done` 改为 `done_sticky`（电平信号，保持高直到 `done_ack` 清除）。`cmd_parser_v2` 在 TILE_DONE 帧的 checksum 字节发送完后置 `done_ack=1`，清除 `done_sticky`。同时添加 `was_tile_done_tx` 标志防止 `done_sticky` 在 `done_ack` 生效前的 1 拍内重新触发 `tile_done_pending`。
+**修复**：增加 `done_sticky`（电平信号，保持高直到 `done_ack` 清除）。`cmd_parser_v2` 在 TILE_DONE 帧 checksum 字节发送完后置 `done_ack=1`，并用 `ddr_done_seen` 防止在清除握手完成前重复排队 TILE_DONE。
 
 ### 13.5 从流式到双缓冲的架构调整
 
@@ -973,37 +1083,107 @@ sequenceDiagram
     UART->>CMD: checksum byte sent
     CMD->>AXI: done_ack=1 (1-cycle pulse)
     AXI->>AXI: done_latched=0 (cleared)
-    CMD->>CMD: was_tile_done_tx prevents re-trigger until done_sticky=0
+    CMD->>CMD: ddr_done_seen prevents re-trigger until done_sticky=0
 ```
 
 ### 13.7 资源利用
 
 | 资源 | fx64 24w (UART baseline) | PL-PS DDR 22w | 变化 |
 |---|---|---|---|
-| CLB LUTs | 83,731 (95.32%) | 84,881 (96.63%) | +1,150 (AXI/PS infra) |
-| DSP48E2 | 483 (66.3%) | 442 (60.7%) | -41 (22 vs 24 workers) |
+| CLB LUTs | 83,731 (95.32%) | 86,450 (98.42%) | +2,719 (PS + AXI read/write + UART download) |
+| DSP48E2 | 483 (66.3%) | 445 (61.1%) | -38 (22 vs 24 workers; AXI infrastructure adds 3 DSP) |
 | Block RAM | 33 (25.8%) | 46 (35.9%) | +13 (PS infra) |
-| WNS | 0.078ns | 0.134ns | Slightly worse (AXI logic) |
+| WNS | 0.078ns | 0.114ns | Timing met at 200 MHz |
 
 ### 13.8 六场景基准测试结果
 
-| 场景 | UART 基线 (fx64 24w) | PL-PS DDR (fx64 22w) | 加速比 |
-|---|---|---|---|
-| fast escape @128 | 3.733s / 555k pps | **0.219s / 9476k pps** | **17.1×** |
-| standard @64 | 3.816s / 546k pps | **0.224s / 9251k pps** | **17.0×** |
-| Seahorse @512 | 3.964s / 525k pps | **1.072s / 1934k pps** | **3.7×** |
-| deep tendrils @8192 | 3.994s / 519k pps | **1.937s / 1071k pps** | **2.1×** |
-| deep minibrot @8192 | 9.192s / 226k pps | **5.090s / 407k pps** | **1.8×** |
-| deep Seahorse @1024 | 4.575s / 455k pps | **2.289s / 906k pps** | **2.0×** |
+#### 13.8.1 公平对比方法
 
-**关键发现**：
-- **浅场景加速 17×**：UART 不再阻塞计算。22 个 worker 全速计算，AXI DDR 写入（~500 MB/s）远快于像素产出，FIFO 几乎不满。
-- **深场景加速 1.8-2.1×**：计算仍为主要耗时，但因 worker 从 24 降至 22（为 AXI 基础设施腾出 LUT），提升幅度受限。
-- **总时间 = 纯计算时间**：UART 仅传 ~50 字节通知帧（ACK + TILE_DONE），传输时间可忽略。
+旧 UART 设计中，计算与传输在每个 tile 内流水重叠：multicore 计算当前 tile 的同时，`tx_ctrl` 经 UART 发送前一个 tile 的像素。因此旧设计的总时间 ≈ max(计算时间, 传输时间)，传输主导浅场景。
 
-### 13.9 下一步
+新 DDR 设计将流程分为两个串行阶段：
+1. **计算阶段**：所有 tile 依次计算并写入 DDR（无 UART 反压）
+2. **下载阶段**：所有 tile 依次从 DDR 读出并经 UART 回传
 
-1. **Worker 数恢复 24**：优化 AXI 控制逻辑 LUT，尝试恢复 24 worker
-2. **添加 retry cache**：实现小型 BRAM retry tile 缓存（~2-4 BRAM36）
-3. **PS 端推送**（方案 B）：实现 PS 端 C 程序通过 Ethernet/USB 推送 DDR 像素给 Host
-4. **回传阶段**：当前设计仅将像素写入 DDR，Host 需通过 JTAG 或 PS 端程序读取。后续可添加 FPGA 从 DDR 回读+UART 发送的回传路径
+因此新设计的总时间 = 计算时间 + 下载时间（不重叠）。
+
+#### 13.8.2 六场景端到端对比
+
+| 场景 | 旧 UART 24w (s) | DDR 计算 (s) | DDR 下载 (s) | DDR 合计 (s) | 端到端加速比 |
+|---|---|---|---|---|---|
+| fast escape @128 | 3.733 | 0.221 | 4.369 | 4.590 | 0.81× |
+| standard @64 | 3.727 | 0.223 | 4.373 | 4.596 | 0.81× |
+| Seahorse @512 | 3.882 | 1.086 | 5.009 | 6.095 | 0.64× |
+| deep tendrils @8192 | 5.029 | 1.950 | 5.002 | 6.952 | 0.72× |
+| deep minibrot @8192 | 5.091 | 5.104 | 4.418 | 9.522 | 0.53× |
+| deep Seahorse @1024 | 4.074 | 2.254 | 4.406 | 6.660 | 0.61× |
+
+> 下载时间含 12 Mbaud 偶发 byte slip 的重传开销。无重传时纯下载约 3.8s（9 tile × ~0.42s）。
+
+#### 13.8.3 分析
+
+**端到端反而变慢的原因**：
+
+旧设计每个 tile 的计算与 UART 传输流水重叠。以 fast escape 为例：
+- 旧设计：9 tile × max(计算~0.025s, 传输~0.42s) ≈ 9 × 0.42s ≈ 3.8s（传输主导）
+- 新设计：计算 0.22s + 下载 4.4s = 4.6s（串行，不重叠）
+
+新设计的计算阶段虽然 17× 更快（0.22s vs 旧设计受 UART 反压的等效计算时间），但下载阶段额外增加了 ~4.4s，而旧设计中这部分时间被计算流水隐藏了。
+
+**DDR 模式的核心价值**：
+
+1. **计算解耦**：计算阶段不受 UART 反压，22 个 worker 全速运行，适用于计算 profiling 和 benchmark。
+2. **无损重传**：像素保存在 DDR 中，UART 下载失败可从 DDR 重读，无需重算。旧设计中 UART framing 失败需要重算整个 compute tile。
+3. **未来高速通道**：一旦实现 PS 端 Ethernet/USB 推送（方案 B），下载时间从 ~4.4s 降至 <0.1s，端到端将获得完整加速。届时：
+   - fast escape: 0.22s + 0.08s ≈ **0.30s**（vs 旧 3.73s，**12×**）
+   - deep minibrot: 5.10s + 0.08s ≈ **5.18s**（vs 旧 5.09s，持平，计算主导）
+
+#### 13.8.4 端到端正确性验证
+
+| 测试 | 像素匹配 | 说明 |
+|---|---|---|
+| 4×4 | 16/16 (100%) | 单 burst、最小 tile |
+| 160×120 | 19200/19200 (100%) | 多 burst、128-byte 对齐 |
+| 161×121 (9 tile) | 19481/19481 (100%) | 边缘 tile、padding、多 DDR slot |
+| 1920×1080 fast escape | 2073600/2073600 (100%) | 9 tile、含一次 DDR 重传 |
+| 1920×1080 deep minibrot | 完整图像输出 | 9 tile、含一次 DDR 重传 |
+
+### 13.9 Retry Tile 设计分析
+
+#### 13.9.1 理想设计
+
+理想 retry 流程：Host 请求一个 compute tile → DDR 读入 FIFO → UART 分块回传 → Host 检查每个 TD 的 XOR8 checksum → 若某个 TD 失败，FPGA 从 FIFO 中仅重传该 TD 对应的行切片。
+
+这要求 FPGA 在下载阶段保留完整 tile 数据在 BRAM FIFO 中，支持按行范围重读。
+
+#### 13.9.2 BRAM 可行性分析
+
+一个 1920×120 tile = 460,800 字节。以 BRAM36（4.5 KiB）计，需要 ~100 块。器件仅有 128 块 BRAM，且已有 46 块被 PS 基础设施和 worker FIFO 占用。完整 tile BRAM 缓存不可行。
+
+`tx_ctrl` 的 `RESPONSE_TILE_ROW_SPLITS=8` 将 tile 切成 8 个行切片（每个 1920×15 = 57,600 字节 ≈ 13 BRAM36）。缓存单个行切片需要 ~13 块 BRAM36，仍有余量，但需要额外的 retry 命令协议和 BRAM 控制器。
+
+#### 13.9.3 当前实现
+
+当前采用**整 tile 从 DDR 重传**策略：
+- DDR 中保留了完整 tile 数据（不受 BRAM 限制）。
+- 若某个 TD 的 XOR8 失败或 UART framing 失败，Host 排空旧下载流后，对相同 DDR 地址重发 `ENTER_DOWNLOAD`。
+- FPGA 从 DDR 重新读取完整 tile，不重算。
+- 这避免了重算开销，同时不需要额外 BRAM。
+
+**代价**：重传整个 tile（~0.42s/tile @ 12 Mbaud），而非仅重传失败的行切片（~0.05s）。在 12 Mbaud 偶发 byte slip 场景下，这是可接受的折中。
+
+#### 13.9.4 未来改进
+
+若需局部 retry，可增加一个 ~13 BRAM36 的行切片缓存，配合 `RETRY_TILE` 命令按行范围重传。但这需要：
+- 新增 BRAM 缓存模块
+- 扩展 `ENTER_DOWNLOAD` 协议支持行范围参数
+- `tx_ctrl` 支持从 BRAM 缓存而非 DDR reader 读取像素
+
+### 13.10 当前回传验证与下一步
+
+1. **回传阶段（已实现）**：Host 发送 `ENTER_DOWNLOAD`，payload 为 `ddr_base(u64 LE) + rows(u16 LE) + cols(u16 LE)`。PL 侧 `axi_ddr_reader` 通过 AXI AR/R 通道读取 DDR，复用 `tx_ctrl` 产生 `RT/TD/TE` 并经 UART 返回 Host。
+2. **端到端校验（已实现）**：Host 校验每个 TD 的 XOR8，并将下载像素 XOR16 与计算阶段 `TILE_DONE` checksum 对比。
+3. **DDR tile 布局（已实现）**：物理槽按 128 bytes 对齐，`slot_bytes = align_up(rows * cols * 2, 128)`。
+4. **宽图切分（已实现）**：DDR 模式默认 tile 宽度上限 4096，避免超宽 compute tile 导致板上逻辑问题。
+5. **可继续优化**：降低 12 Mbaud byte-slip 发生率、增加控制响应 tile ID、将 reader error 通过稳定控制帧返回、优化 LUT 以恢复更多 worker、局部 retry tile 缓存。
+6. **未来高速方案**：实现 PS 端 Ethernet/USB 推送，绕过 UART 下载带宽上限。

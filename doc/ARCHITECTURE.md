@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This project implements a UART-controlled Mandelbrot accelerator on FPGA. The current board target is VMC_RTSB ZU4EV (`xczu4ev-sfvc784-1-i`) with a 200 MHz single-ended `sys_clk` input on package pin `E12`. The default build runs the full compute/UART domain directly at 200 MHz with `DIRECT_200MHZ=1`. The host sends one binary command describing a complete image or tile, and the FPGA streams back one 16-bit iteration count per pixel. The current default compute configuration is **fixed-point Q8.55 (fx64)**, twenty-four Mandelbrot workers, four pixel contexts per worker, dynamic row scheduling, `FP_CE_DIV=1`, and a 12 Mbaud fractional-NCO UART. The historical FP64 12-worker, 8-context configuration remains available as a regression build (`WORKER_MODE=0`).
+This project implements a Mandelbrot accelerator on FPGA with two transport modes: PL-PS DDR (default) and UART streaming. The current board target is VMC_RTSB ZU4EV (`xczu4ev-sfvc784-2-i` for the default DDR build, from `reference/design_1.bd`; the UART alternative build targets `xczu4ev-sfvc784-1-i`) with a 200 MHz single-ended `sys_clk` input on package pin `E12`. The default build runs the full compute/UART domain directly at 200 MHz with `DIRECT_200MHZ=1`. The host sends one binary command describing a complete image or tile, and the FPGA streams back one 16-bit iteration count per pixel. The current default compute configuration is **fx64 Q8.55 (only active arithmetic mode)**, twenty-two Mandelbrot workers (DDR default) / twenty-four (UART alternative), four pixel contexts per worker, dynamic row scheduling, `FP_CE_DIV=1`, and a 12 Mbaud fractional-NCO UART. The historical FP64 12-worker, 8-context path (`WORKER_MODE=0`) is retained as a regression-only build and is not an active mode.
 
 The design is intentionally streaming-oriented. It does not store a full frame on FPGA. A dynamic row dispatcher assigns one row at a time to available workers, each worker interleaves four pixel contexts over one shared fixed-point multiplier and one shared fixed-point adder, per-worker FIFOs absorb row output, a raster-order collector restores the original host-visible pixel order, and the transmit controller streams pixels to the host as soon as they are available.
 
@@ -10,15 +10,16 @@ Current validated capabilities:
 
 | Item | Value |
 |---|---:|
-| FPGA target | `xczu4ev-sfvc784-1-i` |
+| FPGA target | `xczu4ev-sfvc784-2-i` (DDR default, from `reference/design_1.bd`) / `xczu4ev-sfvc784-1-i` (UART alternative) |
 | Board clock input | 200 MHz single-ended `sys_clk` on `E12` |
 | Internal system clock | Direct 200 MHz (`DIRECT_200MHZ=1`) |
-| Main constraint file | `../constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc` |
+| Main constraint file | `../constraints_vmc_rtsb_zu4ev/mandelbrot_top.xdc` (UART) / `mandelbrot_with_ram.xdc` (DDR) |
 | Core effective clock enable rate | 200 MHz (`FP_CE_DIV=1`) |
-| Arithmetic mode | Fixed-point Q8.55 (`WORKER_MODE=1`) |
-| Mandelbrot workers | 24 |
+| Arithmetic mode | fx64 Q8.55 (`WORKER_MODE=1`), only active arithmetic mode |
+| Default transport | PL-PS DDR (AXI HPC0 to PS DDR4 to UART download) |
+| Mandelbrot workers | 22 (DDR default) / 24 (UART alternative) |
 | Pixel contexts per worker | 4 |
-| Historical FP64 mode | `WORKER_MODE=0`, 12 workers, 8 contexts |
+| Historical FP64 mode | `WORKER_MODE=0`, 12 workers, 8 contexts (regression only, not active) |
 | Default scheduler | Dynamic idle-core row scheduling (`SCHED_MODE=1`) |
 | UART baudrate | 12000000 baud |
 | Pixel format | `uint16`, little-endian iteration count |
@@ -26,17 +27,19 @@ Current validated capabilities:
 | Width/height fields | 16-bit each |
 | Pixel count path | 32-bit, validated above 65535 pixels |
 | Largest validated image | 1920x1080 |
-| Stable mode used in testing | fx64 (fixed-point Q8.55) |
+| Active arithmetic mode | fx64 (fixed-point Q8.55, only active mode) |
 | Host serial port default | `COM6` |
-| Host `--mode` default | `fx64` |
-| Programming link | Vivado hardware auto-connect, target matched by `*xczu4*` |
-| Current VMC_RTSB ZU4EV build status | fx64 bitstream builds cleanly |
-| Current routed timing | `WNS=0.078ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
-| Current routed utilization | `83731` LUTs (95.32%), `76116` registers, `483` DSP48E2, `33` BRAM tiles |
+| Host `--mode` default | `ddr` (PL-PS DDR + fx64) |
+| Programming link | XSDB JTAG boot (DDR mode) or Vivado hardware auto-connect (UART mode), target matched by `*xczu4*` |
+| Current VMC_RTSB ZU4EV build status | DDR bitstream builds cleanly; UART alternative bitstream builds cleanly |
+| Current routed timing (fx64 22w PL-PS DDR) | `WNS=0.114ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
+| Current routed timing (fx64 24w UART) | `WNS=0.078ns`, `TNS=0.000ns`, `WHS=0.011ns`, `THS=0.000ns` |
+| Current routed utilization (fx64 22w PL-PS DDR) | `86450` LUTs (98.42%), `73894` registers, `445` DSP48E2, `46` BRAM tiles |
+| Current routed utilization (fx64 24w UART) | `83731` LUTs (95.32%), `76116` registers, `483` DSP48E2, `33` BRAM tiles |
 
 ## 2. Top-Level Architecture
 
-Top-level integration is in `../rtl/top.v`.
+Top-level integration is in `../rtl/top.v` (UART alternative) and `../rtl/top_with_ram.v` (DDR default, wrapped by the PS block design `system_wrapper.v`). The default DDR build instantiates the Zynq PS BD with AXI HPC0 read/write to PS DDR4; the UART alternative build is PL-only.
 
 ```text
 Host PC
@@ -46,34 +49,41 @@ Host PC
 uart_rx
   |
   v
-cmd_parser
+cmd_parser / cmd_parser_v2
   |
   |  compute_start, image parameters
   v
-mandelbrot_multicore -- raster fifo_wr/fifo_data --> queue(1024 x 16-bit) --> tx_ctrl --> uart_tx
-       |
-       +-- work_dispatch_dynamic_rows
-       +-- 24 x mandelbrot_core_worker_fx -- per-worker FIFO --> raster_collect_dynamic_rows
-              |
-              +-- fx_mul (fixed-point Q8.55)
-              +-- fx_add (fixed-point Q8.55)
-              +-- fx_mul_int (init path)
+mandelbrot_multicore -- raster fifo_wr/fifo_data --> queue(1024 x 16-bit)
+        |
+        +-- work_dispatch_dynamic_rows
+        +-- 22 (DDR) / 24 (UART) x mandelbrot_core_worker_fx -- per-worker FIFO --> raster_collect_dynamic_rows
+               |
+               +-- fx_mul (fixed-point Q8.55)
+               +-- fx_add (fixed-point Q8.55)
+               +-- fx_mul_int (init path)
+
+DDR default build (top_with_ram):
+  queue --> axi_ddr_writer --> AXI HPC0 --> PS DDR4 --> axi_ddr_reader --> tx_ctrl --> uart_tx
+UART alternative build (top):
+  queue --> tx_ctrl --> uart_tx
 ```
 
 The main modules are:
 
 | Module | File | Role |
 |---|---|---|
-| `top` | `../rtl/top.v` | Instantiates the ZU4EV 200 MHz single-ended `sys_clk` input, `BUFG`, LED status outputs, clock-enable generator, UART, command parser, parameterized worker wrapper, output FIFO, and TX controller. |
+| `top` | `../rtl/top.v` | UART alternative PL-only top. Instantiates the ZU4EV 200 MHz single-ended `sys_clk` input, `BUFG`, LED status outputs, clock-enable generator, UART, command parser, parameterized worker wrapper, output FIFO, and TX controller. |
+| `top_with_ram` | `../rtl/top_with_ram.v` | DDR default top. Adds `cmd_parser_v2`, `axi_ddr_writer`, `axi_ddr_reader`, and download-path TX ownership on top of the multicore + output FIFO + `tx_ctrl` stack. Wrapped by the PS block design `system_wrapper.v`. |
 | `uart_rx` | `../rtl/uart_rx.v` | Receives 8N1 UART bytes using a fractional baud accumulator. |
 | `uart_tx` | `../rtl/uart_tx.v` | Sends 8N1 UART bytes using a fractional baud accumulator. |
-| `cmd_parser` | `../rtl/cmd_parser.v` | Parses command packet and validates XOR checksum. |
-| `mandelbrot_multicore` | `../rtl/mandelbrot_multicore.v` | Parameterized worker wrapper with scheduler, per-worker FIFOs, raster merger, and `tx_start` handling. Supports `WORKER_MODE=1` (fx) and `WORKER_MODE=0` (FP64). |
+| `cmd_parser` | `../rtl/cmd_parser.v` | UART-mode parser. Parses command packet and validates XOR checksum. |
+| `cmd_parser_v2` | `../rtl/cmd_parser_v2.v` | DDR-mode parser. Handles `COMPUTE_TILE` / `ENTER_DOWNLOAD` / `ACK` / `TILE_DONE` framing and download-path TX ownership. |
+| `mandelbrot_multicore` | `../rtl/mandelbrot_multicore.v` | Parameterized worker wrapper with scheduler, per-worker FIFOs, raster merger, and `tx_start` handling. Active mode is `WORKER_MODE=1` (fx). `WORKER_MODE=0` (FP64) is regression-only. |
 | `work_dispatch_static_rows` | `../rtl/work_dispatch_static_rows.v` | Static regression scheduler. Assigns interleaved rows to workers. |
 | `work_dispatch_dynamic_rows` | `../rtl/work_dispatch_dynamic_rows.v` | Default scheduler. Assigns one full row at a time to an available worker and records row ownership. |
 | `mandelbrot_core_worker_fx` | `../rtl/mandelbrot_core_worker_fx.v` | **Default** fixed-point Q8.55 4-context worker. Interleaves four pixel contexts over one `fx_mul` and one `fx_add`. Uses `MUL_LAT=4`, `ADD_LAT=2`. |
-| `mandelbrot_core_worker_kctx` | `../rtl/mandelbrot_core_worker_kctx.v` | Historical FP64 4/8-context worker (regression, `WORKER_MODE=0`). Uses `MUL_LAT=6`, `ADD_LAT=9`. |
-| `mandelbrot_core_worker_2ctx` | `../rtl/mandelbrot_core_worker_2ctx.v` | Historical FP64 2-context worker. |
+| `mandelbrot_core_worker_kctx` | `../rtl/mandelbrot_core_worker_kctx.v` | Historical FP64 4/8-context worker (regression only, `WORKER_MODE=0`). Uses `MUL_LAT=6`, `ADD_LAT=9`. |
+| `mandelbrot_core_worker_2ctx` | `../rtl/mandelbrot_core_worker_2ctx.v` | Historical FP64 2-context worker (regression only). |
 | `mandelbrot_core_worker` | `../rtl/mandelbrot_core_worker.v` | Single-context FP64 regression worker. |
 | `raster_merge_static_rows` | `../rtl/raster_merge_static_rows.v` | Static-mode merger. Restores per-worker row streams to strict row-major output order. |
 | `raster_collect_dynamic_rows` | `../rtl/raster_collect_dynamic_rows.v` | Default dynamic result collector. Uses the row-owner table (8-bit `owner_mem`, supporting up to 256 workers) to drain dynamically assigned rows in raster order. |
@@ -81,8 +91,11 @@ The main modules are:
 | `fx_mul` | `../rtl/fx_mul.v` | Fixed-point 64-bit signed multiplier with `>>FX_FRAC` truncation. 3-stage pipeline. |
 | `fx_add` | `../rtl/fx_add.v` | Fixed-point 64-bit signed adder. 1-stage pipeline. |
 | `fx_mul_int` | `../rtl/fx_mul_int.v` | 16-bit unsigned x 64-bit signed fixed-point multiplier, used by the fx worker init path. |
-| `fp_mul` | `../rtl/fp_mul.v` | Parameterized FP64 multiplier (historical, used when `WORKER_MODE=0`). |
-| `fp_add` | `../rtl/fp_add.v` | Parameterized FP64 adder/subtractor (historical, used when `WORKER_MODE=0`). |
+| `fp_mul` | `../rtl/fp_mul.v` | Parameterized FP64 multiplier (historical, regression only when `WORKER_MODE=0`). |
+| `fp_add` | `../rtl/fp_add.v` | Parameterized FP64 adder/subtractor (historical, regression only when `WORKER_MODE=0`). |
+| `axi_ddr_writer` | `../rtl/axi_ddr_writer.v` | DDR-mode AXI4 write master. Streams output FIFO pixels to PS DDR4. |
+| `axi_ddr_reader` | `../rtl/axi_ddr_reader.v` | DDR-mode AXI4 read master. Reads pixels back from PS DDR4 for UART download. |
+| `pl_por` | `../rtl/pl_por.v` | PL-local power-on reset for the DDR JTAG blank-boot flow. |
 | `queue` | `../rtl/queue.v` | Synchronous FIFO for per-core and output buffering. |
 | `tx_ctrl` | `../rtl/tx_ctrl.v` | Builds response header, drains FIFO, transmits pixels and checksum. |
 | `debug_leds` | `../rtl/debug_leds.v` | Maps internal debug/status signals to the reduced ZU4EV LED set. |
@@ -96,11 +109,11 @@ The debug LED mapping is intentionally isolated from `top.v` in `debug_leds.v`. 
 
 ## 3. Command And Response Protocol
 
-The protocol is binary, little-endian, and frame-oriented. One command produces one full image response.
+The protocol is binary, little-endian, and frame-oriented. One command produces one full image response. This section describes the UART-mode protocol used by `cmd_parser` and `tx_ctrl`. The DDR-default protocol used by `cmd_parser_v2` (`55 AA TYPE LEN PAYLOAD CHECKSUM` frames: `COMPUTE_TILE`, `ENTER_DOWNLOAD`, `ACK`, `TILE_DONE`) is documented in [Appendix B](#appendix-b-pl-ps-ddr-architecture).
 
 ### 3.1 Host To FPGA Command
 
-FP64 and fx64 command length is 33 bytes. FP128 command length is 57 bytes.
+fx64 command length is 33 bytes (FP128 command length is 57 bytes). The FP64 field packing is retained only for the regression build.
 
 | Offset | Size | Field |
 |---:|---:|---|
@@ -114,7 +127,7 @@ FP64 and fx64 command length is 33 bytes. FP128 command length is 57 bytes.
 | 24 or 40 | 8 or 16 | `step`, FP64/fx64 or FP128 LE |
 | Last | 1 | XOR checksum over all previous bytes |
 
-When `--mode fx64`, the host packs `center_re`, `center_im`, and `step` as 64-bit signed Q8.55 integers (`struct.pack('<q', round(value * 2**55))`). When `--mode fp64`, they are packed as IEEE 754 doubles (`struct.pack('<d', value)`). Both use the same 8-byte field width, so the command length is identical. The `cmd_parser` assembles these fields with byte-wise shift registers and only starts computation if the XOR including the received checksum is zero.
+When `--mode fx64` (UART alternative) or `--mode ddr` (DDR default, which also uses fx64 arithmetic), the host packs `center_re`, `center_im`, and `step` as 64-bit signed Q8.55 integers (`struct.pack('<q', round(value * 2**55))`). When `--mode fp64` (regression build only), they are packed as IEEE 754 doubles (`struct.pack('<d', value)`). Both use the same 8-byte field width, so the command length is identical. The `cmd_parser` assembles these fields with byte-wise shift registers and only starts computation if the XOR including the received checksum is zero.
 
 ### 3.2 FPGA To Host Response
 
@@ -133,9 +146,9 @@ The host currently computes the response checksum over pixel data only, matching
 
 ## 4. Clocking And Clock-Enable Design
 
-The VMC_RTSB ZU4EV board provides a 200 MHz single-ended `sys_clk` input on package pin `E12`. The default `top.v` path sets `DIRECT_200MHZ=1`, buffers `sys_clk` with a `BUFG`, and uses that buffered clock as the single system domain. UART, parser, FIFO, TX controller, fixed-point datapath, and Mandelbrot core all run in that single clock domain. The `fp_ce` signal is retained as a compile-time throttle, but the current configuration sets `FP_CE_DIV=1`, so it is asserted every system clock.
+The VMC_RTSB ZU4EV board provides a 200 MHz single-ended `sys_clk` input on package pin `E12`. The default `top_with_ram.v` (DDR) and alternative `top.v` (UART) paths both set `DIRECT_200MHZ=1`, buffer `sys_clk` with a `BUFG`, and use that buffered clock as the single system domain. UART, parser, FIFO, TX controller, AXI read/write masters, fixed-point datapath, and Mandelbrot core all run in that single clock domain. The `fp_ce` signal is retained as a compile-time throttle, but the current configuration sets `FP_CE_DIV=1`, so it is asserted every system clock.
 
-`fp_ce` is generated in `top.v`:
+`fp_ce` is generated in `top.v` (and equivalently in `top_with_ram.v`):
 
 ```verilog
 reg [`FP_CE_DIV-1:0] ce_counter;
@@ -164,36 +177,35 @@ The current single-clock + enable approach avoids clock-domain crossing issues a
 
 ### 4.2 Timing Constraints
 
-Current fx64 builds use normal single-cycle timing at the direct 200 MHz `sys_clk`. No `u_core` multicycle exceptions are required. The full VMC_RTSB ZU4EV Mandelbrot bitstream builds successfully and meets timing.
+Current fx64 builds use normal single-cycle timing at the direct 200 MHz `sys_clk`. No `u_core` multicycle exceptions are required. Both the DDR default and UART alternative VMC_RTSB ZU4EV Mandelbrot bitstreams build successfully and meet timing.
 
 Current routed timing:
 
-| Metric | Value |
-|---|---:|
-| Default 200MHz WNS | 0.078 ns |
-| TNS | 0.000 ns |
-| Default 200MHz WHS | 0.011 ns |
-| THS | 0.000 ns |
+| Build | Mode | Workers | Contexts | WNS | TNS | WHS | THS |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `build_mandelbrot_with_ram.tcl` (DDR default) | fx64 | 22 | 4 | 0.114 ns | 0.000 ns | 0.011 ns | 0.000 ns |
+| `build_fp64_fx24.tcl` (UART alternative) | fx64 | 24 | 4 | 0.078 ns | 0.000 ns | 0.011 ns | 0.000 ns |
+| `build_fp64.tcl` (historical regression) | FP64 | 12 | 8 | 0.148 ns | 0.000 ns | 0.010 ns | 0.000 ns |
 
 ### 4.3 Direct-200MHz Timing Design
 
-The default build is direct 200MHz:
+The default DDR build is direct 200MHz:
 
 ```text
-vivado.bat -mode batch -source build_fp64_fx24.tcl
+vivado.bat -mode batch -source build_mandelbrot_with_ram.tcl
 ```
 
-It sets `CLK_HZ=200000000`, `DIRECT_200MHZ=1`, `SCHED_MODE=1`, `DYNAMIC_OWNER_DEPTH=4096`, `CORE_COUNT=24`, `WORKER_MODE=1`, `FX_CONTEXTS=4`, and `WORKER_CONTEXTS=4`. No multicycle exceptions are used for the Mandelbrot datapath; the design must close as normal single-cycle 5.000 ns logic.
+It targets `xczu4ev-sfvc784-2-i`, instantiates the Zynq PS BD from `reference/design_1.bd`, and sets `CLK_HZ=200000000`, `SCHED_MODE=1`, `CORE_COUNT=22`, `WORKER_MODE=1`, `FX_CONTEXTS=4`, and `WORKER_CONTEXTS=4`. The UART alternative build (`build_fp64_fx24.tcl`) targets `xczu4ev-sfvc784-1-i` and sets `CORE_COUNT=24` with the same fx64 worker parameters plus `DYNAMIC_OWNER_DEPTH=4096` and `RESPONSE_TILE_ROW_SPLITS=8`. No multicycle exceptions are used for the Mandelbrot datapath; the design must close as normal single-cycle 5.000 ns logic.
 
-The fixed-point datapath has shorter pipeline latencies than FP64 (`MUL_LAT=4` vs 6, `ADD_LAT=2` vs 9) and no FP normalization/alignment logic. This reduces the critical path depth and allows 24 workers to close timing at `WNS=0.078ns`, compared to the FP64 12-worker build's `WNS=0.148ns`.
+The fixed-point datapath has shorter pipeline latencies than FP64 (`MUL_LAT=4` vs 6, `ADD_LAT=2` vs 9) and no FP normalization/alignment logic. This reduces the critical path depth and allows 22 workers (DDR) to close timing at `WNS=0.114ns` and 24 workers (UART) at `WNS=0.078ns`, compared to the historical FP64 12-worker build's `WNS=0.148ns`.
 
 The historical FP64 timing cuts (request-sliced FPU issue, FP multiplier partial-product splits, FP adder normalize/output pipeline stages, kctx `C_CHECK_ITER` state separation) are documented in [Appendix A](#appendix-a-historical-fp64-architecture).
 
 ## 5. Number Representation
 
-### 5.1 Fixed-Point Q8.55 (Default, `WORKER_MODE=1`)
+### 5.1 Fixed-Point Q8.55 (Only Active Mode, `WORKER_MODE=1`)
 
-The default arithmetic mode uses fixed-point Q8.55 format, defined in `../rtl/fx_defines.vh`:
+The only active arithmetic mode is fixed-point Q8.55, defined in `../rtl/fx_defines.vh`:
 
 | Parameter | Value |
 |---|---:|
@@ -205,13 +217,13 @@ The default arithmetic mode uses fixed-point Q8.55 format, defined in `../rtl/fx
 
 The 8 integer bits (+-128 range) are necessary because intermediate `z^2` values can reach ~36 before the escape check fires (|z| can momentarily exceed 2 after `z_next = z^2 + c` is computed but before the next iteration's escape check). The 55 fractional bits provide finer resolution than FP64's 52-bit mantissa (2^-52 ~= 2.22e-16), and all six standard benchmark scenes match FP64 pixel-for-pixel at 100%.
 
-The host packs `center_re`, `center_im`, and `step` as 64-bit signed Q8.55 integers in the same 8-byte field width as FP64 (`--mode fx64`). The `--verify` software reference uses matching fixed-point arithmetic (Python integer multiply with `>> FX_FRAC` truncation).
+The host packs `center_re`, `center_im`, and `step` as 64-bit signed Q8.55 integers in the same 8-byte field width as FP64 (`--mode fx64` for UART alternative, `--mode ddr` for DDR default). The `--verify` software reference uses matching fixed-point arithmetic (Python integer multiply with `>> FX_FRAC` truncation).
 
-Fixed-point arithmetic eliminates FP exponent comparison, mantissa alignment, leading-zero count, and normalization — reducing adder latency from 9 cycles (FP64) to 2 cycles and multiplier latency from 6 cycles to 4 cycles.
+Fixed-point arithmetic eliminates FP exponent comparison, mantissa alignment, leading-zero count, and normalization — reducing adder latency from 9 cycles (FP64) to 2 cycles and multiplier latency from 6 cycles to 4 cycles. This is the only arithmetic mode used by the DDR default and UART alternative builds.
 
-### 5.2 Floating-Point FP64/FP128 (Historical, `WORKER_MODE=0`)
+### 5.2 Floating-Point FP64/FP128 (Historical Regression Only, `WORKER_MODE=0`)
 
-The historical FP64/FP128 formats are selected at compile time with `fp_defines.vh` and used when `WORKER_MODE=0`. The FP64 format uses 1 sign + 11 exponent + 52 mantissa bits (bias 1023). The FP128 format uses 1 sign + 15 exponent + 112 mantissa bits (bias 16383). The FP implementation is IEEE-like but not a full IEEE-754 implementation: no denormal, NaN/Inf, or full rounding support.
+The historical FP64/FP128 formats are selected at compile time with `fp_defines.vh` and used only by the regression build when `WORKER_MODE=0`. They are not active modes. The FP64 format uses 1 sign + 11 exponent + 52 mantissa bits (bias 1023). The FP128 format uses 1 sign + 15 exponent + 112 mantissa bits (bias 16383). The FP implementation is IEEE-like but not a full IEEE-754 implementation: no denormal, NaN/Inf, or full rounding support.
 
 A detailed analysis of FP64 boundary pixel differences (truncation vs IEEE round-to-nearest-even) is available in [FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md](FP64_BOUNDARY_DIFFERENCE_ANALYSIS.md). The fx64 mode does not have this issue because the software reference uses the same truncation arithmetic as the RTL.
 
@@ -267,7 +279,7 @@ z_im_next = 2 * z_re * z_im + c_im
 escape if z_re^2 + z_im^2 > 4
 ```
 
-Each worker uses one `fx_mul` (`MUL_LAT=4`) and one `fx_add` (`ADD_LAT=2`). It time-multiplexes those units across four pixel contexts with tagged fixed-point result writeback. The current wrapper instantiates twenty-four independent workers.
+Each worker uses one `fx_mul` (`MUL_LAT=4`) and one `fx_add` (`ADD_LAT=2`). It time-multiplexes those units across four pixel contexts with tagged fixed-point result writeback. The current wrapper instantiates twenty-two independent workers (DDR default) / twenty-four (UART alternative).
 
 The per-iteration dependency chain is `2*MUL_LAT + max(MUL_LAT, ADD_LAT) + 4*ADD_LAT = 2*4 + 4 + 4*2 = 20` cycles. The issue limit for `1M+1A` is `max(3/1, 5/1) = 5` cycles/iteration. Four contexts are sufficient to hide the 20-cycle dependency (`ceil(20/5) = 4`).
 
@@ -384,7 +396,7 @@ flowchart TB
 
 In the current default dynamic scheduler, each worker receives one row at a time. `row_start` is the assigned row and `row_stride=rows`, so the worker exits after completing that single row.
 
-### 7.3 24-Worker Row Scheduling
+### 7.3 Dynamic Row Scheduling
 
 `mandelbrot_multicore` supports a compile-time scheduling parameter:
 
@@ -412,7 +424,7 @@ flowchart LR
     DYN -->|"next row job"| C0["worker 0"]
     DYN -->|"next row job"| C1["worker 1"]
     DYN -->|"next row job"| C2["..."]
-    DYN -->|"next row job"| C23["worker 23"]
+    DYN -->|"next row job"| CN["worker N-1<br/>(22 DDR / 24 UART)"]
     DYN --> OWNER[["row owner table update<br/>row -> core"]]
 ```
 
@@ -549,13 +561,13 @@ stateDiagram-v2
     STOP_BIT --> IDLE: send 1 stop bit, transmit_avail high
 ```
 
-UART integration in the response path:
+UART integration in the response path (UART alternative build):
 
 ```mermaid
 flowchart TB
     HOST["Python host<br/>12 Mbaud"] --> RX("uart_rx<br/>fractional NCO")
     RX --> CMD["cmd_parser"]
-    CMD --> CORE["24-worker fx64 core"]
+    CMD --> CORE["22 (DDR) / 24 (UART) fx64 core"]
     CORE --> OFIFO[["1024 x 16 output FIFO"]]
     OFIFO --> TXC["tx_ctrl<br/>legacy or tiled response"]
     TXC --> TX("uart_tx<br/>fractional NCO")
@@ -720,7 +732,7 @@ Host code is in `../python/mandelbrot_host.py`.
 | Soft reset | `--soft-reset` sends `RST!RST!`; failed compute-tile attempts send it automatically unless disabled. |
 | Quiet progress | `--quiet` shows a single-line progress bar. |
 | Renderer | Convert iteration counts to PNG or text output. |
-| Software reference | Optional `--verify` computes a Python Mandelbrot image matching RTL coordinate rules. Uses fx64 fixed-point arithmetic when `--mode fx64`, or float arithmetic when `--mode fp64`. |
+| Software reference | Optional `--verify` computes a Python Mandelbrot image matching RTL coordinate rules. Uses fx64 fixed-point arithmetic when `--mode ddr` (default) or `--mode fx64`, or float arithmetic when `--mode fp64` (regression only). |
 | Timing | Print FPGA elapsed, pixels/s, render elapsed, software elapsed, and total elapsed. |
 
 Recommended high-baud 1080p host-tiled command:
@@ -729,7 +741,7 @@ Recommended high-baud 1080p host-tiled command:
 python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 128 --center 1.0 1.0 --step 0.002 --timeout 600 --verify --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_hosttile_fast_escape.png
 ```
 
-The default `--mode` is `fx64`, which matches the default bitstream (`build_fp64_fx24.tcl`). Use `--mode fp64` only when an FP64 bitstream (`build_fp64.tcl`) is programmed.
+The default `--mode` is `ddr`, which matches the default bitstream (`build_mandelbrot_with_ram.tcl`, 22 workers, PL-PS DDR transport). Use `--mode fx64` when the UART alternative bitstream (`build_fp64_fx24.tcl`, 24 workers) is programmed. Use `--mode fp64` only when the historical FP64 regression bitstream (`build_fp64.tcl`) is programmed.
 
 The software reference uses the same coordinate convention as the RTL:
 
@@ -742,9 +754,9 @@ im_start = center_im + half_h * step
 
 ## 11. Verification Strategy
 
-### 11.1 Unit Simulation
+### 11.1 Unit Simulation (Regression)
 
-`../sim/tb_fp.v` tests FP64 add/multiply cases.
+`../sim/tb_fp.v` tests historical FP64 add/multiply cases (regression only).
 
 ```bash
 vivado -mode batch -source sim_fp.tcl
@@ -772,9 +784,9 @@ Expected pass marker:
 === FX MULTICORE TEST PASS: 192 pixels ===
 ```
 
-### 11.4 FP64 Multicore Simulation
+### 11.4 FP64 Multicore Simulation (Regression)
 
-`../sim/tb_multicore_dynamic.v` runs the FP64 dynamic scheduler simulation.
+`../sim/tb_multicore_dynamic.v` runs the historical FP64 dynamic scheduler simulation (regression only, `WORKER_MODE=0`).
 
 ```bash
 vivado -mode batch -source sim_multicore_dynamic.tcl
@@ -791,13 +803,13 @@ vivado -mode batch -source sim_cmd_parser_soft_reset.tcl
 ### 11.6 Hardware Smoke Test
 
 ```bash
-python python\mandelbrot_host.py --mode fx64 --port COM6 --width 1 --height 1 --max-iter 256 --center 2.5 0.0 --step 0.001 --output python\smoke_test.png --timeout 10
+python python\mandelbrot_host.py --mode ddr --port COM6 --width 1 --height 1 --max-iter 256 --center 2.5 0.0 --step 0.001 --output python\smoke_test.png --timeout 10
 ```
 
 ### 11.7 Hardware Image Verification
 
 ```bash
-python python\mandelbrot_host.py --mode fx64 --verify --width 160 --height 120 --max-iter 256 --output python\verify_160x120.png
+python python\mandelbrot_host.py --mode ddr --verify --width 160 --height 120 --max-iter 256 --output python\verify_160x120.png
 ```
 
 Expected: `HW vs SW: 19200/19200 match (100.00%)`.
@@ -815,9 +827,9 @@ At 12 Mbaud, the practical UART payload upper bound is roughly:
 12000000 bits/s / 10 UART bits/byte / 2 bytes/pixel ~= 600000 pixels/s
 ```
 
-Current direct-200MHz fx64 24-worker, 4-context 1080p benchmark at 12 Mbaud with `1920x120` host/compute tiles:
+Direct-200MHz fx64 24-worker, 4-context UART alternative 1080p benchmark at 12 Mbaud with `1920x120` host/compute tiles:
 
-| Scene | FP64 12w/8ctx baseline | FX 24w/4ctx | Speedup | Main limiter |
+| Scene | FP64 12w/8ctx baseline | FX 24w/4ctx (UART) | Speedup | Main limiter |
 |---|---:|---:|---:|---|
 | Fast escape @128 | `3.733s / 555k pps` | `3.733s / 556k pps` | `1.00x` | UART-bound |
 | Standard @64 | `3.816s / 546k pps` | `3.727s / 556k pps` | `1.02x` | UART-bound |
@@ -826,37 +838,38 @@ Current direct-200MHz fx64 24-worker, 4-context 1080p benchmark at 12 Mbaud with
 | Deep mini-brot @8192 | `9.166s / 226k pps` | `5.091s / 407k pps` | **`1.80x`** | Compute-bound |
 | Deep Seahorse @1024 | `4.575s / 455k pps` | `4.074s / 509k pps` | `1.12x` | Mixed |
 
-Deep scenes improve significantly: mini-brot @8192 accelerates **1.80x** (9.2s -> 5.1s) due to 2x worker parallelism and shorter dependency latency (20 vs 47 cycles/iteration). Shallow scenes remain UART-bound at ~555k pps.
+Deep scenes improve significantly: mini-brot @8192 accelerates **1.80x** (9.2s -> 5.1s) due to 2x worker parallelism and shorter dependency latency (20 vs 47 cycles/iteration). Shallow scenes remain UART-bound at ~555k pps. The DDR default build's compute-stage acceleration is documented in [Appendix B.7](#b7-benchmark-results); end-to-end DDR timing is download-bound until a faster PS-side push path is added.
 
 The historical FP64 12-worker/8-context 10-run benchmark data is kept in [VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md](VMC_RTSB_ZU4EV_200MHZ_OPT_REPORT.md). The full redesign study with phase reports is in [REDESIGN_STUDY_REPORT.md](REDESIGN_STUDY_REPORT.md).
 
 ## 13. Resource Use
 
-Latest representative default direct-200MHz fx64 24-worker, 4-context routed utilization:
+Latest representative routed utilization (DDR default and UART alternative, direct-200MHz fx64):
 
-| Resource | Used | Device | Utilization |
-|---|---:|---:|---:|
-| CLB LUTs | 83731 | 87840 | 95.32% |
-| CLB Registers | 76116 | 175680 | 43.33% |
-| DSP48E2 | 483 | 728 | 66.35% |
-| Block RAM Tile | 33 | 128 | 25.78% |
+| Resource | DDR 22w Used | DDR 22w Util | UART 24w Used | UART 24w Util | Device |
+|---|---:|---:|---:|---:|---:|
+| CLB LUTs | 86,450 | 98.42% | 83,731 | 95.32% | 87,840 |
+| CLB Registers | 73,894 | 42.07% | 76,116 | 43.33% | 175,680 |
+| DSP48E2 | 445 | 61.13% | 483 | 66.35% | 728 |
+| Block RAM Tile | 46 | 35.94% | 33 | 25.78% | 128 |
 
 Resource comparison (fx64 vs historical FP64):
 
-| Resource | FP64 12w/8ctx | FX 24w/4ctx | Change |
-|---|---:|---:|---|
-| LUT as Logic | 82,686 (94.13%) | 79,571 (90.59%) | -3,115 (same budget, 2x workers) |
-| DSP48E2 | 123 (16.9%) | 483 (66.3%) | +360 (64x64 multiplies) |
-| WNS | 0.103ns | 0.078ns | Better timing margin |
+| Resource | FP64 12w/8ctx | FX 22w DDR | FX 24w UART | Notes |
+|---|---:|---:|---:|---|
+| LUT as Logic | 82,686 (94.13%) | 86,450 (98.42%) | 83,731 (95.32%) | DDR adds PS/AXI/download logic |
+| DSP48E2 | 123 (16.9%) | 445 (61.1%) | 483 (66.3%) | 64x64 multiplies; DDR uses 22 workers |
+| WNS | 0.103ns | 0.114ns | 0.078ns | All timing-clean at 200 MHz |
 
-Latest routed timing for the current default build:
+Latest routed timing for the current builds:
 
 | Build | Mode | Workers | Contexts | WNS | TNS | WHS | THS |
 |---|---|---:|---:|---:|---:|---:|---:|
-| `build_fp64_fx24.tcl` | fx64 | 24 | 4 | 0.078 ns | 0.000 ns | 0.011 ns | 0.000 ns |
-| `build_fp64.tcl` (historical) | FP64 | 12 | 8 | 0.148 ns | 0.000 ns | 0.010 ns | 0.000 ns |
+| `build_mandelbrot_with_ram.tcl` (DDR default) | fx64 | 22 | 4 | 0.114 ns | 0.000 ns | 0.011 ns | 0.000 ns |
+| `build_fp64_fx24.tcl` (UART alternative) | fx64 | 24 | 4 | 0.078 ns | 0.000 ns | 0.011 ns | 0.000 ns |
+| `build_fp64.tcl` (historical regression) | FP64 | 12 | 8 | 0.148 ns | 0.000 ns | 0.010 ns | 0.000 ns |
 
-The fixed-point design shifts resource utilization from LUT-dominated (94% LUT, 17% DSP) to a more balanced profile (91% LUT-as-logic, 66% DSP), doubling the worker count within the same LUT budget.
+The fixed-point design shifts resource utilization from LUT-dominated (94% LUT, 17% DSP) to a more balanced profile (95-98% LUT-as-logic, 61-66% DSP), nearly doubling the worker count within the same LUT budget. The DDR build's higher LUT count reflects the added `cmd_parser_v2`, AXI read/write masters, and download-path logic.
 
 ## 14. Known Limitations
 
@@ -864,24 +877,25 @@ The fixed-point design shifts resource utilization from LUT-dominated (94% LUT, 
 |---|---|
 | Dynamic row scheduler | Default mode. Gates row reuse on an empty per-core FIFO to avoid UART-backpressure deadlock. |
 | Four-context fx worker | Default per-worker pipeline. Four contexts hide the 20-cycle dependency chain at `MUL_LAT=4`/`ADD_LAT=2`. |
-| Twenty-four-worker default | Current best validated point. 2x the FP64 baseline's 12 workers within the same LUT budget. |
-| LUT/routing pressure | The 24-worker build uses 95.32% CLB LUTs. Further scaling needs a lower-LUT worker structure (ring/barrel). |
-| DSP utilization | 66.3% DSP from 64x64 fixed-point multiplies. Further worker scaling is DSP-limited at 64-bit. |
-| Direct-200MHz mode | Current default. Timing-clean at `WNS=0.078ns`. |
-| UART output | 12 Mbaud ~600k pps ceiling. Shallow scenes are UART-bound; deep scenes benefit from 2x compute. |
+| 22-worker DDR default / 24-worker UART alternative | Current best validated points. Nearly 2x the FP64 baseline's 12 workers within the same LUT budget. |
+| LUT/routing pressure | The DDR 22-worker build uses 98.42% CLB LUTs; the UART 24-worker build uses 95.32%. Further scaling needs a lower-LUT worker structure (ring/barrel). |
+| DSP utilization | 61-66% DSP from 64x64 fixed-point multiplies. Further worker scaling is DSP-limited at 64-bit. |
+| Direct-200MHz mode | Current default. Timing-clean at `WNS=0.114ns` (DDR) / `WNS=0.078ns` (UART). |
+| DDR download bandwidth | End-to-end DDR mode is download-bound (~4.4s for 1080p) until a faster PS-side push path (Ethernet/USB) replaces UART download. |
+| UART output | 12 Mbaud ~600k pps ceiling (UART alternative). Shallow scenes are UART-bound; deep scenes benefit from extra compute. |
 | Fixed-point precision | Q8.55 covers all FP64-validated scenes at 100% match. Step sizes below ~1e-17 need wider format. |
-| FP64 regression mode | `WORKER_MODE=0` retains the historical FP64 12w/8ctx path. IEEE-like, not full IEEE-754. |
-| FP128 mode exists structurally | Most validation and performance work has focused on fx64 and FP64. |
+| FP64 regression mode | `WORKER_MODE=0` retains the historical FP64 12w/8ctx path. Regression-only, not active. IEEE-like, not full IEEE-754. |
+| FP128 mode exists structurally | Most validation and performance work has focused on fx64. FP128 is regression/experimental only. |
 | Max iteration field is 16-bit | Maximum supported `max_iter` is 65535. |
 
 ## 15. Future Improvement Directions
 
-1. Add a higher-bandwidth transport (FT245 sync FIFO / Zynq PS AXI / Ethernet) to lift the ~600k pps UART ceiling and expose compute gains on shallow scenes.
+1. Add a higher-bandwidth PS-side push transport (Ethernet / USB) on top of the DDR design to lift the ~600k pps UART download ceiling and expose compute gains on shallow scenes.
 2. Redesign the worker as a low-LUT ring/barrel structure to reduce per-worker LUT and fit 28-32 workers.
 3. Add request IDs and packet sequence numbers to the response protocol for explicit stale-packet rejection.
 4. Add FPGA-side retry-tile cache so checksum failures can retransmit instead of recomputing.
 5. Add periodicity detection for mini-brot interior points (safe with fixed-point's controllable truncation).
-6. Validate and optimize FP128 mode for deeper zooms beyond fx64/FP64 precision comfort.
+6. Validate and optimize FP128 mode for deeper zooms beyond fx64 precision comfort.
 
 ## 16. Build And Run Commands
 
@@ -894,7 +908,19 @@ vivado -mode batch -source sim_core.tcl
 vivado -mode batch -source sim_multicore_dynamic.tcl
 ```
 
-Build and program (default fx64):
+Build and program the DDR default (22-worker fx64 + PS DDR4):
+
+```bash
+vivado -mode batch -source build_mandelbrot_with_ram.tcl
+```
+
+Program the DDR build via XSDB JTAG blank-boot (no FSBL):
+
+```bash
+vivado -mode batch -source boot_jtag_with_ram.tcl
+```
+
+Build and program the UART alternative (24-worker fx64):
 
 ```bash
 vivado -mode batch -source build_fp64_fx24.tcl
@@ -907,13 +933,13 @@ Historical FP64 regression build:
 vivado -mode batch -source build_fp64.tcl
 ```
 
-Small fx64 hardware verification:
+Small fx64 hardware verification (DDR default, `--mode ddr` is the default):
 
 ```bash
-python python\mandelbrot_host.py --mode fx64 --port COM6 --width 160 --height 120 --max-iter 256 --center -0.5 0.0 --step 0.005 --output python\hw_fx24_160x120.png --verify --quiet --timeout 60 --tile-width 160 --tile-height 120 --tile-retries 3
+python python\mandelbrot_host.py --mode ddr --port COM6 --width 160 --height 120 --max-iter 256 --center -0.5 0.0 --step 0.005 --output python\hw_ddr_160x120.png --verify --quiet --timeout 60 --tile-width 160 --tile-height 120 --tile-retries 3
 ```
 
-1080p render example:
+1080p render example (DDR default):
 
 ```bash
 python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-iter 512 --center -0.743643887037151 0.13182590420533 --step 0.000005 --timeout 1800 --tile-width 1920 --tile-height 120 --tile-retries 3 --quiet --output python\hw_1080p_zoom.png
@@ -923,7 +949,7 @@ python python\mandelbrot_host.py --port COM6 --width 1920 --height 1080 --max-it
 
 ## Appendix A. Historical FP64 Architecture
 
-This appendix documents the historical FP64 design (`WORKER_MODE=0`) for regression reference. The default fx64 design is described in sections 1-16 above.
+This appendix documents the historical FP64 design (`WORKER_MODE=0`) for regression reference only. FP64 is not an active mode. The active fx64 design is described in sections 1-16 above.
 
 ### A.1 FP64 Number Format
 
@@ -1056,64 +1082,68 @@ The fx64 worker does not require most of these because fixed-point add is a sing
 
 ## Appendix B. PL-PS DDR Architecture
 
-This appendix documents the PL-PS DDR design on branch `VMC_RTSB_zu4ev_newdesign_withRAM`. The design replaces UART pixel streaming with AXI HP writes to PS DDR4, using the PS DDR as a pixel buffer. The full design document is [PL_PS_DDR_DESIGN.md](PL_PS_DDR_DESIGN.md).
+This appendix documents the PL-PS DDR design. The design uses PS DDR4 as a pixel buffer: compute writes pixels to DDR via AXI, then a PL-side AXI reader reads them back and returns them over UART using the existing `RT/TD/TE` protocol. The full design document is [PL_PS_DDR_DESIGN.md](PL_PS_DDR_DESIGN.md).
 
 ### B.1 Overview
 
 The PL-PS DDR design adds a Zynq UltraScale+ PS block design with:
-- `zynq_ultra_ps_e_0` (DDR4 4 GiB, S_AXI_HP0_FPD 64-bit)
+- `zynq_ultra_ps_e_0` (DDR4 4 GiB, S_AXI_HPC0_FPD 64-bit read/write)
 - `axi_smc_0` (SmartConnect 1 SI / 1 MI)
-- `top_with_ram` (custom RTL: multicore + output FIFO + axi_ddr_writer + cmd_parser_v2)
+- `top_with_ram` (custom RTL: multicore + output FIFO + axi_ddr_writer + axi_ddr_reader + tx_ctrl + cmd_parser_v2)
 - `pl_por_0` (PL-local power-on reset)
 
-The compute pipeline streams pixels from the multicore through the existing output FIFO directly to an AXI4 Master writer, which writes 64-bit packed pixels to PS DDR via the HP0 port at ~500 MB/s. This eliminates the UART bottleneck for pixel transfer. UART is used only for command/ACK/TILE_DONE notifications (~50 bytes per tile).
+The compute pipeline streams pixels to PS DDR via AXI write. The download pipeline reads pixels back from PS DDR via AXI read and sends them over UART. XSDB/JTAG is only used for PS DDR initialization and PL programming.
 
 ### B.2 Architecture
 
 ```mermaid
 flowchart TB
     subgraph PL["FPGA PL"]
-        direction TB
         URX["uart_rx<br/>12 Mbaud"]
-        CMD2["cmd_parser_v2<br/>COMPUTE_TILE / ACK / TILE_DONE"]
+        CMD2["cmd_parser_v2<br/>COMPUTE_TILE / ENTER_DOWNLOAD<br/>ACK / TILE_DONE"]
         CORE2["mandelbrot_multicore<br/>22x fx worker, 4 ctx"]
         FIFO2["output FIFO<br/>1024x16"]
-        AXIM["axi_ddr_writer<br/>AXI4 Master<br/>64-bit packed pixels"]
+        AXIW["axi_ddr_writer<br/>AXI4 AW/W/B Master"]
+        AXIR["axi_ddr_reader<br/>AXI4 AR/R Master"]
+        TXC["tx_ctrl<br/>RT/TD/TE"]
         UTX2["uart_tx<br/>12 Mbaud"]
-        URX --> CMD2 --> CORE2 --> FIFO2 --> AXIM
+        URX --> CMD2 --> CORE2 --> FIFO2 --> AXIW
+        AXIR --> TXC --> UTX2
         CMD2 --> UTX2
     end
 
     subgraph PS["FPGA PS"]
-        direction TB
         DDR["PS DDR4 4 GiB<br/>pixel buffer"]
     end
 
     URX -->|"UART command"| USB["Host PC"]
-    UTX2 -->|"ACK / TILE_DONE"| USB
-    AXIM -->|"AXI HP0 64-bit<br/>~500 MB/s"| DDR
+    UTX2 -->|"ACK / TILE_DONE / RT/TD/TE"| USB
+    AXIW -->|"AXI HPC0 write"| DDR
+    DDR -->|"AXI HPC0 read"| AXIR
 ```
 
 ### B.3 Protocol
 
 The PL-PS DDR protocol uses `55 AA TYPE LEN PAYLOAD CHECKSUM` frames:
 
-| Direction | Type | Name | Purpose |
-|---|---|---|---|
-| H→F | 0x10 | COMPUTE_TILE | Compute tile and write to DDR (42-byte payload: center_re/im/step + max_iter + rows/cols + ddr_base + tile_id) |
-| H→F | 0x11 | ENTER_DOWNLOAD | All tiles done, enter download phase |
-| H→F | 0x02 | QUERY_STATUS | Debug: query internal pipeline state |
-| F→H | 0x81 | ACK | Command accepted (1-byte status) |
-| F→H | 0x84 | TILE_DONE | Tile written to DDR (4-byte checksum) |
-| F→H | 0x90 | DEBUG_STATUS | Debug response (13-byte pipeline state snapshot) |
+| Direction | Type | Name | Len | Purpose |
+|---|---|---|---|---|
+| H→F | 0x10 | COMPUTE_TILE | 42 | Compute tile and write to DDR (center_re/im/step + max_iter + rows/cols + ddr_base + tile_id) |
+| H→F | 0x11 | ENTER_DOWNLOAD | 12 | Download a tile from DDR via UART (ddr_base u64 + rows u16 + cols u16) |
+| H→F | 0x02 | QUERY_STATUS | 0 | Debug: query internal pipeline state |
+| F→H | 0x81 | ACK | 1 | Command accepted (status: 0=OK, 1=BUSY, 2=BAD_ALIGN, 3=BAD_SIZE) |
+| F→H | 0x84 | TILE_DONE | 4 | Tile written to DDR (xor16 u16 + status u8 + reserved u8) |
+| F→H | 0x90 | DEBUG_STATUS | 13 | Debug response (13-byte pipeline state snapshot) |
 
 ### B.4 done_sticky + done_ack Handshake
 
-The `axi_ddr_writer` sets `done_sticky` (a level signal) when all pixels are written to DDR. The `cmd_parser_v2` detects this, queues a TILE_DONE frame, and after the frame's checksum byte is transmitted, pulses `done_ack` for one cycle to clear `done_sticky`. A `was_tile_done_tx` flag prevents re-triggering `tile_done_pending` during the 1-cycle window between TX completion and `done_sticky` clearing.
+The `axi_ddr_writer` sets `done_sticky` (a level signal) when all pixels are written to DDR. The `cmd_parser_v2` detects this via `ddr_done_seen`, queues a TILE_DONE frame, and after the frame's checksum byte is transmitted, pulses `done_ack` for one cycle to clear `done_sticky`.
 
-### B.5 UART Debug Mode
+### B.5 UART Download Path
 
-The QUERY_STATUS (0x02) command returns a DEBUG_STATUS (0x90) frame with 13 bytes of internal state: cmd_parser state, axi_writer state, compute_busy, compute_started, tile_done_pending, ack_pending, FIFO status, pixels sent/total, checksum, rows, cols, max_iter. This was used to diagnose the TILE_DONE notification bug by observing that `axi_state=IDLE, p_sent=16, p_total=16` but `done_sticky=0` — proving the done pulse was lost during TX.
+The download path reuses the existing `tx_ctrl` module to generate `RT/TD/TE` frames. The `axi_ddr_reader` reads 64-bit beats from DDR via AXI AR/R, feeds them through a 16-entry beat FIFO, and serializes them into uint16 pixels via a 4-lane serializer. The `top_with_ram` download controller manages UART TX ownership: `cmd_parser_v2` owns TX during command/ACK/TILE_DONE phase; `tx_ctrl` owns TX during `RT/TD/TE` download phase.
+
+If a UART framing error occurs during download, the host drains stale bytes and re-sends `ENTER_DOWNLOAD` for the same DDR address. The FPGA re-reads the tile from DDR without recomputing.
 
 ### B.6 Boot Flow
 
@@ -1125,27 +1155,29 @@ The design uses a JTAG blank-boot flow (no FSBL, no PS C code):
 4. `fpga system_wrapper.bit` (PL bitstream)
 5. PL `pl_por` releases reset after ~5ms, UART alive
 
-### B.7 Six-Scene Benchmark Results
+### B.7 Benchmark Results
 
-| Scene | UART fx64 24w | PL-PS DDR 22w | Speedup |
-|---|---:|---:|---:|
-| Fast escape @128 | `3.733s` | **`0.219s`** | **`17.1x`** |
-| Standard @64 | `3.816s` | **`0.224s`** | **`17.0x`** |
-| Seahorse @512 | `3.964s` | **`1.072s`** | **`3.7x`** |
-| Deep tendrils @8192 | `3.994s` | **`1.937s`** | **`2.1x`** |
-| Deep mini-brot @8192 | `9.192s` | **`5.090s`** | **`1.8x`** |
-| Deep Seahorse @1024 | `4.575s` | **`2.289s`** | **`2.0x`** |
+The old UART design pipelines compute and transfer per tile (total ≈ max(compute, transfer)). The DDR design separates them into sequential phases: compute → DDR write, then DDR → UART download (total = compute + download).
 
-Shallow scenes accelerate 17× because UART no longer blocks compute. Deep scenes limited by compute (22 workers vs 24 in UART mode, reduced to fit AXI infrastructure LUT).
+| Scene | Old UART 24w (s) | DDR Compute (s) | DDR Download (s) | DDR Total (s) | E2E Speedup |
+|---|---:|---:|---:|---:|---:|
+| Fast escape @128 | `3.733` | `0.221` | `4.369` | `4.590` | `0.81x` |
+| Standard @64 | `3.727` | `0.223` | `4.373` | `4.596` | `0.81x` |
+| Seahorse @512 | `3.882` | `1.086` | `5.009` | `6.095` | `0.64x` |
+| Deep tendrils @8192 | `5.029` | `1.950` | `5.002` | `6.952` | `0.72x` |
+| Deep mini-brot @8192 | `5.091` | `5.104` | `4.418` | `9.522` | `0.53x` |
+| Deep Seahorse @1024 | `4.074` | `2.254` | `4.406` | `6.660` | `0.61x` |
+
+End-to-end DDR mode is slower than UART because compute and download are sequential. The DDR design's value is compute-stage acceleration (1.8-17× without UART backpressure), lossless retry from DDR, and a path to PS-side push (Ethernet/USB) that would reduce download from ~4.4s to <0.1s.
 
 ### B.8 Resource
 
 | Resource | UART fx64 24w | PL-PS DDR 22w | Change |
 |---|---:|---:|---|
-| CLB LUTs | 83,731 (95.32%) | 84,881 (96.63%) | +1,150 (AXI/PS infra) |
-| DSP48E2 | 483 (66.3%) | 442 (60.7%) | -41 (22 vs 24 workers) |
+| CLB LUTs | 83,731 (95.32%) | 86,450 (98.42%) | +2,719 (PS + AXI R/W + download) |
+| DSP48E2 | 483 (66.3%) | 445 (61.1%) | -38 (22 vs 24 workers) |
 | Block RAM Tile | 33 (25.8%) | 46 (35.9%) | +13 (PS infra) |
-| WNS | 0.078ns | 0.134ns | Slightly worse |
+| WNS | 0.078ns | 0.114ns | Timing met at 200 MHz |
 
 ### B.9 Reference Project
 

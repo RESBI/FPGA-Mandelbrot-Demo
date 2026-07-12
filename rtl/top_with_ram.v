@@ -55,28 +55,56 @@ module top_with_ram #(
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI BVALID" *)
     input  wire                         m_axi_bvalid,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI BREADY" *)
-    output wire                         m_axi_bready
+    output wire                         m_axi_bready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARADDR" *)
+    output wire [AXI_ADDR_WIDTH-1:0]    m_axi_araddr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARLEN" *)
+    output wire [7:0]                   m_axi_arlen,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARSIZE" *)
+    output wire [2:0]                   m_axi_arsize,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARBURST" *)
+    output wire [1:0]                   m_axi_arburst,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARLOCK" *)
+    output wire                         m_axi_arlock,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARCACHE" *)
+    output wire [3:0]                   m_axi_arcache,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARPROT" *)
+    output wire [2:0]                   m_axi_arprot,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARQOS" *)
+    output wire [3:0]                   m_axi_arqos,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARVALID" *)
+    output wire                         m_axi_arvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI ARREADY" *)
+    input  wire                         m_axi_arready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RDATA" *)
+    input  wire [AXI_DATA_WIDTH-1:0]    m_axi_rdata,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RRESP" *)
+    input  wire [1:0]                   m_axi_rresp,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RLAST" *)
+    input  wire                         m_axi_rlast,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RVALID" *)
+    input  wire                         m_axi_rvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RREADY" *)
+    output wire                         m_axi_rready
 );
-
-    assign m_axi_awlen   = BURST_BEATS - 1;
-    assign m_axi_awsize  = 3'd3;
-    assign m_axi_awburst = 2'b01;
-    assign m_axi_awlock  = 1'b0;
-    assign m_axi_awcache = 4'b0011;
-    assign m_axi_awprot  = 3'b000;
-    assign m_axi_awqos   = 4'b0000;
-    assign m_axi_wstrb   = 8'hFF;
 
     wire [7:0] rx_data;
     wire       rx_valid;
     wire [7:0] tx_data;
     wire       tx_en;
     wire       tx_avail;
+    wire [7:0] cmd_tx_data;
+    wire       cmd_tx_en;
+    wire       cmd_tx_avail;
+    wire       cmd_tx_idle;
+    wire [7:0] download_tx_data;
+    wire       download_tx_en;
+    wire       download_tx_avail;
 
-    uart_rx #(.CLK_HZ(CLK_HZ)) u_rx (
+    uart_rx #(.CLK_HZ(CLK_HZ), .BAUD(UART_BAUD)) u_rx (
         .rx(uart_rx), .clk(aclk), .data(rx_data), .data_avail(rx_valid)
     );
-    uart_tx #(.CLK_HZ(CLK_HZ)) u_tx (
+    uart_tx #(.CLK_HZ(CLK_HZ), .BAUD(UART_BAUD)) u_tx (
         .tx(uart_tx), .clk(aclk), .data(tx_data), .transmit_en(tx_en), .transmit_avail(tx_avail)
     );
 
@@ -86,12 +114,24 @@ module top_with_ram #(
     wire [15:0] cmd_max_iter, cmd_rows, cmd_cols;
     wire [63:0] cmd_ddr_base;
     wire        cmd_enter_download;
+    wire [63:0] cmd_download_base;
+    wire [15:0] cmd_download_rows;
+    wire [15:0] cmd_download_cols;
     wire        done_ack;
     wire        axi_done_sticky;
+    wire [15:0] axi_checksum;
+    wire        axi_writer_busy;
+    wire        axi_writer_error;
+    wire [1:0]  axi_writer_error_resp;
     wire [2:0]  axi_dbg_state;
     wire [31:0] axi_dbg_p_sent;
     wire [31:0] axi_dbg_p_total;
     wire [3:0]  cmd_dbg_state;
+    wire        fifo_write_avail;
+    wire        fifo_rd_avail;
+    wire        fifo_rd_en;
+    wire [15:0] fifo_rd_data;
+    wire        download_busy;
 
     cmd_parser_v2 #(.FX_W(`FX_W)) u_cmd (
         .clk(aclk), .rstn(aresetn),
@@ -102,9 +142,15 @@ module top_with_ram #(
         .rows(cmd_rows), .cols(cmd_cols),
         .ddr_base(cmd_ddr_base),
         .enter_download(cmd_enter_download),
+        .download_base(cmd_download_base),
+        .download_rows(cmd_download_rows),
+        .download_cols(cmd_download_cols),
         .compute_busy(compute_busy),
+        .ddr_write_busy(axi_writer_busy),
+        .download_busy(download_busy),
         .ddr_write_done(axi_done_sticky),
         .ddr_write_checksum(axi_checksum),
+        .ddr_write_error(axi_writer_error),
         .done_ack(done_ack),
         .dbg_axi_state(axi_dbg_state),
         .dbg_axi_p_sent(axi_dbg_p_sent),
@@ -113,7 +159,8 @@ module top_with_ram #(
         .dbg_fifo_wr_avail(fifo_write_avail),
         .dbg_done_sticky(axi_done_sticky),
         .dbg_cmd_state(cmd_dbg_state),
-        .tx_avail(tx_avail), .tx_data(tx_data), .tx_en(tx_en)
+        .tx_avail(cmd_tx_avail), .tx_data(cmd_tx_data), .tx_en(cmd_tx_en),
+        .tx_idle(cmd_tx_idle)
     );
 
     wire [15:0] core_fifo_data;
@@ -143,11 +190,6 @@ module top_with_ram #(
         .tx_start(core_tx_start), .tx_rows(core_tx_rows), .tx_cols(core_tx_cols)
     );
 
-    wire        fifo_write_avail;
-    wire        fifo_rd_avail;
-    wire        fifo_rd_en;
-    wire [15:0] fifo_rd_data;
-
     assign core_fifo_full = !fifo_write_avail;
 
     queue #(.DEPTH(`CFG_OUTPUT_FIFO_DEPTH), .DATA_W(16)) u_fifo (
@@ -171,15 +213,13 @@ module top_with_ram #(
             axi_start_r <= 0;
             if (compute_start) begin
                 active_ddr_base <= cmd_ddr_base;
-                active_pixel_count <= cmd_rows * cmd_cols;
+                active_pixel_count <= {16'd0, cmd_rows} * {16'd0, cmd_cols};
                 axi_start_r <= 1;
             end
         end
     end
 
     wire        axi_done;
-    wire [15:0] axi_checksum;
-
     axi_ddr_writer #(
         .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
         .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
@@ -190,7 +230,9 @@ module top_with_ram #(
         .done_ack(done_ack),
         .base_addr(active_ddr_base),
         .pixel_count(active_pixel_count),
+        .busy(axi_writer_busy),
         .done(axi_done), .checksum(axi_checksum),
+        .error(axi_writer_error), .error_resp(axi_writer_error_resp),
         .done_sticky(axi_done_sticky),
         .dbg_state(axi_dbg_state),
         .dbg_p_sent(axi_dbg_p_sent),
@@ -208,6 +250,122 @@ module top_with_ram #(
         .m_axi_wready(m_axi_wready),
         .m_axi_bresp(m_axi_bresp), .m_axi_bvalid(m_axi_bvalid),
         .m_axi_bready(m_axi_bready)
+    );
+
+    reg         download_pending;
+    reg         download_active;
+    reg         download_finish_pending;
+    reg         reader_start_r;
+    reg         download_tx_start_r;
+    reg         download_reset_r;
+    reg [63:0]  active_download_base;
+    reg [15:0]  active_download_rows;
+    reg [15:0]  active_download_cols;
+
+    wire [31:0] download_pixel_count =
+        {16'd0, active_download_rows} * {16'd0, active_download_cols};
+    assign download_busy = download_pending || download_active || download_finish_pending;
+    wire        reader_busy;
+    wire        reader_done;
+    wire        reader_error;
+    wire [1:0]  reader_error_resp;
+    wire        reader_pixel_rd;
+    wire [15:0] reader_pixel_data;
+    wire        reader_pixel_avail;
+    wire        download_tx_done;
+
+    assign cmd_tx_avail = !download_active && tx_avail;
+    assign download_tx_avail = download_active && tx_avail;
+    assign tx_data = download_active ? download_tx_data : cmd_tx_data;
+    assign tx_en = download_active ? download_tx_en : cmd_tx_en;
+
+    always @(posedge aclk) begin
+        if (!aresetn) begin
+            download_pending <= 0;
+            download_active <= 0;
+            download_finish_pending <= 0;
+            reader_start_r <= 0;
+            download_tx_start_r <= 0;
+            download_reset_r <= 0;
+            active_download_base <= 0;
+            active_download_rows <= 0;
+            active_download_cols <= 0;
+        end else begin
+            reader_start_r <= 0;
+            download_tx_start_r <= 0;
+            download_reset_r <= 0;
+
+            if (cmd_enter_download) begin
+                active_download_base <= cmd_download_base;
+                active_download_rows <= cmd_download_rows;
+                active_download_cols <= cmd_download_cols;
+                download_pending <= 1;
+            end
+
+            if (download_pending && cmd_tx_idle && tx_avail &&
+                !compute_busy && !axi_writer_busy && !axi_done_sticky) begin
+                download_pending <= 0;
+                download_active <= 1;
+                reader_start_r <= 1;
+                download_tx_start_r <= 1;
+            end
+
+            if (download_active && download_tx_done)
+                download_finish_pending <= 1;
+
+            if (download_active && reader_error) begin
+                download_active <= 0;
+                download_finish_pending <= 0;
+                download_reset_r <= 1;
+            end
+
+            if (download_finish_pending && tx_avail) begin
+                download_finish_pending <= 0;
+                download_active <= 0;
+            end
+        end
+    end
+
+    axi_ddr_reader #(
+        .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
+        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
+        .MAX_BURST_BEATS(BURST_BEATS),
+        .BEAT_FIFO_DEPTH(BURST_BEATS)
+    ) u_axi_reader (
+        .aclk(aclk), .aresetn(aresetn && !download_reset_r),
+        .start(reader_start_r),
+        .base_addr(active_download_base),
+        .pixel_count(download_pixel_count),
+        .busy(reader_busy), .done(reader_done),
+        .error(reader_error), .error_resp(reader_error_resp),
+        .pixel_rd_en(reader_pixel_rd),
+        .pixel_rd_data(reader_pixel_data),
+        .pixel_rd_avail(reader_pixel_avail),
+        .m_axi_araddr(m_axi_araddr), .m_axi_arlen(m_axi_arlen),
+        .m_axi_arsize(m_axi_arsize), .m_axi_arburst(m_axi_arburst),
+        .m_axi_arlock(m_axi_arlock), .m_axi_arcache(m_axi_arcache),
+        .m_axi_arprot(m_axi_arprot), .m_axi_arqos(m_axi_arqos),
+        .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready),
+        .m_axi_rdata(m_axi_rdata), .m_axi_rresp(m_axi_rresp),
+        .m_axi_rlast(m_axi_rlast), .m_axi_rvalid(m_axi_rvalid),
+        .m_axi_rready(m_axi_rready)
+    );
+
+    tx_ctrl #(
+        .RESPONSE_TILE_COLS(`CFG_RESPONSE_TILE_COLS),
+        .RESPONSE_TILE_ROW_SPLITS(`CFG_RESPONSE_TILE_ROW_SPLITS)
+    ) u_download_tx (
+        .clk(aclk), .rst(~aresetn || download_reset_r),
+        .start(download_tx_start_r),
+        .rows(active_download_rows),
+        .cols(active_download_cols),
+        .done(download_tx_done),
+        .fifo_rd(reader_pixel_rd),
+        .fifo_data(reader_pixel_data),
+        .fifo_avail(reader_pixel_avail),
+        .tx_data(download_tx_data),
+        .tx_en(download_tx_en),
+        .tx_avail(download_tx_avail)
     );
 
 endmodule

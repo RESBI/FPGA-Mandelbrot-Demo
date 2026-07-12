@@ -55,6 +55,7 @@ def run_one(args, scene, tile_w, tile_h):
     cmd = [
         sys.executable,
         str(HOST),
+        "--mode", "fx64",
         "--port", args.port,
         "--width", str(scene["width"]),
         "--height", str(scene["height"]),

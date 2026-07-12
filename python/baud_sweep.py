@@ -101,6 +101,7 @@ def small_frame(port, baud):
     cmd = [
         sys.executable,
         str(ROOT / "python" / "mandelbrot_host.py"),
+        "--mode", "fx64",
         "--width", "16",
         "--height", "16",
         "--max-iter", "16",

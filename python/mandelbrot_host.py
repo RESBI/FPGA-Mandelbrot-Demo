@@ -22,6 +22,7 @@ import sys
 import argparse
 import os
 import colorsys
+import math
 from concurrent.futures import ThreadPoolExecutor
 
 PORT = "COM6"
@@ -31,11 +32,28 @@ DEFAULT_DYNAMIC_OWNER_DEPTH = 4096
 DEFAULT_MAX_HOST_BYTES = 512 * 1024 * 1024
 DEFAULT_HOST_TILE_HEIGHT = 120
 DEFAULT_COMPUTE_TILE_MAX_WIDTH = 2048
+DEFAULT_DDR_TILE_MAX_WIDTH = 1920
 DEFAULT_TILE_READ_TIMEOUT = 5.0
 TILE_PROGRESS_PACKET_INTERVAL = 1024
 SOFT_RESET_COMMAND = b"RST!RST!"
 QUIET_PROGRESS_BAR_WIDTH = 28
 ASYNC_CHECKSUM_WORKERS = 4
+
+# ============================================================
+#  DDR Mode Constants
+# ============================================================
+FX_FRAC = 55
+DDR_FRAME_SYNC0 = 0x55
+DDR_FRAME_SYNC1 = 0xAA
+DDR_TYPE_COMPUTE_TILE = 0x10
+DDR_TYPE_ENTER_DOWNLOAD = 0x11
+DDR_TYPE_QUERY_STATUS = 0x02
+DDR_TYPE_ACK = 0x81
+DDR_TYPE_TILE_DONE = 0x84
+DDR_TYPE_DEBUG_STATUS = 0x90
+DDR_DEFAULT_BASE = 0x10000000
+DDR_SLOT_ALIGNMENT = 128
+DDR_LOW_SAFE_END = 0x7FF00000
 
 
 class LocalTileChecksumError(Exception):
@@ -516,22 +534,25 @@ class MandelbrotFPGA:
         if self.verbose:
             print(f"Tiled response header: {resp_rows}x{resp_cols}")
         if resp_rows != height or resp_cols != width:
-            print(f"WARNING: Dims mismatch: {resp_rows}x{resp_cols} vs {height}x{width}")
+            print(f"ERROR: Dims mismatch: {resp_rows}x{resp_cols} vs {height}x{width}")
+            return None
 
         total_pixels = resp_rows * resp_cols
         received_pixels = 0
         tile_count = 0
         tile_futures = []
+        expected_row = 0
 
         while True:
-            tile_magic = self.ser.read(2)
-            if len(tile_magic) < 2:
+            deadline = time.perf_counter() + max(self.ser.timeout or TIMEOUT, 0.001)
+            tile_magic = self._read_exact(2, deadline) if hasattr(self, '_read_exact') else self.ser.read(2)
+            if tile_magic is None or len(tile_magic) < 2:
                 print(f"ERROR: Incomplete tile magic after {received_pixels}/{total_pixels} pixels")
                 return None
 
             if tile_magic == b"TE":
-                end_payload = self.ser.read(4)
-                if len(end_payload) < 4:
+                end_payload = self._read_exact(4, deadline) if hasattr(self, '_read_exact') else self.ser.read(4)
+                if end_payload is None or len(end_payload) < 4:
                     print(f"ERROR: Incomplete end frame after {received_pixels}/{total_pixels} pixels")
                     return None
                 end_rows = struct.unpack('<H', end_payload[0:2])[0]
@@ -541,6 +562,9 @@ class MandelbrotFPGA:
                     return None
                 if received_pixels != total_pixels:
                     print(f"ERROR: End frame before full image: {received_pixels}/{total_pixels} pixels")
+                    return None
+                if expected_row != resp_rows:
+                    print(f"ERROR: End frame before full row coverage: {expected_row}/{resp_rows}")
                     return None
                 if self.verbose:
                     print(f"Received {received_pixels} pixels in {tile_count} tiles")
@@ -555,8 +579,8 @@ class MandelbrotFPGA:
                 print(f"ERROR: Bad tile magic: {tile_magic.hex()}")
                 return None
 
-            tile_rest = self.ser.read(8)
-            if len(tile_rest) < 8:
+            tile_rest = self._read_exact(8, deadline) if hasattr(self, '_read_exact') else self.ser.read(8)
+            if tile_rest is None or len(tile_rest) < 8:
                 print(f"ERROR: Incomplete tile header after {received_pixels}/{total_pixels} pixels")
                 return None
 
@@ -575,14 +599,22 @@ class MandelbrotFPGA:
             if row + tile_rows > resp_rows or col + tile_cols > resp_cols:
                 print(f"ERROR: Tile out of bounds: row={row}, col={col}, size={tile_rows}x{tile_cols}")
                 return None
-
-            payload = self.ser.read(payload_bytes)
-            if len(payload) < payload_bytes:
-                print(f"ERROR: Incomplete tile payload at row={row}, col={col}: {len(payload)}/{payload_bytes}")
+            if col != 0 or tile_cols != resp_cols or row != expected_row:
+                print(f"ERROR: Unexpected tile geometry: row={row}, expected_row={expected_row}, "
+                      f"col={col}, tile_cols={tile_cols}, frame_cols={resp_cols}")
                 return None
 
-            ck_byte = self.ser.read(1)
-            if len(ck_byte) < 1:
+            payload_timeout = max(self.ser.timeout or TIMEOUT,
+                                  payload_bytes * 10.0 / BAUD + 1.0)
+            payload_deadline = time.perf_counter() + payload_timeout
+            payload = self._read_exact(payload_bytes, payload_deadline) if hasattr(self, '_read_exact') else self.ser.read(payload_bytes)
+            if payload is None or len(payload) < payload_bytes:
+                got = len(payload) if payload is not None else 0
+                print(f"ERROR: Incomplete tile payload at row={row}, col={col}: {got}/{payload_bytes}")
+                return None
+
+            ck_byte = self._read_exact(1, payload_deadline) if hasattr(self, '_read_exact') else self.ser.read(1)
+            if ck_byte is None or len(ck_byte) < 1:
                 print(f"ERROR: Missing tile checksum at row={row}, col={col}")
                 return None
 
@@ -601,6 +633,7 @@ class MandelbrotFPGA:
                 tile_futures.append(checksum_executor.submit(
                     process_tiled_payload, payload, ck_byte[0], row, col, tile_rows, tile_cols))
             received_pixels += tile_pixels
+            expected_row += tile_rows
 
             tile_count += 1
             if self.verbose and (tile_count % TILE_PROGRESS_PACKET_INTERVAL == 0 or received_pixels == total_pixels):
@@ -608,9 +641,14 @@ class MandelbrotFPGA:
 
     def recv_response(self, width, height, collect_local_failures=False,
                       checksum_executor=None, async_finalize=False):
-        header = self.ser.read(6)
-        if len(header) < 6:
-            print(f"ERROR: Incomplete header: {header.hex() if header else 'none'}")
+        if hasattr(self, '_read_exact'):
+            deadline = time.perf_counter() + max(self.ser.timeout or TIMEOUT, 0.001)
+            header = self._read_exact(6, deadline)
+        else:
+            header = self.ser.read(6)
+        if header is None or len(header) < 6:
+            got = header.hex() if header is not None else 'none'
+            print(f"ERROR: Incomplete header: {got}")
             return None
 
         if header[0:2] == b"RK":
@@ -626,6 +664,262 @@ class MandelbrotFPGA:
 
 
 # ============================================================
+#  DDR Mode Protocol and Communication
+# ============================================================
+def to_fx64(value):
+    """Convert a float to Q8.55 fixed-point signed 64-bit integer."""
+    return int(round(value * (2 ** FX_FRAC)))
+
+
+def build_ddr_frame(frame_type, payload=b''):
+    """Build a 55 AA TYPE LEN PAYLOAD CHECKSUM frame (two's-complement checksum)."""
+    if len(payload) > 255:
+        raise ValueError("DDR control payload must fit the 8-bit length field")
+    frame = bytearray([DDR_FRAME_SYNC0, DDR_FRAME_SYNC1, frame_type, len(payload)])
+    frame += payload
+    checksum = 0
+    for b in frame[2:]:
+        checksum = (checksum + b) & 0xFF
+    frame.append((-checksum) & 0xFF)
+    return bytes(frame)
+
+
+def parse_ddr_frame(data):
+    """Parse a 55 AA TYPE LEN PAYLOAD CHECKSUM frame. Returns (ftype, payload) or None."""
+    if len(data) < 5:
+        return None
+    if data[0] != DDR_FRAME_SYNC0 or data[1] != DDR_FRAME_SYNC1:
+        return None
+    ftype = data[2]
+    flen = data[3]
+    if len(data) < 4 + flen + 1:
+        return None
+    payload = data[4:4 + flen]
+    checksum = data[4 + flen]
+    s = (ftype + flen) & 0xFF
+    for b in payload:
+        s = (s + b) & 0xFF
+    if (s + checksum) & 0xFF != 0:
+        return None
+    return (ftype, payload)
+
+
+def build_compute_tile_payload(cre, cim, step, max_iter, rows, cols, ddr_base, tile_id):
+    """Build COMPUTE_TILE payload (42 bytes): center_re(8) center_im(8) step(8) max_iter(2) rows(2) cols(2) ddr_base(8) tile_id(4)."""
+    payload = bytearray()
+    payload += struct.pack('<q', to_fx64(cre))
+    payload += struct.pack('<q', to_fx64(cim))
+    payload += struct.pack('<q', to_fx64(step))
+    payload += struct.pack('<H', max_iter)
+    payload += struct.pack('<H', rows)
+    payload += struct.pack('<H', cols)
+    payload += struct.pack('<Q', ddr_base)
+    payload += struct.pack('<I', tile_id)
+    return bytes(payload)
+
+
+def build_compute_tile_payload_fx(cre_fx, cim_fx, step_fx, max_iter,
+                                  rows, cols, ddr_base, tile_id):
+    return struct.pack('<qqqHHHQI', cre_fx, cim_fx, step_fx, max_iter,
+                       rows, cols, ddr_base, tile_id)
+
+
+def align_up(value, alignment):
+    return (value + alignment - 1) & ~(alignment - 1)
+
+
+def pixel_xor16(pixels):
+    checksum = 0
+    for value in pixels:
+        checksum ^= value
+    return checksum
+
+
+class MandelbrotDDR(MandelbrotFPGA):
+    """DDR mode communicator: sends COMPUTE_TILE commands, receives ACK/TILE_DONE."""
+
+    def read_frame(self, timeout=30):
+        """Read one complete DDR frame from UART. Returns (ftype, payload) or None."""
+        deadline = time.perf_counter() + timeout
+        old_timeout = self.ser.timeout
+        sync_state = 0
+        try:
+            self.ser.timeout = min(0.1, max(timeout, 0.001))
+            while time.perf_counter() < deadline:
+                byte = self.ser.read(1)
+                if not byte:
+                    continue
+                value = byte[0]
+                if sync_state == 0:
+                    sync_state = 1 if value == DDR_FRAME_SYNC0 else 0
+                    continue
+                if value != DDR_FRAME_SYNC1:
+                    sync_state = 1 if value == DDR_FRAME_SYNC0 else 0
+                    continue
+
+                header = self._read_exact(2, deadline)
+                if header is None:
+                    return None
+                frame_type, frame_len = header
+                tail = self._read_exact(frame_len + 1, deadline)
+                if tail is None:
+                    return None
+                result = parse_ddr_frame(
+                    bytes([DDR_FRAME_SYNC0, DDR_FRAME_SYNC1]) + header + tail)
+                if result is not None:
+                    return result
+                sync_state = 0
+        finally:
+            self.ser.timeout = old_timeout
+        return None
+
+    def _read_exact(self, size, deadline):
+        data = bytearray()
+        while len(data) < size and time.perf_counter() < deadline:
+            chunk = self.ser.read(size - len(data))
+            if chunk:
+                data += chunk
+        return bytes(data) if len(data) == size else None
+
+    def send_compute_tile(self, cre, cim, step, max_iter, rows, cols, ddr_base, tile_id):
+        payload = build_compute_tile_payload(cre, cim, step, max_iter, rows, cols, ddr_base, tile_id)
+        frame = build_ddr_frame(DDR_TYPE_COMPUTE_TILE, payload)
+        self.ser.write(frame)
+        self.ser.flush()
+        if self.verbose:
+            print(f"  COMPUTE_TILE: {cols}x{rows} max_iter={max_iter} "
+                  f"ddr_base=0x{ddr_base:X} tile_id={tile_id}")
+
+    def send_compute_tile_fx(self, cre_fx, cim_fx, step_fx, max_iter,
+                             rows, cols, ddr_base, tile_id):
+        payload = build_compute_tile_payload_fx(
+            cre_fx, cim_fx, step_fx, max_iter, rows, cols, ddr_base, tile_id)
+        frame = build_ddr_frame(DDR_TYPE_COMPUTE_TILE, payload)
+        self.ser.write(frame)
+        self.ser.flush()
+        if self.verbose:
+            print(f"  COMPUTE_TILE: {cols}x{rows} max_iter={max_iter} "
+                  f"ddr_base=0x{ddr_base:X} tile_id={tile_id}")
+
+    def send_enter_download(self, ddr_base, rows, cols):
+        frame = build_ddr_frame(
+            DDR_TYPE_ENTER_DOWNLOAD, struct.pack('<QHH', ddr_base, rows, cols))
+        self.ser.write(frame)
+        self.ser.flush()
+        if self.verbose:
+            print(f"  ENTER_DOWNLOAD: {cols}x{rows} ddr_base=0x{ddr_base:X}")
+
+    def query_status(self):
+        frame = build_ddr_frame(DDR_TYPE_QUERY_STATUS)
+        self.ser.write(frame)
+        self.ser.flush()
+        return self.read_frame(timeout=5)
+
+    def send_compute_tile_and_wait(self, cre, cim, step, max_iter, rows, cols,
+                                   ddr_base, tile_id, timeout=120):
+        """Send COMPUTE_TILE, wait for ACK then TILE_DONE. Returns (checksum, ack_status) or (None, -1)."""
+        self.send_compute_tile(cre, cim, step, max_iter, rows, cols, ddr_base, tile_id)
+
+        ack = self.read_frame(timeout=10)
+        if not ack or ack[0] != DDR_TYPE_ACK or len(ack[1]) != 1:
+            if self.verbose:
+                print(f"  ERROR: ACK timeout or wrong type: {ack}")
+            return None, -1
+        ack_status = ack[1][0] if ack[1] else -1
+        if ack_status != 0:
+            if self.verbose:
+                print(f"  ERROR: ACK status={ack_status}")
+            return None, ack_status
+
+        done = self.read_frame(timeout=timeout)
+        if not done or done[0] != DDR_TYPE_TILE_DONE or len(done[1]) != 4:
+            if self.verbose:
+                print(f"  ERROR: TILE_DONE timeout or wrong type: {done}")
+            return None, -1
+
+        checksum = struct.unpack('<H', done[1][:2])[0]
+        done_status = done[1][2]
+        if done_status != 0:
+            if self.verbose:
+                print(f"  ERROR: TILE_DONE status={done_status}")
+            return None, done_status
+        return checksum, 0
+
+    def send_compute_tile_fx_and_wait(self, cre_fx, cim_fx, step_fx, max_iter,
+                                      rows, cols, ddr_base, tile_id, timeout=None):
+        self.send_compute_tile_fx(
+            cre_fx, cim_fx, step_fx, max_iter, rows, cols, ddr_base, tile_id)
+        ack = self.read_frame(timeout=10)
+        if not ack or ack[0] != DDR_TYPE_ACK or len(ack[1]) != 1:
+            return None, -1
+        if ack[1][0] != 0:
+            return None, ack[1][0]
+
+        compute_timeout = timeout if timeout is not None else (self.ser.timeout or TIMEOUT)
+        done = self.read_frame(timeout=compute_timeout)
+        if not done or done[0] != DDR_TYPE_TILE_DONE or len(done[1]) != 4:
+            return None, -1
+        checksum = struct.unpack('<H', done[1][:2])[0]
+        done_status = done[1][2]
+        return (checksum, 0) if done_status == 0 else (None, done_status)
+
+    def download_tile(self, ddr_base, rows, cols, expected_checksum,
+                      retries=5, timeout=30):
+        for attempt in range(1, retries + 2):
+            self.send_enter_download(ddr_base, rows, cols)
+            ack = self.read_frame(timeout=10)
+            if not ack or ack[0] != DDR_TYPE_ACK or len(ack[1]) != 1:
+                if attempt <= retries:
+                    print(f"WARNING: Download ACK failed for 0x{ddr_base:X}, attempt={attempt}")
+                    drain_serial_until_quiet(self, quiet_seconds=0.1, max_seconds=2.0)
+                    time.sleep(0.05)
+                    continue
+                print(f"ERROR: Download ACK failed for 0x{ddr_base:X}")
+                return None
+            if ack[1][0] == 1 and attempt <= retries:
+                time.sleep(0.05)
+                continue
+            if ack[1][0] != 0:
+                print(f"ERROR: Download ACK status={ack[1][0]} for 0x{ddr_base:X}")
+                return None
+
+            old_timeout = self.ser.timeout
+            self.ser.timeout = timeout
+            checksum_failed = False
+            try:
+                try:
+                    pixels = self.recv_response(
+                        cols, rows, collect_local_failures=True)
+                except LocalTileChecksumError:
+                    pixels = None
+                    checksum_failed = True
+            finally:
+                self.ser.timeout = old_timeout
+
+            if pixels is not None:
+                actual_checksum = pixel_xor16(pixels)
+                if actual_checksum == expected_checksum:
+                    return pixels
+                print(f"WARNING: DDR tile checksum mismatch: expected=0x{expected_checksum:04X}, "
+                      f"actual=0x{actual_checksum:04X}, attempt={attempt}")
+            else:
+                if checksum_failed:
+                    print(f"WARNING: DDR UART tile checksum failed, attempt={attempt}")
+                    continue
+                print(f"WARNING: DDR UART framing failed, attempt={attempt}")
+                remaining_stream_seconds = rows * cols * 2 * 10.0 / BAUD
+                drain_serial_until_quiet(
+                    self, quiet_seconds=0.1,
+                    max_seconds=max(2.0, remaining_stream_seconds + 1.0))
+                time.sleep(0.05)
+                if attempt <= retries:
+                    continue
+                return None
+
+        return None
+
+
+# ============================================================
 #  Software Reference
 # ============================================================
 def mandelbrot_software(center_re, center_im, step, max_iter, width, height, mode='fp64'):
@@ -636,9 +930,11 @@ def mandelbrot_software(center_re, center_im, step, max_iter, width, height, mod
     im_start = center_im + half_h * step
     if mode == 'fx64':
         F = 55
-        cre_start = round(re_start * (2**F))
-        cim_start = round(im_start * (2**F))
-        step_fx = round(step * (2**F))
+        center_re_fx = to_fx64(center_re)
+        center_im_fx = to_fx64(center_im)
+        step_fx = to_fx64(step)
+        cre_start = center_re_fx - half_w * step_fx
+        cim_start = center_im_fx + half_h * step_fx
         four = 4 << F
         for y in range(height):
             cim = cim_start - y * step_fx
@@ -1065,6 +1361,118 @@ def request_image_tiled(fpga, center_re, center_im, step, max_iter, width, heigh
     return pixels
 
 
+def request_image_ddr(fpga, center_re, center_im, step, max_iter, width, height,
+                      tile_width, tile_height, ddr_base, compute_only,
+                      download_retries, download_timeout, compute_timeout,
+                      preview=None):
+    """Request an image in PL-PS DDR mode. Returns pixel list or None."""
+    pixels = [0] * (width * height)
+    full_half_w = (width - 1) >> 1
+    full_half_h = (height - 1) >> 1
+    center_re_fx = to_fx64(center_re)
+    center_im_fx = to_fx64(center_im)
+    step_fx = to_fx64(step)
+
+    tiles_x = (width + tile_width - 1) // tile_width
+    tiles_y = (height + tile_height - 1) // tile_height
+    tile_total = tiles_x * tiles_y
+
+    tile_id = 0
+    tiles = []
+    ddr_offset = 0
+
+    completed_compute_tiles = 0
+
+    def show_progress(current_task, final=False):
+        if fpga.verbose:
+            return
+        print_quiet_progress(completed_compute_tiles, tile_total, tile_id, tile_total,
+                             current_task, final=final)
+
+    t0 = time.perf_counter()
+
+    for y0 in range(0, height, tile_height):
+        th = min(tile_height, height - y0)
+        for x0 in range(0, width, tile_width):
+            tw = min(tile_width, width - x0)
+            tile_id += 1
+
+            tile_half_w = (tw - 1) >> 1
+            tile_half_h = (th - 1) >> 1
+            subtile_center_re_fx = center_re_fx + (
+                x0 + tile_half_w - full_half_w) * step_fx
+            subtile_center_im_fx = center_im_fx + (
+                full_half_h - (y0 + tile_half_h)) * step_fx
+
+            tile_ddr_addr = ddr_base + ddr_offset
+            tile_pixels = tw * th
+            slot_bytes = align_up(tile_pixels * 2, DDR_SLOT_ALIGNMENT)
+
+            if fpga.verbose:
+                print(f"Tile {tile_id}/{tile_total}: x={x0}, y={y0}, size={tw}x{th}, "
+                      f"ddr=0x{tile_ddr_addr:X}")
+            else:
+                show_progress(f"compute x={x0}, y={y0}, size={tw}x{th}")
+
+            checksum, status = fpga.send_compute_tile_fx_and_wait(
+                subtile_center_re_fx, subtile_center_im_fx, step_fx,
+                max_iter, th, tw, tile_ddr_addr, tile_id - 1,
+                timeout=compute_timeout)
+
+            if checksum is None:
+                print(f"ERROR: Tile {tile_id} compute failed (status={status})")
+                return None
+
+            if fpga.verbose:
+                print(f"  TILE_DONE: checksum=0x{checksum:04X}")
+
+            tiles.append({
+                "x": x0,
+                "y": y0,
+                "width": tw,
+                "height": th,
+                "ddr_base": tile_ddr_addr,
+                "slot_bytes": slot_bytes,
+                "checksum": checksum,
+            })
+            ddr_offset += slot_bytes
+
+            completed_compute_tiles += 1
+            if not fpga.verbose:
+                show_progress(f"done x={x0}, y={y0}")
+
+    t_compute = time.perf_counter()
+    compute_elapsed = t_compute - t0
+    pps = (width * height) / compute_elapsed if compute_elapsed > 0 else 0.0
+    print(f"FPGA elapsed: {compute_elapsed:.3f}s ({pps:.2f} pixels/s)")
+
+    if compute_only:
+        print("Skipping UART DDR download (--compute-only)")
+        return pixels
+
+    t_download0 = time.perf_counter()
+    for download_index, tile in enumerate(tiles, 1):
+        if fpga.verbose:
+            print(f"Download {download_index}/{len(tiles)}: x={tile['x']}, y={tile['y']}, "
+                  f"size={tile['width']}x{tile['height']}, ddr=0x{tile['ddr_base']:X}")
+        tile_pixels = fpga.download_tile(
+            tile['ddr_base'], tile['height'], tile['width'], tile['checksum'],
+            retries=download_retries, timeout=download_timeout)
+        if tile_pixels is None:
+            print(f"ERROR: Failed to download DDR tile at 0x{tile['ddr_base']:X}")
+            return None
+        copy_rect(pixels, width, tile['x'], tile['y'], tile_pixels,
+                  tile['width'], tile['width'], tile['height'])
+        if preview is not None:
+            preview.refresh_rects(pixels, [(
+                tile['x'], tile['y'], tile['width'], tile['height'])])
+
+    t_download1 = time.perf_counter()
+    print(f"UART DDR download elapsed: {t_download1 - t_download0:.3f}s")
+
+    return pixels
+
+
 # ============================================================
 #  Main
 # ============================================================
@@ -1086,8 +1494,8 @@ def main():
                         help="Output format")
     parser.add_argument("--palette", type=str, choices=PALETTE_CHOICES, default="classic",
                         help="PNG/BMP color palette: classic, fire, ocean, twilight, or grayscale")
-    parser.add_argument("--mode", type=str, choices=["fp64", "fp128", "fx64"], default="fx64",
-                        help="Arithmetic mode: fx64 (fixed-point Q8.55, default), fp64 (IEEE double), fp128")
+    parser.add_argument("--mode", type=str, choices=["ddr", "fx64"], default="ddr",
+                        help="Mode: ddr (PL-PS DDR + fx64, default), fx64 (UART fixed-point)")
     parser.add_argument("--verify", action="store_true",
                         help="Also compute in software and compare")
     parser.add_argument("--port", type=str, default=PORT,
@@ -1120,9 +1528,33 @@ def main():
                         help="Show a live thumbnail preview window while tiled rendering progresses")
     parser.add_argument("--preview-size", type=int, default=512,
                         help="Maximum preview window dimension in pixels (default: 512)")
+    parser.add_argument("--ddr-base", type=lambda x: int(x, 0), default=DDR_DEFAULT_BASE,
+                        help=f"DDR base address for pixel buffer (default: 0x{DDR_DEFAULT_BASE:X})")
+    parser.add_argument("--compute-only", action="store_true",
+                        help="Compute and write DDR only; skip UART download")
+    parser.add_argument("--download-retries", type=int, default=5,
+                        help="Retries per DDR tile UART download")
+    parser.add_argument("--download-timeout", type=float, default=30.0,
+                        help="UART timeout per DDR tile download")
     args = parser.parse_args()
 
-    configure_host_tiling(args)
+    is_ddr_mode = (args.mode == 'ddr')
+
+    if is_ddr_mode:
+        args.host_tiling = True
+        if args.full_frame:
+            if args.width > DEFAULT_DDR_TILE_MAX_WIDTH and not args.force_large_frame:
+                parser.error(f"--full-frame with width>{DEFAULT_DDR_TILE_MAX_WIDTH} requires --force-large-frame in DDR mode")
+            args.tile_width = args.width
+            args.tile_height = args.height
+        elif args.tile_width <= 0:
+            args.tile_width = min(args.width, DEFAULT_DDR_TILE_MAX_WIDTH)
+        if args.tile_height <= 0:
+            args.tile_height = min(args.height, DEFAULT_HOST_TILE_HEIGHT)
+        args.compute_tile_width = args.tile_width
+        args.compute_tile_height = args.tile_height
+    else:
+        configure_host_tiling(args)
 
     if args.soft_reset:
         fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
@@ -1135,10 +1567,59 @@ def main():
 
     validate_request(args)
 
+    if is_ddr_mode:
+        if args.ddr_base & (DDR_SLOT_ALIGNMENT - 1):
+            parser.error(f"--ddr-base must be {DDR_SLOT_ALIGNMENT}-byte aligned")
+        if args.tile_height > DEFAULT_DYNAMIC_OWNER_DEPTH and not args.force_large_frame:
+            parser.error(f"DDR compute tile height must be <= {DEFAULT_DYNAMIC_OWNER_DEPTH}")
+        if args.tile_width > 65535 or args.tile_height > 65535:
+            parser.error("DDR compute tile width/height must fit uint16")
+        if args.max_iter < 0:
+            parser.error("--max-iter must be >= 0")
+        if args.download_retries < 0:
+            parser.error("--download-retries must be >= 0")
+        if args.download_timeout <= 0:
+            parser.error("--download-timeout must be > 0")
+        if not all(math.isfinite(value) for value in (*args.center, args.step)):
+            parser.error("--center and --step must be finite")
+        q_min = -(1 << 63)
+        q_max = (1 << 63) - 1
+        center_re_fx = to_fx64(args.center[0])
+        center_im_fx = to_fx64(args.center[1])
+        step_fx = to_fx64(args.step)
+        if not all(q_min <= value <= q_max for value in (
+                center_re_fx, center_im_fx, step_fx)):
+            parser.error("center/step do not fit signed Q8.55")
+        half_w = (args.width - 1) >> 1
+        half_h = (args.height - 1) >> 1
+        extrema = (
+            center_re_fx - half_w * step_fx,
+            center_re_fx + (args.width - 1 - half_w) * step_fx,
+            center_im_fx + half_h * step_fx,
+            center_im_fx - (args.height - 1 - half_h) * step_fx,
+        )
+        if not all(q_min <= value <= q_max for value in extrema):
+            parser.error("image coordinate extent does not fit signed Q8.55")
+        total_slots = 0
+        for y0 in range(0, args.height, args.tile_height):
+            th = min(args.tile_height, args.height - y0)
+            for x0 in range(0, args.width, args.tile_width):
+                tw = min(args.tile_width, args.width - x0)
+                total_slots += align_up(tw * th * 2, DDR_SLOT_ALIGNMENT)
+        if args.ddr_base < 0 or args.ddr_base >= (1 << 64):
+            parser.error("--ddr-base must fit uint64")
+        if args.ddr_base + total_slots > DDR_LOW_SAFE_END:
+            parser.error("DDR allocation reaches the PS-reserved top of the low DDR window")
+
     center_re, center_im = args.center
     print("=" * 50)
     print(" Mandelbrot FPGA Accelerator")
-    print(f" Mode: {args.mode.upper()}")
+    if is_ddr_mode:
+        print(f" Mode: DDR (fx64, PL-PS DDR)")
+        print(f" DDR base: 0x{args.ddr_base:X}")
+        print(f" UART download: {'disabled' if args.compute_only else 'enabled'}")
+    else:
+        print(f" Mode: {args.mode.upper()}")
     print(f" Center: ({center_re}, {center_im})")
     print(f" Step: {args.step}")
     print(f" Max iterations: {args.max_iter}")
@@ -1146,65 +1627,110 @@ def main():
     if args.format != "txt":
         print(f" Palette: {args.palette}")
     if args.host_tiling:
-        print(f" Host tiles: {args.tile_width}x{args.tile_height}")
-        print(f" Compute tiles: {args.compute_tile_width}x{args.compute_tile_height}, retries={args.tile_retries}, read_timeout={args.tile_read_timeout}s")
+        print(f" Compute tiles: {args.tile_width}x{args.tile_height}")
+        if not is_ddr_mode:
+            print(f" Retries: {args.tile_retries}, read_timeout={args.tile_read_timeout}s")
+            print(f" Soft reset on retry: {not args.no_soft_reset_on_retry}")
         print(f" Preview: {'enabled' if args.preview else 'disabled'}")
-        print(f" Soft reset on retry: {not args.no_soft_reset_on_retry}")
     else:
         print(" Host tiles: disabled (--full-frame)")
     print("=" * 50)
 
-    fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
     preview = None
+    fpga = None
     try:
         total_pixels = args.width * args.height
         t0 = time.perf_counter()
-        if args.preview and args.host_tiling and args.format != "txt":
-            preview = PreviewWindow(args.width, args.height, args.max_iter,
-                                    args.palette, args.preview_size)
-        if args.host_tiling:
-            pixels = request_image_tiled(fpga, center_re, center_im, args.step,
+
+        if is_ddr_mode:
+            fpga = MandelbrotDDR(port=args.port, timeout=args.timeout, verbose=not args.quiet)
+            if args.preview and args.format != "txt":
+                preview = PreviewWindow(args.width, args.height, args.max_iter,
+                                        args.palette, args.preview_size)
+            pixels = request_image_ddr(fpga, center_re, center_im, args.step,
+                                       args.max_iter, args.width, args.height,
+                                       args.tile_width, args.tile_height,
+                                       args.ddr_base, args.compute_only,
+                                       args.download_retries, args.download_timeout,
+                                       args.timeout,
+                                       preview)
+            t_recv = time.perf_counter()
+            if pixels is None:
+                print("ERROR: Failed to compute image")
+                sys.exit(1)
+
+            if args.compute_only:
+                print("(No pixel data — readback skipped)")
+            else:
+                ext = os.path.splitext(args.output)[1].lower()
+                if args.format == "txt" or ext == ".txt":
+                    render_text(pixels, args.width, args.height, args.max_iter, args.output)
+                else:
+                    render_image(pixels, args.width, args.height, args.max_iter,
+                                 args.output, args.palette)
+                t_render = time.perf_counter()
+                print(f"Render elapsed: {t_render - t_recv:.3f}s")
+
+            if args.verify and not args.compute_only:
+                print("\n--- Software Verification ---")
+                t_sw0 = time.perf_counter()
+                sw = mandelbrot_software(center_re, center_im, args.step,
                                          args.max_iter, args.width, args.height,
-                                          args.mode, args.tile_width, args.tile_height,
-                                          args.compute_tile_width, args.compute_tile_height,
-                                          args.tile_retries, args.tile_read_timeout,
-                                          not args.no_soft_reset_on_retry,
-                                          preview)
+                                         mode='fx64')
+                t_sw1 = time.perf_counter()
+                compare_results(pixels, sw, args.width, args.height)
+                print(f"Software elapsed: {t_sw1 - t_sw0:.3f}s")
+            t_done = time.perf_counter()
+            print(f"Total elapsed: {t_done - t0:.3f}s")
         else:
-            pixels = request_image(fpga, center_re, center_im, args.step,
-                                   args.max_iter, args.width, args.height, args.mode)
-        t_recv = time.perf_counter()
-        if pixels is None:
-            print("ERROR: Failed to receive response")
-            sys.exit(1)
+            fpga = MandelbrotFPGA(port=args.port, timeout=args.timeout, verbose=not args.quiet)
+            if args.preview and args.host_tiling and args.format != "txt":
+                preview = PreviewWindow(args.width, args.height, args.max_iter,
+                                        args.palette, args.preview_size)
+            if args.host_tiling:
+                pixels = request_image_tiled(fpga, center_re, center_im, args.step,
+                                             args.max_iter, args.width, args.height,
+                                             args.mode, args.tile_width, args.tile_height,
+                                             args.compute_tile_width, args.compute_tile_height,
+                                             args.tile_retries, args.tile_read_timeout,
+                                             not args.no_soft_reset_on_retry,
+                                             preview)
+            else:
+                pixels = request_image(fpga, center_re, center_im, args.step,
+                                       args.max_iter, args.width, args.height, args.mode)
+            t_recv = time.perf_counter()
+            if pixels is None:
+                print("ERROR: Failed to receive response")
+                sys.exit(1)
 
-        comm_elapsed = t_recv - t0
-        pps = total_pixels / comm_elapsed if comm_elapsed > 0 else 0.0
-        print(f"FPGA elapsed: {comm_elapsed:.3f}s ({pps:.2f} pixels/s)")
+            comm_elapsed = t_recv - t0
+            pps = total_pixels / comm_elapsed if comm_elapsed > 0 else 0.0
+            print(f"FPGA elapsed: {comm_elapsed:.3f}s ({pps:.2f} pixels/s)")
 
-        ext = os.path.splitext(args.output)[1].lower()
-        if args.format == "txt" or ext == ".txt":
-            render_text(pixels, args.width, args.height, args.max_iter, args.output)
-        else:
-            render_image(pixels, args.width, args.height, args.max_iter, args.output, args.palette)
-        t_render = time.perf_counter()
-        print(f"Render elapsed: {t_render - t_recv:.3f}s")
+            ext = os.path.splitext(args.output)[1].lower()
+            if args.format == "txt" or ext == ".txt":
+                render_text(pixels, args.width, args.height, args.max_iter, args.output)
+            else:
+                render_image(pixels, args.width, args.height, args.max_iter, args.output, args.palette)
+            t_render = time.perf_counter()
+            print(f"Render elapsed: {t_render - t_recv:.3f}s")
 
-        if args.verify:
-            print("\n--- Software Verification ---")
-            t_sw0 = time.perf_counter()
-            sw = mandelbrot_software(center_re, center_im, args.step,
-                                     args.max_iter, args.width, args.height,
-                                     mode=args.mode)
-            t_sw1 = time.perf_counter()
-            compare_results(pixels, sw, args.width, args.height)
-            print(f"Software elapsed: {t_sw1 - t_sw0:.3f}s")
-        t_done = time.perf_counter()
-        print(f"Total elapsed: {t_done - t0:.3f}s")
+            if args.verify:
+                print("\n--- Software Verification ---")
+                t_sw0 = time.perf_counter()
+                sw = mandelbrot_software(center_re, center_im, args.step,
+                                         args.max_iter, args.width, args.height,
+                                         mode=args.mode)
+                t_sw1 = time.perf_counter()
+                compare_results(pixels, sw, args.width, args.height)
+                print(f"Software elapsed: {t_sw1 - t_sw0:.3f}s")
+            t_done = time.perf_counter()
+            print(f"Total elapsed: {t_done - t0:.3f}s")
     finally:
         if preview is not None:
             preview.close()
-        fpga.close()
+        if fpga is not None:
+            fpga.close()
 
 
 if __name__ == "__main__":

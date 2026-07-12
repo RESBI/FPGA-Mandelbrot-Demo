@@ -4,7 +4,9 @@ fp128_proj/
 fp_sim_proj/
 core_sim_proj/
 core_count_sim_proj/
+mandelbrot_with_ram_proj/
 .Xil/
+.build_pid
 
 # XSim generated artifacts
 xsim.dir/
@@ -25,6 +27,7 @@ xsim.dir/
 *.ltx
 *.hwdef
 *.sysdef
+*.xsa
 *.mmi
 *.mcs
 *.prm

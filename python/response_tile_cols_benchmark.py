@@ -74,6 +74,7 @@ def run_one(args, response_tile_cols, run_idx):
     cmd = [
         sys.executable,
         str(HOST),
+        "--mode", "fx64",
         "--port", args.port,
         "--width", str(STANDARD_SCENE["width"]),
         "--height", str(STANDARD_SCENE["height"]),
