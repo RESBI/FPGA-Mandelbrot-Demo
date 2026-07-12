@@ -418,7 +418,7 @@ Because `row + row_stride >= rows` after one row, the existing worker finishes a
 The dispatcher also waits until the selected core FIFO is empty before assigning another row to that core. This is a deliberate backpressure rule. A 1080p fast-escape workload can compute rows faster than UART can transmit them; without this guard, future rows can fill a per-core FIFO while the raster collector is waiting for an earlier row from that same core, creating a strict-raster deadlock. Requiring an empty per-core FIFO before row reuse keeps at most one completed row queued per core and preserves forward progress under UART backpressure.
 
 ```mermaid
-flowchart LR
+flowchart TB
     PARAM["Image parameters<br/>center, step, rows, cols, max_iter"] --> DYN["work_dispatch_dynamic_rows"]
     DONE["worker done pulses"] --> DYN
     DYN -->|"next row job"| C0["worker 0"]
@@ -521,7 +521,7 @@ baud_tick = carry_out(baud_sum)
 For 12 Mbaud at the current 200 MHz system clock, one UART bit is `200 MHz / 12 MHz = 16.666...` system clocks. The fractional accumulator emits a tick pattern that alternates 16- and 17-cycle bit intervals so the long-term average baudrate is close to the requested value. This removes the large baud error that an integer divider would introduce at rates that are not exact divisors of the system clock.
 
 ```mermaid
-flowchart LR
+flowchart TB
     CLK["200 MHz sys_clk"] --> ACC[["baud_acc register"]]
     INC["BAUD_INC<br/>round(BAUD * 2^ACC_WIDTH / CLK_HZ)"] --> ADD("33-bit add")
     ACC --> ADD

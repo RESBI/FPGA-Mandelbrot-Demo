@@ -64,7 +64,7 @@ The initial architecture therefore favored these priorities:
 This produced the first useful architecture:
 
 ```mermaid
-flowchart LR
+    flowchart TB
     PC[Python Host] --> RX[UART RX]
     RX --> CMD[cmd_parser]
     CMD --> CORE[mandelbrot_core]
@@ -155,7 +155,7 @@ The worst path was initially in `fp_add`, where decode, compare/select, alignmen
 The fix was not to change Mandelbrot math. It was to cut the long FP timing cones:
 
 ```mermaid
-flowchart LR
+    flowchart TB
     subgraph Add[fp_add evolution]
         A0[Input] --> A1[Decode/compare/select]
         A1 --> AR[Register]
@@ -491,7 +491,7 @@ BAUD_INC = round(BAUD * 2^ACC_WIDTH / CLK_HZ)
 At `BAUD=12000000`, one bit is `16.666...` system clocks in the current direct-200MHz default, so an integer divider cannot represent it accurately. The accumulator emits a repeating mix of 16- and 17-cycle intervals, preserving the average baudrate while keeping all logic in one clock domain. The older 100MHz reference emitted an 8/9-cycle mix for the same reason.
 
 ```mermaid
-flowchart LR
+    flowchart TB
     OLD["Integer CPB UART<br/>576000 stable baseline"] --> NCO["Fractional NCO UART<br/>BAUD_INC accumulator"]
     NCO --> GATE["160x120 --verify gate<br/>all tested bauds pass"]
     GATE --> FULL["Six 1080p scenes<br/>12 Mbaud default"]
@@ -1036,7 +1036,7 @@ This stage is important because it improved the whole-system benchmark without a
 The next major improvement should target routing pressure, protocol resilience, and transport bandwidth before adding more compute cores.
 
 ```mermaid
-flowchart LR
+    flowchart TB
     NOW[Current ZU4EV 12w/8ctx raster UART] --> FANOUT[Reduce parameter fanout and LUT pressure]
     FANOUT --> LINK[Higher bandwidth link]
     LINK --> PROTO[Coordinate-tagged rows/tiles]
@@ -1325,8 +1325,8 @@ The goal of this stage was to complete the data path: read pixels back from PS D
 The download path is the mirror of the write path:
 
 ```mermaid
-flowchart LR
-    PSDDR[PS DDR4] --> HP[AXI HP0 FPD]
+    flowchart TB
+    PSDDR[PS DDR4] --> HP[AXI HPC0 FPD]
     HP --> SmartConn[SmartConnect]
     SmartConn --> Reader[axi_ddr_reader]
     Reader --> BeatFIFO[16-entry beat FIFO]

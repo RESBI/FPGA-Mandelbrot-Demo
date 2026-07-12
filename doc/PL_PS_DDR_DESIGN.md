@@ -744,7 +744,7 @@ flowchart TB
 ### 7.2 Buffer 交替时序
 
 ```mermaid
-flowchart LR
+flowchart TB
     T0["tile 0<br/>wr→A<br/>DDR: idle"]
     T1["tile 1<br/>wr→B<br/>DDR: rd A"]
     T2["tile 2<br/>wr→A<br/>DDR: rd B"]
@@ -777,7 +777,7 @@ reg [0:0] retry_buf_id;    // 当前 retry 读 buffer (最近完成)
 ### 7.4 Tile 计算与缓存时序
 
 ```mermaid
-flowchart LR
+flowchart TB
     CALC["multicore 计算<br/>24x fx worker<br/>raster collector 输出像素"]
     FIFO2["output FIFO<br/>1024x16 (existing)"]
     CACHE2["tile_cache_db<br/>wr_en + wr_data → 活跃 buffer"]
@@ -1060,8 +1060,8 @@ LUT 增量 ~2.5K（98.1%，接近满但可容纳），BRAM 增量 ~26 块（46.1
 原设计使用 `tile_cache_db`（乒乓双缓冲 BRAM）缓存完整 compute tile。实现中发现双缓冲 2×245760×16-bit = 214 BRAM36 远超器件 128 BRAM 上限。因此调整为**流式架构**：
 
 ```mermaid
-flowchart LR
-    CORE["multicore<br/>22x fx worker"] -->|"fifo_wr"| FIFO["output FIFO<br/>1024x16"] -->|"rd_en/rd_data"| AXI["axi_ddr_writer<br/>64-bit AXI4 Master"] -->|"AXI HP0"| DDR["PS DDR4"]
+flowchart TB
+    CORE["multicore<br/>22x fx worker"] -->|"fifo_wr"| FIFO["output FIFO<br/>1024x16"] -->|"rd_en/rd_data"| AXI["axi_ddr_writer<br/>64-bit AXI4 Master"] -->|"AXI HPC0"| DDR["PS DDR4"]
 ```
 
 流式架构中，multicore 的 raster collector 将像素流式写入 output FIFO，axi_ddr_writer 同时从 FIFO 读取并写入 DDR。这实现了计算与 DDR 写入的自然并行，无需双缓冲 BRAM。AXI DDR 带宽（~500 MB/s）远超像素产出速率，FIFO 几乎不会填满。

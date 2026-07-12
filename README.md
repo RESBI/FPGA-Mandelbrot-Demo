@@ -152,7 +152,7 @@ Mandelbrot/
 ## Default DDR System Diagram
 
 ```mermaid
-flowchart LR
+flowchart TB
     PC[Host PC<br/>mandelbrot_host.py] -->|COMPUTE_TILE| RX[UART RX]
     RX --> Parser[cmd_parser_v2]
     Parser --> Core[mandelbrot_multicore<br/>22 fx64 workers]
@@ -170,32 +170,33 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    subgraph TOP[top.v]
-        CLK[sys_clk on E12<br/>200 MHz single-ended] --> BUFG[BUFG<br/>200 MHz sys_clk]
-        BUFG --> CE[fp_ce generator<br/>FP_CE_DIV=1]
-        RST[reset counter]
+    subgraph RAM[top_with_ram.v — DDR default]
+        CLK[sys_clk on E12<br/>200 MHz] --> BUFG[BUFG]
+        RST[pl_por reset]
 
-        URX[uart_rx<br/>12 Mbaud fractional NCO]
-        UTX[uart_tx<br/>12 Mbaud fractional NCO]
-        CMD[cmd_parser]
-        CORE["mandelbrot_multicore<br/>CFG_CORE_COUNT=24<br/>CFG_WORKER_MODE=1 fx<br/>CFG_FX_CONTEXTS=4"]
-        FIFO[queue<br/>CFG_OUTPUT_FIFO_DEPTH x 16-bit]
-        TXC[tx_ctrl]
+        URX[uart_rx<br/>12 Mbaud]
+        UTX[uart_tx<br/>12 Mbaud]
+        CMD[cmd_parser_v2<br/>COMPUTE_TILE / ENTER_DOWNLOAD]
+        CORE["mandelbrot_multicore<br/>22 workers, 4 ctx, fx64"]
+        FIFO[queue<br/>1024 x 16-bit]
+        AXIW[axi_ddr_writer<br/>AXI AW/W/B]
+        AXIR[axi_ddr_reader<br/>AXI AR/R]
+        TXC[tx_ctrl<br/>RT/TD/TE]
 
         URX --> CMD
         CMD --> CORE
-        CE --> CORE
         CORE --> FIFO
-        FIFO --> TXC
+        FIFO --> AXIW
+        AXIR --> TXC
         TXC --> UTX
+        CMD --> UTX
     end
 
     subgraph MC[Inside mandelbrot_multicore]
         CORE --> DISP[work_dispatch_dynamic_rows<br/>default SCHED_MODE=1]
-        CORE --> MERGE[raster_collect_dynamic_rows]
-        DISP --> WORKERS[24 x mandelbrot_core_worker_fx]
+        DISP --> WORKERS["22 x mandelbrot_core_worker_fx"]
         WORKERS --> CFIFO[per-core FIFOs]
-        CFIFO --> MERGE
+        CFIFO --> MERGE[raster_collect_dynamic_rows]
     end
 ```
 
@@ -205,8 +206,8 @@ flowchart TB
 
 | `WORKER_MODE` | Worker module | Datapath | Status |
 |---:|---|---|---|
-| `0` | `mandelbrot_core_worker_kctx` | FP64, `MUL_LAT=6`, `ADD_LAT=9` | Historical regression mode (12 workers, 8 contexts). |
-| `1` | `mandelbrot_core_worker_fx` | Fixed-point Q8.55, `MUL_LAT=4`, `ADD_LAT=2` | **Default board mode** (24 workers, 4 contexts). |
+| `0` | `mandelbrot_core_worker_kctx` | FP64, `MUL_LAT=6`, `ADD_LAT=9` | Historical, not in active builds. |
+| `1` | `mandelbrot_core_worker_fx` | Fixed-point Q8.55, `MUL_LAT=4`, `ADD_LAT=2` | **Active mode** (22 workers DDR / 24 UART, 4 contexts). |
 
 When `WORKER_MODE=1`, the `FX_CONTEXTS` generic controls the number of pixel contexts per fixed-point worker (default: 4).
 
@@ -229,7 +230,7 @@ The dynamic dispatcher also waits until the selected per-core FIFO is empty befo
 
 The default fixed-point worker (`mandelbrot_core_worker_fx`) uses Q8.55 format (8 integer bits for ±128 range, 55 fractional bits for 2^-55 resolution). Each worker maintains four pixel contexts and time-multiplexes one `fx_mul` (64×64 signed multiply, 3-stage pipeline, `MUL_LAT=4`) and one `fx_add` (64-bit signed add, 1-stage pipeline, `ADD_LAT=2`) across the active contexts.
 
-The fixed-point iteration follows the same algorithm as FP64:
+The fixed-point iteration follows the standard Mandelbrot algorithm:
 
 ```text
 z_re_next = z_re² - z_im² + c_re
@@ -243,7 +244,7 @@ Per-iteration dependency chain: `2·MUL_LAT + max(MUL_LAT, ADD_LAT) + 4·ADD_LAT
 
 The worker initializes row coordinates using a dedicated `fx_mul_int` module (16-bit integer × 64-bit fixed-point) to compute `c_re_start = center_re - half_w·step` and `row_c_im = c_im_top - row_start·step` without using the shared compute multiplier.
 
-The FP64 worker pipeline (historical, `mandelbrot_core_worker_kctx`) uses `MUL_LAT=6` and `ADD_LAT=9` with 8 contexts per worker. Its pipeline details are documented in [ARCHITECTURE.md](doc/ARCHITECTURE.md).
+The FP64 worker pipeline (`mandelbrot_core_worker_kctx`, `WORKER_MODE=0`) is retained in the RTL tree as historical code but is not part of any active build. Its pipeline details are documented in [ARCHITECTURE.md](doc/ARCHITECTURE.md).
 
 ## Requirements
 
@@ -633,6 +634,45 @@ python python\fx_precision_all_scenes.py
 ```
 
 ## Data Flow Details
+
+### DDR Mode (Default)
+
+```mermaid
+sequenceDiagram
+    participant Host as Python Host
+    participant RX as uart_rx
+    participant Parser as cmd_parser_v2
+    participant Core as mandelbrot_multicore
+    participant FIFO as queue
+    participant Writer as axi_ddr_writer
+    participant DDR as PS DDR4
+    participant Reader as axi_ddr_reader
+    participant TXC as tx_ctrl
+    participant TX as uart_tx
+
+    Host->>RX: COMPUTE_TILE (55 AA 10 ...)
+    RX->>Parser: frame bytes
+    Parser-->>Host: ACK
+    Parser->>Core: compute_start + parameters
+    Core->>FIFO: uint16 pixel stream
+    FIFO->>Writer: pixel read
+    Writer->>DDR: AXI AW/W/B burst
+    Writer-->>Parser: done_sticky
+    Parser-->>Host: TILE_DONE (checksum)
+    Note over Host: ... repeat for all tiles ...
+    Host->>RX: ENTER_DOWNLOAD (base, rows, cols)
+    RX->>Parser: frame
+    Parser-->>Host: ACK
+    Parser->>Reader: start download
+    Reader->>DDR: AXI AR/R burst
+    DDR->>Reader: 64-bit beats
+    Reader->>TXC: uint16 pixels
+    TXC->>TX: RT/TD/TE
+    TX->>Host: pixel stream
+    Host->>Host: verify checksums, render PNG
+```
+
+### UART Mode (Alternative)
 
 ```mermaid
 sequenceDiagram
