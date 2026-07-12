@@ -205,20 +205,21 @@ flowchart TB
         direction TB
         HPC0["S_AXI_HPC0_FPD<br/>64-bit read/write"]
         DDR["PS DDR4 Controller<br/>4 GiB"]
+        HPC0 --> DDR
     end
 
     subgraph DRAM["PS DDR4 SODIMM"]
         MEM["4 GiB DRAM<br/>pixel buffer"]
     end
 
-    CLI -->|"UART command"| URX
-    UTX -->|"UART response"| CLI
+    CLI -->|UART command| URX
+    UTX -->|UART response| CLI
 
-    AXIW -->|"AXI write burst"| HPC0
-    HPC0 -->|"AXI read burst"| AXIR
+    AXIW -->|AXI write burst| HPC0
+    HPC0 -->|AXI read burst| AXIR
 
-    DDR -->|"memory bus"| MEM
-    MEM -->|"read data"| DDR
+    DDR -->|memory bus| MEM
+    MEM -->|read data| DDR
 ```
 
 ## Worker Mode Selection
