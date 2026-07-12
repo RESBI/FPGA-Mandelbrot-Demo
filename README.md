@@ -178,7 +178,7 @@ flowchart TB
         direction TB
         URX["uart_rx<br/>12 Mbaud"]
         CMD["cmd_parser_v2<br/>COMPUTE_TILE / ENTER_DOWNLOAD<br/>ACK / TILE_DONE"]
-        CORE["mandelbrot_multicore<br/>22 workers, 4 ctx, fx64"]
+        CORE["mandelbrot_multicore"]
         FIFO["queue<br/>1024 x 16-bit"]
         AXIW["axi_ddr_writer<br/>AXI AW/W/B Master"]
         AXIR["axi_ddr_reader<br/>AXI AR/R Master"]
@@ -192,6 +192,23 @@ flowchart TB
         AXIR --> TXC
         TXC --> UTX
         CMD --> UTX
+    end
+
+    subgraph MC["Inside mandelbrot_multicore"]
+        DISP["work_dispatch_dynamic_rows<br/>SCHED_MODE=1"]
+        W0["worker 0<br/>mandelbrot_core_worker_fx<br/>4 ctx, fx_mul + fx_add"]
+        W1["worker 1"]
+        WN["... worker 21"]
+        CFIFO["per-core FIFOs"]
+        MERGE["raster_collect_dynamic_rows"]
+
+        DISP --> W0
+        DISP --> W1
+        DISP --> WN
+        W0 --> CFIFO
+        W1 --> CFIFO
+        WN --> CFIFO
+        CFIFO --> MERGE
     end
 
     subgraph PS["FPGA PS (Zynq UltraScale+)"]
